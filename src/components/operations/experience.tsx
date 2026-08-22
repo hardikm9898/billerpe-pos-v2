@@ -1,0 +1,547 @@
+import {
+  Download,
+  Grid2X2,
+  Keyboard,
+  LayoutGrid,
+  List,
+  Plus,
+  QrCode,
+  Rows3,
+  Search,
+  UserRound,
+} from "lucide-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+
+import {
+  DataTable,
+  EmptyState,
+  SectionCard,
+  StatCard,
+  StatusBadge,
+  TablePager,
+  usePagedRows,
+} from "@/components/kit";
+import { Notice, Toolbar } from "@/components/operations/shared";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
+import { RESTAURANT } from "@/mock/data";
+import { useStore } from "@/mock/store";
+import type { Customer, OrderType } from "@/mock/types";
+
+/* =============== Display =============== */
+
+export function DisplaySection() {
+  const store = useStore();
+  const mode = store.displayMode;
+
+  return (
+    <div className="space-y-4">
+      <Notice tone="info" title="Display decides the whole shape of the billing screen">
+        Keyboard mode is built for fast typists using item codes. Touch mode shows a tappable item
+        grid — and only touch mode is affected by the Menu Setting screen.
+      </Notice>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {[
+          {
+            key: "Keyboard" as const,
+            icon: Keyboard,
+            title: "Keyboard billing",
+            desc: "Search-and-type entry. Fastest for high-volume counters with trained cashiers.",
+            bullets: [
+              "Item code search bar",
+              "Keyboard shortcuts for qty and discount",
+              "Menu Setting has no effect",
+            ],
+          },
+          {
+            key: "Touch" as const,
+            icon: Grid2X2,
+            title: "Touch billing",
+            desc: "Category tabs with a tappable item grid. Better for tablets and new staff.",
+            bullets: [
+              "Category tabs and item tiles",
+              "Tap to add, long-press for variants",
+              "Menu Setting controls images",
+            ],
+          },
+        ].map((opt) => (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => store.setDisplayMode(opt.key)}
+            className={cn(
+              "rounded-2xl border p-5 text-left transition-all",
+              mode === opt.key
+                ? "border-primary bg-primary-soft/40 shadow-card"
+                : "border-border bg-surface hover:border-primary/40",
+            )}
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span
+                className={cn(
+                  "grid size-10 place-items-center rounded-xl",
+                  mode === opt.key
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-surface-muted text-muted-foreground",
+                )}
+              >
+                <opt.icon className="size-5" />
+              </span>
+              {mode === opt.key ? <StatusBadge status="Active" /> : null}
+            </div>
+            <p className="mt-3 text-base font-semibold">{opt.title}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{opt.desc}</p>
+            <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
+              {opt.bullets.map((b) => (
+                <li key={b}>· {b}</li>
+              ))}
+            </ul>
+          </button>
+        ))}
+      </div>
+
+      <SectionCard title="Preview" bodyClassName="p-3 sm:p-4">
+        {mode === "Keyboard" ? (
+          <div className="rounded-xl border border-border bg-surface-muted p-4">
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-muted-foreground">
+              <Search className="size-4" /> Type item code or name…
+            </div>
+            <div className="mt-3 space-y-1.5 text-xs text-muted-foreground">
+              <div className="rounded-lg bg-surface px-3 py-2">101 · Gujarati Thali — ₹280</div>
+              <div className="rounded-lg bg-surface px-3 py-2">204 · Paneer Tikka — ₹320</div>
+            </div>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {["Gujarati Thali", "Paneer Tikka", "Butter Naan", "Masala Chai"].map((n) => (
+              <div key={n} className="rounded-xl border border-border bg-surface p-2 text-center">
+                {store.menuImages ? (
+                  <div className="mb-2 h-16 rounded-lg bg-surface-muted" />
+                ) : null}
+                <p className="truncate text-xs font-medium">{n}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="Keyboard-only billing"
+        description="For counters that never use a floor plan — pickup-only or delivery-only setups."
+        bodyClassName="p-3 sm:p-4"
+      >
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-border px-3 py-2.5">
+          <div>
+            <p className="text-sm font-medium">Only use Keyboard Billing</p>
+            <p className="text-xs text-muted-foreground">
+              Hides Biller (Table Grid) from the sidebar. Keyboard Billing gets its own table picker
+              and a "New order" action, so staff never need the floor plan.
+            </p>
+          </div>
+          <Switch checked={store.keyboardOnly} onCheckedChange={store.setKeyboardOnly} />
+        </div>
+
+        <div className="mt-3 space-y-1.5">
+          <Label className="text-xs uppercase tracking-wide text-muted-foreground">
+            Default order type for new orders
+          </Label>
+          <Select
+            value={store.defaultOrderType}
+            onValueChange={(v) => store.setDefaultOrderType(v as OrderType)}
+          >
+            <SelectTrigger className="sm:w-56">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="Dine In">Dine In</SelectItem>
+              <SelectItem value="Pickup">Pickup</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Used by Keyboard Billing's "New order" action and by any counter that doesn't pick a
+            type explicitly.
+          </p>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Table Grid Layout"
+        description="Clients settle on different floor-view habits — pick the one your staff already knows"
+        bodyClassName="p-3 sm:p-4"
+      >
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[
+            {
+              key: "Tabs" as const,
+              icon: LayoutGrid,
+              title: "Tabs",
+              desc: "Section tabs at the top switch a single table grid below.",
+            },
+            {
+              key: "Sections" as const,
+              icon: Rows3,
+              title: "Sections",
+              desc: "Every section's name and tables are stacked and visible at once.",
+            },
+          ].map((opt) => (
+            <button
+              key={opt.key}
+              type="button"
+              onClick={() => store.setTableGridView(opt.key)}
+              className={cn(
+                "rounded-xl border p-4 text-left transition-all",
+                store.tableGridView === opt.key
+                  ? "border-primary bg-primary-soft/40 shadow-card"
+                  : "border-border bg-surface hover:border-primary/40",
+              )}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <span
+                  className={cn(
+                    "grid size-9 place-items-center rounded-lg",
+                    store.tableGridView === opt.key
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-surface-muted text-muted-foreground",
+                  )}
+                >
+                  <opt.icon className="size-4" />
+                </span>
+                {store.tableGridView === opt.key ? <StatusBadge status="Active" /> : null}
+              </div>
+              <p className="mt-2.5 text-sm font-semibold">{opt.title}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{opt.desc}</p>
+            </button>
+          ))}
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+/* =============== Menu setting =============== */
+
+export function MenuSettingSection() {
+  const store = useStore();
+  const touch = store.displayMode === "Touch";
+
+  return (
+    <div className="space-y-4">
+      {touch ? (
+        <Notice tone="success" title="Touch billing is active, so this setting applies" />
+      ) : (
+        <Notice tone="warning" title="This terminal is in Keyboard billing mode">
+          Menu presentation only changes the touch item grid. Switch Display to Touch for this
+          setting to have any effect.
+        </Notice>
+      )}
+
+      <SectionCard title="Item grid presentation" bodyClassName="p-3 sm:p-4">
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-3">
+          <div>
+            <p className="text-sm font-medium">Show item images</p>
+            <p className="text-xs text-muted-foreground">
+              Images help new staff; the text list fits far more items per screen.
+            </p>
+          </div>
+          <Switch checked={store.menuImages} onCheckedChange={store.setMenuImages} />
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <div
+            className={cn(
+              "rounded-xl border p-3",
+              store.menuImages ? "border-primary" : "border-border",
+            )}
+          >
+            <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <Grid2X2 className="size-3.5" /> Image grid
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="rounded-lg border border-border p-1.5">
+                  <div className="mb-1 h-10 rounded bg-surface-muted" />
+                  <div className="h-2 w-3/4 rounded bg-surface-muted" />
+                </div>
+              ))}
+            </div>
+          </div>
+          <div
+            className={cn(
+              "rounded-xl border p-3",
+              !store.menuImages ? "border-primary" : "border-border",
+            )}
+          >
+            <p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              <List className="size-3.5" /> Compact list
+            </p>
+            <div className="space-y-1.5">
+              {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+                <div key={i} className="h-5 rounded bg-surface-muted" />
+              ))}
+            </div>
+          </div>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}
+
+/* =============== QR code =============== */
+
+export function QrSection() {
+  const store = useStore();
+  const url = `https://menu.billerpe.app/${RESTAURANT.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+  return (
+    <div className="space-y-4">
+      <Notice tone="info" title="This QR opens the digital menu, not a payment page">
+        Guests scan it to browse the live menu. Payment QR codes are configured on the invoice
+        footer in Invoice Format.
+      </Notice>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <SectionCard title="Digital menu link" bodyClassName="p-3 sm:p-4">
+          <div className="space-y-1.5">
+            <Label>Public menu URL</Label>
+            <Input readOnly value={url} className="font-mono text-xs" />
+          </div>
+          <p className="mt-3 text-sm text-muted-foreground">
+            The menu reflects whatever is active in the Menu module — categories, items, variants
+            and addons — with no separate publishing step.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button onClick={() => toast.success("QR downloaded as PNG")}>
+              <Download className="size-4" /> Download QR
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                void navigator.clipboard?.writeText(url);
+                toast.success("Menu link copied");
+              }}
+            >
+              Copy link
+            </Button>
+          </div>
+          <p className="mt-4 text-xs text-muted-foreground">
+            {store.menuCategories.filter((c) => c.active).length} active categories ·{" "}
+            {store.menuItems.length} items published.
+          </p>
+        </SectionCard>
+
+        <SectionCard title="Preview" bodyClassName="p-3 sm:p-4">
+          <div className="mx-auto grid aspect-square w-full max-w-[220px] place-items-center rounded-2xl border border-border bg-surface">
+            <QrCode className="size-32 text-foreground" />
+          </div>
+          <p className="mt-3 text-center text-xs text-muted-foreground">
+            Scan for {RESTAURANT.name}
+          </p>
+        </SectionCard>
+      </div>
+    </div>
+  );
+}
+
+/* =============== Customer data =============== */
+
+const emptyCustomer = (): Customer => ({
+  id: "",
+  name: "",
+  phone: "",
+  orders: 0,
+  lastVisit: "—",
+  active: true,
+});
+
+export function CustomerSection() {
+  const store = useStore();
+  const [q, setQ] = useState("");
+  const [draft, setDraft] = useState<Customer | null>(null);
+
+  const rows = useMemo(() => {
+    const t = q.trim().toLowerCase();
+    if (!t) return store.customers;
+    return store.customers.filter((c) => c.name.toLowerCase().includes(t) || c.phone.includes(t));
+  }, [q, store.customers]);
+  const paged = usePagedRows(rows, 10);
+
+  return (
+    <div className="space-y-4">
+      <Notice tone="info" title="Typing a mobile number at billing autofills from this list">
+        Name, GSTIN and address flow straight onto the invoice, so keeping GSTIN accurate matters
+        for corporate guests.
+      </Notice>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <StatCard label="Customers" value={String(store.customers.length)} tone="primary" />
+        <StatCard
+          label="With GSTIN"
+          value={String(store.customers.filter((c) => c.gstin).length)}
+        />
+        <StatCard
+          label="Repeat guests"
+          value={String(store.customers.filter((c) => c.orders > 1).length)}
+        />
+      </div>
+
+      <SectionCard title="Customer master" bodyClassName="p-3 sm:p-4">
+        <Toolbar
+          right={
+            <Button size="sm" onClick={() => setDraft(emptyCustomer())}>
+              <Plus className="size-4" /> Add customer
+            </Button>
+          }
+        >
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              className="pl-8"
+              placeholder="Search name or mobile"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+        </Toolbar>
+
+        <DataTable
+          rows={paged.pageRows}
+          keyFn={(c) => c.id}
+          empty={
+            <EmptyState
+              icon={UserRound}
+              title="No customers"
+              description="No guest matches this search."
+            />
+          }
+          columns={[
+            {
+              key: "name",
+              header: "Customer",
+              cell: (c) => <span className="font-medium">{c.name}</span>,
+            },
+            {
+              key: "phone",
+              header: "Mobile",
+              cell: (c) => <span className="font-mono text-xs">{c.phone}</span>,
+            },
+            {
+              key: "gstin",
+              header: "GSTIN",
+              cell: (c) => c.gstin ?? <span className="text-muted-foreground">—</span>,
+            },
+            {
+              key: "address",
+              header: "Address",
+              cell: (c) => (
+                <span className="line-clamp-1 text-muted-foreground">{c.address ?? "—"}</span>
+              ),
+            },
+            { key: "orders", header: "Orders", cell: (c) => c.orders },
+            { key: "last", header: "Last visit", cell: (c) => c.lastVisit },
+            {
+              key: "active",
+              header: "Autofill",
+              cell: (c) => (
+                <Switch
+                  checked={c.active !== false}
+                  onCheckedChange={() => store.toggleCustomer(c.id)}
+                />
+              ),
+            },
+            {
+              key: "act",
+              header: "",
+              cell: (c) => (
+                <Button size="sm" variant="outline" onClick={() => setDraft(c)}>
+                  Edit
+                </Button>
+              ),
+            },
+          ]}
+          mobileCard={(c) => (
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-medium">{c.name}</p>
+                <p className="font-mono text-xs text-muted-foreground">{c.phone}</p>
+              </div>
+              <StatusBadge status={c.active === false ? "Inactive" : "Active"} />
+            </div>
+          )}
+        />
+        <TablePager {...paged} onPageChange={paged.setPage} />
+      </SectionCard>
+
+      <Dialog open={!!draft} onOpenChange={(o) => !o && setDraft(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{draft?.id ? "Edit customer" : "Add customer"}</DialogTitle>
+          </DialogHeader>
+          {draft ? (
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label>Name</Label>
+                <Input
+                  value={draft.name}
+                  onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Mobile</Label>
+                <Input
+                  value={draft.phone}
+                  onChange={(e) => setDraft({ ...draft, phone: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>GSTIN (optional)</Label>
+                <Input
+                  value={draft.gstin ?? ""}
+                  onChange={(e) => setDraft({ ...draft, gstin: e.target.value })}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>Address (optional)</Label>
+                <Input
+                  value={draft.address ?? ""}
+                  onChange={(e) => setDraft({ ...draft, address: e.target.value })}
+                />
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDraft(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (draft) store.upsertCustomer(draft);
+                setDraft(null);
+              }}
+            >
+              Save customer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
