@@ -29,7 +29,9 @@ import {
   expenseHeadApi,
   expenseApi,
   orderHistoryApi,
+  promoCodeApi,
   type RawOrderDetail,
+  type RawPromoCode,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
@@ -528,6 +530,7 @@ interface Ctx extends State {
   loadExpenseHeadsFromServer: () => Promise<void>;
   loadExpensesFromServer: () => Promise<void>;
   loadOrderHistoryFromServer: () => Promise<void>;
+  loadPromoCodesFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -1058,6 +1061,17 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       discount: detail.totalDiscount,
       serviceCharge: detail.service_charge,
     },
+  };
+}
+
+function mapRawPromoCode(p: RawPromoCode): PromoCode {
+  return {
+    id: `promo-${p.id}`,
+    name: p.promo_code_name,
+    code: p.promo_code,
+    type: p.discount_type === "pr" ? "percent" : "fixed",
+    value: p.discount_value,
+    active: p.status,
   };
 }
 
@@ -3508,6 +3522,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    loadPromoCodesFromServer: async () => {
+      try {
+        const { promoCodes } = await promoCodeApi.getAll();
+        patch((p) => ({ ...p, promoCodes: promoCodes.map(mapRawPromoCode) }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load promo codes from server",
+        );
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -4764,19 +4788,59 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       );
     },
     upsertPromo: (promo) => {
-      patch((p) => ({
-        ...p,
-        promoCodes: p.promoCodes.some((x) => x.id === promo.id)
-          ? p.promoCodes.map((x) => (x.id === promo.id ? promo : x))
-          : [...p.promoCodes, { ...promo, id: promo.id || uid("pr") }],
-      }));
-      toast.success("Promo code saved", { description: promo.code });
+      if (!promo.name.trim() || !promo.code.trim()) {
+        toast.error("Enter a name and code");
+        return;
+      }
+      const backendId = promo.id.startsWith("promo-")
+        ? Number(promo.id.replace("promo-", ""))
+        : undefined;
+      const payload = {
+        promo_code_name: promo.name,
+        promo_code: promo.code,
+        discount_type: (promo.type === "percent" ? "pr" : "fix") as "pr" | "fix",
+        discount_value: promo.value,
+      };
+      const run = async () => {
+        try {
+          if (!backendId) {
+            await promoCodeApi.create(payload);
+          } else {
+            await promoCodeApi.update({ ...payload, id: backendId, status: promo.active });
+          }
+          await value.loadPromoCodesFromServer();
+          toast.success("Promo code saved", { description: promo.code });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save promo code");
+        }
+      };
+      void run();
     },
-    togglePromo: (id) =>
-      patch((p) => ({
-        ...p,
-        promoCodes: p.promoCodes.map((x) => (x.id === id ? { ...x, active: !x.active } : x)),
-      })),
+    togglePromo: (id) => {
+      const promo = s.promoCodes.find((x) => x.id === id);
+      if (!promo) return;
+      const backendId = id.startsWith("promo-") ? Number(id.replace("promo-", "")) : undefined;
+      if (!backendId) return;
+      // Deactivating here is one-way (see promoCodeApi's comment) - once
+      // this succeeds the code drops out of every future load for good,
+      // with no way back through this app.
+      const run = async () => {
+        try {
+          await promoCodeApi.update({
+            id: backendId,
+            promo_code_name: promo.name,
+            promo_code: promo.code,
+            discount_type: promo.type === "percent" ? "pr" : "fix",
+            discount_value: promo.value,
+            status: !promo.active,
+          });
+          await value.loadPromoCodesFromServer();
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not update promo code");
+        }
+      };
+      void run();
+    },
     upsertKitchen: (kitchen) => {
       const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
         "Dine-in": "dinin",

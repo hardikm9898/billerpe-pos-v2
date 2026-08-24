@@ -1388,3 +1388,44 @@ export const reportApi = {
     return all;
   },
 };
+
+export type RawPromoCode = {
+  id: number;
+  promo_code_name: string;
+  promo_code: string;
+  discount_type: "fix" | "pr";
+  discount_value: number;
+  status: boolean;
+};
+
+// controller/discountPromocode.js. getAllPromoCode/createPromoCode/
+// updatePromoCode all filter status:true, with no counterpart query
+// anywhere in the controller that ever looks at status:false - so there
+// is no way to list, or therefore reactivate, a promo code once
+// deactivated. Deactivating one through this app is a one-way action,
+// not a reversible toggle, despite the Switch in PromoSection implying
+// otherwise; once it succeeds, the code disappears from every future
+// load and there is no id left in this app's state to reactivate it by.
+// Also: the duplicate-code check in both createPromoCode and
+// updatePromoCode queries PromoCode with no hotel_id filter at all
+// (`findOne({ where: { promo_code, status: true } })`) - a code already
+// in use by a completely different hotel blocks creating the same code
+// here, a real cross-tenant bug on the backend, confirmed by reading the
+// query, not something to work around client-side.
+export const promoCodeApi = {
+  getAll: () => apiGet<{ promoCodes: RawPromoCode[] }>("/promocodes/getAll"),
+  create: (params: {
+    promo_code_name: string;
+    promo_code: string;
+    discount_type: "fix" | "pr";
+    discount_value: number;
+  }) => apiPost<{ promoCodes: RawPromoCode[] }>("/promocodes/create", params),
+  update: (params: {
+    id: number;
+    promo_code_name: string;
+    promo_code: string;
+    discount_type: "fix" | "pr";
+    discount_value: number;
+    status: boolean;
+  }) => apiPut<{ promoCodes: RawPromoCode[] }>("/promocodes/update", params),
+};
