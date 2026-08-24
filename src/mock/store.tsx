@@ -13,6 +13,8 @@ import {
   userApi,
   orderApi,
   hotelApi,
+  dueApi,
+  type RawDueOrder,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -461,6 +463,7 @@ interface Ctx extends State {
   upsertUser: (u: User) => void;
   loadUsersFromServer: () => Promise<void>;
   loadInvoiceFormatFromServer: () => Promise<void>;
+  loadDueBillsFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -691,6 +694,24 @@ function mapRawUser(u: RawHotelUser): User {
       }
       return Object.keys(modules).length ? { modules } : undefined;
     })(),
+  };
+}
+
+function mapRawDueOrder(o: RawDueOrder): DueBill {
+  const created = new Date(o.createdAt);
+  const daysAgo = Math.max(0, Math.floor((Date.now() - created.getTime()) / 86_400_000));
+  const dd = `${created.getDate()}`.padStart(2, "0");
+  const mm = `${created.getMonth() + 1}`.padStart(2, "0");
+  return {
+    id: `due-${o.id}`,
+    backendOrderId: o.id,
+    billNo: `#${o.bill_no}`,
+    customerName: o.hms_user_master?.name || "Guest",
+    mobile: o.hms_user_master?.number || "",
+    date: `${dd}/${mm}/${created.getFullYear()}`,
+    daysAgo,
+    amount: o.due,
+    status: "Due",
   };
 }
 
@@ -1757,6 +1778,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                     daysAgo: 0,
                     amount: duePortion,
                     status: "Due" as const,
+                    // Tagged immediately so this bill is settleable from
+                    // the Due Bills screen right away, without waiting for
+                    // the next loadDueBillsFromServer to pick it up.
+                    backendOrderId: o.backendId,
                   },
                   ...p.dueBills,
                 ]
@@ -2640,6 +2665,31 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(
           err instanceof ApiError ? err.message : "Could not load billing settings from server",
         );
+      }
+    },
+
+    // getDueOrders only ever returns orders with due > 0 - there is no
+    // backend endpoint to list settlement history, so "Settled" bills
+    // this session already knows about (from a successful settleDueBills
+    // call) are kept rather than wiped out by this replacing the "Due"
+    // ones. That history doesn't survive a real reload/reopen of the app,
+    // same as any other purely-local state would - not a live sync.
+    loadDueBillsFromServer: async () => {
+      try {
+        const { dueOrders } = await dueApi.getDueOrders("2000-01-01", "2100-01-01");
+        const fresh = dueOrders.orders.map(mapRawDueOrder);
+        patch((p) => ({
+          ...p,
+          dueBills: [
+            ...fresh,
+            ...p.dueBills.filter(
+              (b) =>
+                b.status === "Settled" && !fresh.some((f) => f.backendOrderId === b.backendOrderId),
+            ),
+          ],
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load due bills from server");
       }
     },
     upsertUser: (u) => {
@@ -3558,39 +3608,107 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         customers: p.customers.map((c) => (c.id === id ? { ...c, active: c.active === false } : c)),
       })),
     settleDueBills: (ids, payments) => {
-      const mode = payments.length > 1 ? "Split" : (payments[0]?.mode ?? "Cash");
+      if (guardBlocked()) return;
+      const known = new Set(["Cash", "UPI", "Card"]);
+      const unknownMode = payments.find((p) => !known.has(p.mode));
+      if (unknownMode) {
+        toast.error(`"${unknownMode.mode}" isn't a payment mode the backend supports here`, {
+          description: "Only Cash, UPI, and Card can be recorded against a due bill.",
+        });
+        return;
+      }
+      const bills = ids
+        .map((id) => s.dueBills.find((b) => b.id === id))
+        .filter((b): b is DueBill => !!b && b.status === "Due");
+      if (!bills.length) return;
+      const missingBackendId = bills.find((b) => !b.backendOrderId);
+      if (missingBackendId) {
+        toast.error("This due bill has no backend record to settle");
+        return;
+      }
+      // allSettleDue (the only bulk endpoint) always settles each order's
+      // FULL due in one mode - there's no way to send a per-mode split
+      // across multiple bills in a single call, and no reasonable way to
+      // guess how a merchant meant to divide it. A split across modes
+      // only works one bill at a time (see the single-bill branch below,
+      // which settleDue's own partial-`receive` support handles cleanly).
+      if (bills.length > 1 && payments.length > 1) {
+        toast.error("Can't split across payment modes when settling multiple bills at once", {
+          description: "Settle them one at a time to use more than one payment mode.",
+        });
+        return;
+      }
+
+      const mode = payments.length > 1 ? "Split" : payments[0].mode;
       const cashPortion = payments
         .filter((p) => p.mode === "Cash")
         .reduce((sum, p) => sum + p.amount, 0);
-      patch((p) => ({
-        ...p,
-        dueBills: p.dueBills.map((b) =>
-          ids.includes(b.id) && b.status === "Due"
-            ? { ...b, status: "Settled", settledMode: mode }
-            : b,
-        ),
-        cashSessions: p.cashSessions.map((cs) =>
-          cs.status === "Open" && cashPortion > 0
-            ? {
-                ...cs,
-                movements: [
-                  ...cs.movements,
-                  {
-                    id: uid("cm"),
-                    type: "Settlement" as const,
-                    amount: cashPortion,
-                    reason: `Due settlement · ${ids.length} bill(s)`,
-                    at: nowStamp(),
-                    by: currentUser?.name ?? "Taj",
-                  },
-                ],
-              }
-            : cs,
-        ),
-      }));
-      toast.success(ids.length > 1 ? `${ids.length} bills settled` : "Bill settled", {
-        description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
-      });
+      const modeMap: Record<string, "cash" | "upi" | "card"> = {
+        Cash: "cash",
+        UPI: "upi",
+        Card: "card",
+      };
+
+      const run = async () => {
+        try {
+          if (bills.length === 1) {
+            // Sequential partial settleDue calls, one per split entry -
+            // confirmed live this correctly decrements the order's due
+            // each call and records a separate audit row per mode, i.e. a
+            // real split payment, not an approximation.
+            for (const payment of payments) {
+              await dueApi.settleDue({
+                id: bills[0].backendOrderId!,
+                mode: modeMap[payment.mode],
+                receive: payment.amount,
+              });
+            }
+          } else {
+            await dueApi.settleAllDue(
+              bills.map((b) => b.backendOrderId!),
+              modeMap[payments[0].mode],
+            );
+          }
+          patch((p) => ({
+            ...p,
+            dueBills: p.dueBills.map((b) =>
+              ids.includes(b.id) && b.status === "Due"
+                ? { ...b, status: "Settled" as const, settledMode: mode }
+                : b,
+            ),
+            cashSessions: p.cashSessions.map((cs) =>
+              cs.status === "Open" && cashPortion > 0
+                ? {
+                    ...cs,
+                    movements: [
+                      ...cs.movements,
+                      {
+                        id: uid("cm"),
+                        type: "Settlement" as const,
+                        amount: cashPortion,
+                        reason: `Due settlement · ${ids.length} bill(s)`,
+                        at: nowStamp(),
+                        by: currentUser?.name ?? "Taj",
+                      },
+                    ],
+                  }
+                : cs,
+            ),
+          }));
+          log(
+            "Due Settled",
+            bills.map((b) => b.billNo).join(", "),
+            "Due",
+            `${mode} · ₹${payments.reduce((sum, p) => sum + p.amount, 0)}`,
+          );
+          toast.success(bills.length > 1 ? `${bills.length} bills settled` : "Bill settled", {
+            description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not settle due bill(s)");
+        }
+      };
+      void run();
     },
     setMaxOfflineDays: (days) => {
       patch((p) => ({ ...p, maxOfflineDays: days }));

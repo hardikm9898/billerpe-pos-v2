@@ -665,6 +665,10 @@ export interface DueBill {
   amount: number;
   status: DueBillStatus;
   settledMode?: string;
+  /** uat-backend's hms_order_msts.id this due bill was loaded from -
+   * undefined for bills created before this was wired to the real
+   * backend. Settling requires this; there's nothing to call without it. */
+  backendOrderId?: number;
 }
 
 export type TableGridView = "Tabs" | "Sections";

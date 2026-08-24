@@ -446,3 +446,46 @@ export const kitchenApi = {
   getKitchens: () =>
     apiGet<{ kitchen: { id: number; kitchen_name: string }[] }>("/kitchen/kitchens"),
 };
+
+export type RawDueOrder = {
+  id: number;
+  bill_no: string;
+  due: number;
+  createdAt: string;
+  hms_user_master?: { name: string; number: string } | null;
+};
+
+// getDueOrders has two branches (controller/order.js): search-by-bill_no
+// or search-by-mobile-number (neither wired here), and a date-range
+// default that requires real startDate/endDate - passing them undefined
+// runs Op.between [undefined, undefined] server-side and returns nothing
+// useful, confirmed live. Only the date-range default is used here; the
+// app's own client-side Today/7-days/30-days/All-time filter runs on top
+// of one wide fetch rather than re-querying per range.
+export const dueApi = {
+  getDueOrders: (startDate: string, endDate: string) =>
+    apiPost<{ dueOrders: { totalDuePayment: number | null; orders: RawDueOrder[] } }>(
+      "/getDueOrders",
+      { startDate, endDate, searchData: {} },
+    ),
+
+  // mode is lowercase ("cash"|"upi"|"card") - confirmed live, unlike every
+  // other payment-mode field in this app (which is capitalized: "Cash").
+  // receive can be less than the order's full due (a real partial
+  // payment) - confirmed live that calling this twice with different
+  // modes correctly splits the payment: due decremented each time, two
+  // separate hms_due_payment_receives audit rows, one per mode. `amount`
+  // is destructured server-side but never actually used - sent anyway to
+  // match the shape rather than rely on that being permanent.
+  settleDue: (params: { id: number; mode: "cash" | "upi" | "card"; receive: number }) =>
+    apiPost<{ dueOrders: unknown }>("/settleDue", {
+      data: { id: params.id, amount: params.receive, mode: params.mode, receive: params.receive },
+      searchData: {},
+    }),
+
+  // Unlike settleDue, always settles each order's FULL remaining due, in
+  // one payment mode, for every id in idArray - no partial amounts, no
+  // per-bill mode. Used for the "Settle selected" bulk action.
+  settleAllDue: (idArray: number[], mode: "cash" | "upi" | "card") =>
+    apiPost<{ message?: string }>("/allSettleDue", { idArray, mode }),
+};
