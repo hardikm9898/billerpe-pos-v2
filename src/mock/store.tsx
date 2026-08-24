@@ -28,6 +28,8 @@ import {
   recipeApi,
   expenseHeadApi,
   expenseApi,
+  orderHistoryApi,
+  type RawOrderDetail,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
@@ -135,6 +137,12 @@ interface State {
   tables: RestaurantTable[];
   tableCategories: TableCategory[];
   orders: Order[];
+  /** Real settled-order history synced from the backend (last ~90 days),
+   * separate from `orders` - which doubles as the live working set for
+   * order-taking (held/running carts being built) and must never be
+   * replaced wholesale by a server reload. Dashboard/Reports read this
+   * for historical sales figures instead of `orders`. */
+  orderHistory: Order[];
   kots: Kot[];
   menuItems: MenuItem[];
   menuCategories: MenuCategory[];
@@ -201,6 +209,7 @@ const initialState: State = {
   tables: seed.tables,
   tableCategories: seed.tableCategories,
   orders: [...seed.liveOrders, ...seed.historyOrders],
+  orderHistory: [],
   kots: seed.kots,
   menuItems: seed.menuItems,
   menuCategories: seed.menuCategories,
@@ -518,6 +527,7 @@ interface Ctx extends State {
   loadRecipesFromServer: () => Promise<void>;
   loadExpenseHeadsFromServer: () => Promise<void>;
   loadExpensesFromServer: () => Promise<void>;
+  loadOrderHistoryFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -971,6 +981,83 @@ function mapRawExpenseEntry(e: RawExpenseEntry): Expense {
     // No user info comes back on this endpoint at all - see expenseApi's
     // comment on why.
     createdBy: "Staff",
+  };
+}
+
+// Matches nowStamp()'s "H:MM am/pm" suffix convention (see mock/format.ts)
+// so the Dashboard's hourly-flow regex, which only looks for that suffix
+// anywhere in the string, keeps working against synced history the same
+// way it does against locally-created orders.
+function formatOrderTimestamp(iso: string, businessDateDMY: string): string {
+  const d = new Date(iso);
+  const hh = d.getHours() % 12 || 12;
+  const mm = `${d.getMinutes()}`.padStart(2, "0");
+  const ap = d.getHours() >= 12 ? "pm" : "am";
+  return `${businessDateDMY} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
+}
+
+function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Order {
+  const [y, m, d] = detail.business_date.split("-");
+  const businessDate = `${d}/${m}/${y}`;
+  const lines: OrderLine[] = detail.hms_orderDetails.map((l) => {
+    let addons: { name: string; price: number }[] = [];
+    try {
+      const parsed: unknown = JSON.parse(l.addons || "[]");
+      if (Array.isArray(parsed)) addons = parsed as { name: string; price: number }[];
+    } catch {
+      addons = [];
+    }
+    return {
+      id: `ol-${l.id}`,
+      itemId: String(l.MenuId),
+      name: l.hms_menu_mst?.item_name ?? "Unknown item",
+      qty: l.qty,
+      price: l.price,
+      variant: l.variant_name ?? undefined,
+      addons: addons.length ? addons : undefined,
+      kotRound: 1,
+    };
+  });
+  const payments: PaymentSplit[] = (
+    [
+      { mode: "Cash" as const, amount: detail.cash },
+      { mode: "UPI" as const, amount: detail.upi },
+      { mode: "Card" as const, amount: detail.card },
+      { mode: "Due" as const, amount: detail.due },
+    ] satisfies PaymentSplit[]
+  ).filter((p) => p.amount > 0);
+  return {
+    id: `oh-${detail.id}`,
+    orderNo: Number(detail.bill_no) || detail.id,
+    type: detail.order_type === "dinin" ? "Dine In" : "Pickup",
+    tableLabel: detail.hms_table_mst?.table_name ?? "—",
+    // Not tracked anywhere on the backend Order model - no guest-count
+    // column exists to sync, so history entries always show 0 covers
+    // rather than a fabricated guess.
+    guests: 0,
+    status: "Settled",
+    lines,
+    kotRounds: 1,
+    customerName: detail.hms_user_master?.name || undefined,
+    customerPhone: detail.hms_user_master?.number || undefined,
+    discount:
+      detail.totalDiscount > 0
+        ? { label: detail.discount_reason || "Discount", amount: detail.totalDiscount }
+        : undefined,
+    payments,
+    businessDate,
+    createdAt: formatOrderTimestamp(detail.createdAt, businessDate),
+    settledAt: formatOrderTimestamp(detail.updatedAt, businessDate),
+    createdBy: staffName,
+    itemised: lines.length > 0,
+    fallbackTotal: lines.length ? undefined : detail.grandAmount,
+    backendId: detail.id,
+    backendTotals: {
+      grand: detail.grandAmount,
+      tax: detail.gst,
+      discount: detail.totalDiscount,
+      serviceCharge: detail.service_charge,
+    },
   };
 }
 
@@ -3381,6 +3468,44 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         patch((p) => ({ ...p, expenses: entry.map(mapRawExpenseEntry) }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load expenses from server");
+      }
+    },
+    loadOrderHistoryFromServer: async () => {
+      try {
+        const { order: headers } = await orderHistoryApi.getAllHeaders();
+        // Real settled orders only - unsettled ones are already visible
+        // live via `orders`, and reconstructing this app's full
+        // Held/Running/Bill Generated workflow state for them isn't
+        // needed for the historical reporting this feeds. `business_date`
+        // is real-world dated, unlike this app's frozen local "today" -
+        // no window bound exists on the backend side of this endpoint, so
+        // it's applied here, capped at 300 orders as a sanity bound (see
+        // orderHistoryApi's own comment on why there's no cheaper way to
+        // get this).
+        const windowStart = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+        const inWindow = headers
+          .filter((h) => h.payment === "success" && h.business_date >= windowStart)
+          .slice(0, 300);
+        const mapped = (
+          await Promise.all(
+            inWindow.map(async (h) => {
+              try {
+                const { order: detail } = await orderHistoryApi.getDetail(h.id);
+                const staffName = h.hotelUserId
+                  ? (s.users.find((u) => u.id === String(h.hotelUserId))?.name ?? "Staff")
+                  : "Staff";
+                return mapRawOrderHistoryEntry(detail, staffName);
+              } catch {
+                return null;
+              }
+            }),
+          )
+        ).filter((o): o is Order => o !== null);
+        patch((p) => ({ ...p, orderHistory: mapped }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load order history from server",
+        );
       }
     },
     upsertUser: (u) => {

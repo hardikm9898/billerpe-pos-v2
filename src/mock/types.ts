@@ -230,6 +230,13 @@ export interface Order {
    * matches the backend's own reality that no Order row exists until the
    * first KOT. */
   backendId?: number;
+  /** Real historical totals as actually billed, present only on orders
+   * synced via loadOrderHistoryFromServer. orderTotals() recomputes tax/
+   * service/discount from *current* BillSettings, which would drift from
+   * what a historical order was really charged if those rules have since
+   * changed - consumers of order history should read this instead of
+   * calling orderTotals() for these orders. */
+  backendTotals?: { grand: number; tax: number; discount: number; serviceCharge: number };
 }
 
 export type KotStatus =

@@ -482,6 +482,63 @@ export const orderApi = {
   }) => apiPost<{ message?: string }>("/settleBills", payload),
 };
 
+export type RawOrderHeader = {
+  id: number;
+  bill_no: string;
+  order_type: "dinin" | "pickup" | "delivery";
+  payment: string;
+  grandAmount: number;
+  gst: number;
+  totalDiscount: number;
+  discount_reason: string;
+  service_charge: number;
+  cash: number;
+  upi: number;
+  card: number;
+  due: number;
+  business_date: string;
+  createdAt: string;
+  updatedAt: string;
+  hotelUserId: number | null;
+  hms_table_mst?: { table_name: string } | null;
+  hms_user_master?: { name?: string; number?: string } | null;
+};
+
+export type RawOrderLine = {
+  id: number;
+  qty: number;
+  price: number;
+  variant_name: string | null;
+  addons: string;
+  MenuId: number;
+  hms_menu_mst?: { item_name?: string };
+};
+
+export type RawOrderDetail = RawOrderHeader & {
+  hms_orderDetails: RawOrderLine[];
+};
+
+// controller/order.js. No date-ranged bulk listing endpoint exists that's
+// simultaneously unencrypted and line-item-complete: getAllOrderPaginationWise
+// (GET /paginateOrder) has full line detail but AES-encrypts its whole
+// response with a server-side secret (CryptoJS, controller/order.js's own
+// `encryptData` helper) this app has no decrypt path for and has never
+// needed one before, has no date-range params at all (only `page` and an
+// exact bill_no `search`), and hard-filters to payment:"success" only with
+// a page size fixed at 10 the caller can't raise. So order history here is
+// built from two unencrypted calls instead: getOrdersByBillNo
+// (GET /searchOrder/all) for an unbounded list of every non-deleted
+// order's header (no line items, no date filter of its own - the caller
+// filters client-side), then getSingleOrder (GET /order/:id) per order
+// actually wanted, for its real lines. Cancelled orders are invisible to
+// both (cancellation is modelled purely as deleted:true, and both
+// endpoints filter deleted:false) - there is no backend-retrievable
+// source for a "Cancelled" history entry through this app at all.
+export const orderHistoryApi = {
+  getAllHeaders: () => apiGet<{ order: RawOrderHeader[] }>("/searchOrder/all"),
+  getDetail: (id: number) => apiGet<{ order: RawOrderDetail }>(`/order/${id}`),
+};
+
 // Every /kitchen/* route is guarded by a *different* auth middleware
 // (middleware/adminAuth.js's adminAuth, which additionally requires a
 // matching UserSession row) than most of the routes above (middleware/

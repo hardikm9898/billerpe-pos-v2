@@ -14,7 +14,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { animate, useMotionValue } from "motion/react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   DataTable,
@@ -27,7 +27,7 @@ import {
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { addDays, daysAgo, inRange, parseDMY, todayLabel } from "@/mock/format";
+import { addDays, inRange, parseDMY, todayLabel } from "@/mock/format";
 import { lineTotal, orderTotals, useStore } from "@/mock/store";
 import type { TableStatus } from "@/mock/types";
 
@@ -72,6 +72,22 @@ function dmyToIso(dmy: string) {
 
 const tableStatuses: TableStatus[] = ["Running", "Held", "Bill Generated", "Reserved", "Free"];
 
+// Synced order history (store.orderHistory) carries real business dates
+// (e.g. 2026-08-24), not this app's frozen mock "today" (`todayLabel`,
+// pinned to 18/08/2026 for all local-only seed/demo data - see
+// mock/format.ts). Every stat on this page derived from order history
+// needs a range anchored to the real current date instead, or synced data
+// would never fall inside "Today"/"Yesterday"/etc. This is scoped to just
+// this file - the rest of the app's frozen-date seed/demo system is
+// untouched.
+function realToday(): string {
+  const d = new Date();
+  const dd = `${d.getDate()}`.padStart(2, "0");
+  const mm = `${d.getMonth() + 1}`.padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+const REAL_TODAY = realToday();
+
 /** Smoothly tweens the displayed number to `value` whenever it changes. */
 function useCountUp(value: number, duration = 0.6) {
   const motionValue = useMotionValue(value);
@@ -102,28 +118,28 @@ function DashboardPage() {
   const navigate = useNavigate();
 
   const [rangeKey, setRangeKey] = useState<RangeKey>("today");
-  const [customFrom, setCustomFrom] = useState(dmyToIso(daysAgo(6)));
-  const [customTo, setCustomTo] = useState(dmyToIso(todayLabel));
+  const [customFrom, setCustomFrom] = useState(dmyToIso(addDays(REAL_TODAY, -6)));
+  const [customTo, setCustomTo] = useState(dmyToIso(REAL_TODAY));
 
   const { from, to, rangeLabel } = useMemo(() => {
     switch (rangeKey) {
       case "today":
-        return { from: todayLabel, to: todayLabel, rangeLabel: "today" };
+        return { from: REAL_TODAY, to: REAL_TODAY, rangeLabel: "today" };
       case "yesterday": {
-        const d = daysAgo(1);
+        const d = addDays(REAL_TODAY, -1);
         return { from: d, to: d, rangeLabel: "yesterday" };
       }
       case "30d":
-        return { from: daysAgo(29), to: todayLabel, rangeLabel: "the last 30 days" };
+        return { from: addDays(REAL_TODAY, -29), to: REAL_TODAY, rangeLabel: "the last 30 days" };
       case "custom":
         return {
-          from: isoToDMY(customFrom) || todayLabel,
-          to: isoToDMY(customTo) || todayLabel,
+          from: isoToDMY(customFrom) || REAL_TODAY,
+          to: isoToDMY(customTo) || REAL_TODAY,
           rangeLabel: "the selected range",
         };
       case "7d":
       default:
-        return { from: daysAgo(6), to: todayLabel, rangeLabel: "the last 7 days" };
+        return { from: addDays(REAL_TODAY, -6), to: REAL_TODAY, rangeLabel: "the last 7 days" };
     }
   }, [rangeKey, customFrom, customTo]);
 
@@ -131,26 +147,37 @@ function DashboardPage() {
   const prevTo = addDays(from, -1);
   const prevFrom = addDays(prevTo, -(spanDays - 1));
 
+  // Synced order history always carries real historical totals (see
+  // Order.backendTotals) - reading those instead of calling orderTotals()
+  // avoids drift from whatever the *current* tax/service-charge config
+  // happens to be, which is all orderTotals() has to work with.
+  const grandOf = useCallback(
+    (o: (typeof store.orderHistory)[number]) =>
+      o.backendTotals?.grand ?? orderTotals(o, store).grand,
+    [store],
+  );
+
   const settledInRange = useMemo(
-    () => store.orders.filter((o) => o.status === "Settled" && inRange(o.businessDate, from, to)),
-    [store.orders, from, to],
+    () => store.orderHistory.filter((o) => inRange(o.businessDate, from, to)),
+    [store.orderHistory, from, to],
   );
   const prevSettled = useMemo(
-    () =>
-      store.orders.filter(
-        (o) => o.status === "Settled" && inRange(o.businessDate, prevFrom, prevTo),
-      ),
-    [store.orders, prevFrom, prevTo],
+    () => store.orderHistory.filter((o) => inRange(o.businessDate, prevFrom, prevTo)),
+    [store.orderHistory, prevFrom, prevTo],
   );
   const expensesInRange = useMemo(
     () => store.expenses.filter((e) => inRange(e.date, from, to)),
     [store.expenses, from, to],
   );
 
-  const sales = settledInRange.reduce((s, o) => s + orderTotals(o, store).grand, 0);
-  const prevSales = prevSettled.reduce((s, o) => s + orderTotals(o, store).grand, 0);
+  const sales = settledInRange.reduce((s, o) => s + grandOf(o), 0);
+  const prevSales = prevSettled.reduce((s, o) => s + grandOf(o), 0);
   const salesDelta = prevSales ? ((sales - prevSales) / prevSales) * 100 : null;
 
+  // Guest count isn't tracked on the backend Order model at all - every
+  // synced history entry has guests:0 (see mapRawOrderHistoryEntry), so
+  // this undercounts for any range that includes synced data rather than
+  // only today's locally-created orders.
   const covers = settledInRange.reduce((s, o) => s + o.guests, 0);
   const avgBill = settledInRange.length ? Math.round(sales / settledInRange.length) : 0;
 
@@ -168,22 +195,22 @@ function DashboardPage() {
       const paid = payments.reduce((s, p) => s + p.amount, 0);
       // Scale each mode's share to the order's actual grand total (tax included) so
       // this panel always reconciles with the Net Sales stat above it.
-      const factor = paid ? orderTotals(o, store).grand / paid : 1;
+      const factor = paid ? grandOf(o) / paid : 1;
       payments.forEach((p) => map.set(p.mode, (map.get(p.mode) ?? 0) + p.amount * factor));
     });
     return [...map.entries()].sort((a, b) => b[1] - a[1]);
-  }, [settledInRange, store]);
+  }, [settledInRange, grandOf]);
   const paymentTotal = paymentMix.reduce((s, [, v]) => s + v, 0);
 
   const typeSplit = useMemo(() => {
     const dineIn = settledInRange
       .filter((o) => o.type === "Dine In")
-      .reduce((s, o) => s + orderTotals(o, store).grand, 0);
+      .reduce((s, o) => s + grandOf(o), 0);
     const pickup = settledInRange
       .filter((o) => o.type === "Pickup")
-      .reduce((s, o) => s + orderTotals(o, store).grand, 0);
+      .reduce((s, o) => s + grandOf(o), 0);
     return { dineIn, pickup };
-  }, [settledInRange, store]);
+  }, [settledInRange, grandOf]);
   const typeTotal = typeSplit.dineIn + typeSplit.pickup;
 
   const expenseTotal = expensesInRange.reduce((s, e) => s + e.amount, 0);
@@ -203,19 +230,23 @@ function DashboardPage() {
       const day = addDays(from, i);
       days.push({
         day,
-        sales: store.orders
-          .filter((o) => o.status === "Settled" && o.businessDate === day)
-          .reduce((s, o) => s + orderTotals(o, store).grand, 0),
+        sales: store.orderHistory
+          .filter((o) => o.businessDate === day)
+          .reduce((s, o) => s + grandOf(o), 0),
       });
     }
     return days;
-  }, [store, from, spanDays]);
+  }, [store, from, spanDays, grandOf]);
   const maxTrend = Math.max(1, ...trendDays.map((d) => d.sales));
 
+  // Reads order history rather than the live `orders` array so this stays
+  // consistent with the rest of the page's real-dated range - `orders`
+  // only ever carries this app's frozen local "today", which would never
+  // match `hourlyDay` once that's anchored to the real current date.
   const hourlyDay = trendDays.length ? trendDays[trendDays.length - 1].day : to;
   const hourly = useMemo(() => {
     const buckets = new Map<number, number>();
-    store.orders
+    store.orderHistory
       .filter((o) => o.businessDate === hourlyDay)
       .forEach((o) => {
         const m = o.createdAt.match(/(\d{1,2}):\d{2}\s?(am|pm)/i);
@@ -227,7 +258,7 @@ function DashboardPage() {
     return [...buckets.entries()]
       .sort((a, b) => a[0] - b[0])
       .map(([h, orders]) => ({ hour: `${h % 12 || 12}${h >= 12 ? "p" : "a"}`, orders }));
-  }, [store.orders, hourlyDay]);
+  }, [store.orderHistory, hourlyDay]);
   const maxHour = Math.max(1, ...hourly.map((h) => h.orders));
 
   const topItems = useMemo(() => {
