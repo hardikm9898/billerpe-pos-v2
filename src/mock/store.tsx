@@ -17,10 +17,13 @@ import {
   customerApi,
   kitchenApi,
   printerApi,
+  taxApi,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
   type RawPrinter,
+  type RawTaxType,
+  type RawServiceCharge,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -142,6 +145,13 @@ interface State {
   maxOfflineDays: number;
   /* operations */
   serviceCharge: ServiceChargeRule;
+  /** hms_serviceCharge_mst's real row id once loaded - addEditServiceCharge's
+   * update branch 500s if this is omitted after a row already exists (see
+   * hotelApi.updateServiceCharge's own comment), so it has to be tracked
+   * separately from the rule itself (which has no id field - it's also
+   * reused for delivery/packaging charges, which have no backend row at
+   * all). null until the first successful load or save. */
+  serviceChargeBackendId: number | null;
   deliveryChargeRule: BillChargeRule;
   packagingChargeRule: BillChargeRule;
   taxRules: TaxRule[];
@@ -200,6 +210,7 @@ const initialState: State = {
   connection: "online",
   maxOfflineDays: seed.OFFLINE_SETTINGS.maxOfflineDays,
   serviceCharge: opsSeed.serviceCharge,
+  serviceChargeBackendId: null,
   deliveryChargeRule: opsSeed.deliveryChargeRule,
   packagingChargeRule: opsSeed.packagingChargeRule,
   taxRules: opsSeed.taxRules,
@@ -473,6 +484,8 @@ interface Ctx extends State {
   loadCustomersFromServer: () => Promise<void>;
   loadKitchensFromServer: () => Promise<void>;
   loadPrintersFromServer: () => Promise<void>;
+  loadTaxRulesFromServer: () => Promise<void>;
+  loadServiceChargeFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -830,6 +843,44 @@ function mapRawPrinter(p: RawPrinter, menuCategories: MenuCategory[]): Printer {
     categories: categoryNames,
     orderTypes,
     tableIds,
+  };
+}
+
+function parseBackendArray(v: unknown): unknown[] {
+  try {
+    return typeof v === "string" ? JSON.parse(v || "[]") : Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+function mapRawTaxType(
+  t: RawTaxType,
+  menuItems: MenuItem[],
+  menuCategories: MenuCategory[],
+): TaxRule {
+  const menuIds = parseBackendArray(t.menu_ids).map((n) => String(n));
+  const orderTypes = (parseBackendArray(t.order_type) as string[]).map((x) =>
+    x === "dinin" ? "Dine-in" : "Pickup",
+  ) as OpsOrderType[];
+  // menu_ids is item-scoped server-side; this app's TaxRule is
+  // category-scoped, so this can only approximate - a category shows as
+  // selected if ANY of its items are present in menu_ids, not
+  // necessarily all of them (a partial-category selection round-trips as
+  // "the whole category" on reload). See upsertTaxRule's own comment for
+  // the save-side half of this mismatch.
+  const menuCategoryIds = menuCategories
+    .filter((c) => menuItems.some((m) => m.categoryId === c.id && menuIds.includes(m.id)))
+    .map((c) => c.id);
+  return {
+    id: String(t.id),
+    name: t.tax_name,
+    value: Number(t.amount),
+    type: t.tax_value === "fix" ? "fixed" : "percent",
+    orderTypes,
+    tableCategoryIds: parseBackendArray(t.table_categ_ids).map((n) => String(n)),
+    menuCategoryIds,
+    active: t.active,
   };
 }
 
@@ -2857,6 +2908,48 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load printers from server");
       }
     },
+    loadTaxRulesFromServer: async () => {
+      try {
+        const { taxtTypes } = await taxApi.getAll();
+        patch((p) => ({
+          ...p,
+          taxRules: taxtTypes.map((t) => mapRawTaxType(t, p.menuItems, p.menuCategories)),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load tax rules from server");
+      }
+    },
+    loadServiceChargeFromServer: async () => {
+      try {
+        const { hms_serviceCharge_mst } = await hotelApi.getSettings();
+        if (!hms_serviceCharge_mst) return;
+        const sc = hms_serviceCharge_mst;
+        const greaterLessMap: Record<
+          RawServiceCharge["greater_less"],
+          "always" | "greater" | "less"
+        > = { "1": "greater", "2": "less", "3": "always" };
+        patch((p) => ({
+          ...p,
+          serviceChargeBackendId: sc.id,
+          serviceCharge: {
+            active: sc.active,
+            type: sc.service_charge_type === "fixed" ? "fixed" : "percent",
+            value: sc.service_charge_value,
+            calculationOn: sc.calculation_on,
+            autoApply: (parseBackendArray(sc.service_charge_automatic) as string[]).map((t) =>
+              t === "dinin" ? "Dine-in" : "Pickup",
+            ) as OpsOrderType[],
+            taxOnCharge: sc.calculation_on_tax,
+            condition: greaterLessMap[sc.greater_less] ?? "always",
+            threshold: sc.greater_less_amount,
+          },
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load service charge from server",
+        );
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3532,17 +3625,79 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Packaging charge rule saved");
     },
     setServiceCharge: (rule) => {
-      patch((p) => ({ ...p, serviceCharge: rule }));
-      toast.success("Service charge rule saved");
+      const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
+        "Dine-in": "dinin",
+        Pickup: "pickup",
+      };
+      const greaterLessMap: Record<"always" | "greater" | "less", "1" | "2" | "3"> = {
+        greater: "1",
+        less: "2",
+        always: "3",
+      };
+      const run = async () => {
+        try {
+          await hotelApi.updateServiceCharge({
+            ...(s.serviceChargeBackendId ? { id: s.serviceChargeBackendId } : {}),
+            active: rule.active,
+            service_charge_type: rule.type === "percent" ? "percentage" : "fixed",
+            service_charge_value: rule.value,
+            calculation_on: rule.calculationOn,
+            service_charge_automatic: rule.autoApply.map((t) => orderTypeMap[t]),
+            calculation_on_tax: rule.taxOnCharge,
+            greater_less: greaterLessMap[rule.condition],
+            greater_less_amount: rule.threshold,
+          });
+          await value.loadServiceChargeFromServer();
+          toast.success("Service charge rule saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save service charge rule");
+        }
+      };
+      void run();
     },
     upsertTaxRule: (rule) => {
-      patch((p) => ({
-        ...p,
-        taxRules: p.taxRules.some((t) => t.id === rule.id)
-          ? p.taxRules.map((t) => (t.id === rule.id ? rule : t))
-          : [...p.taxRules, { ...rule, id: rule.id || uid("tax") }],
-      }));
-      toast.success("Tax rule saved", { description: rule.name });
+      if (rule.value <= 0) {
+        toast.error("Tax value must be greater than 0", {
+          description: "The backend rejects a zero or negative amount outright.",
+        });
+        return;
+      }
+      const isNew = !s.taxRules.some((t) => t.id === rule.id);
+      const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
+        "Dine-in": "dinin",
+        Pickup: "pickup",
+      };
+      const payload = {
+        tax_name: rule.name,
+        tax_value: (rule.type === "fixed" ? "fix" : "pr") as "fix" | "pr",
+        amount: rule.value,
+        order_type: rule.orderTypes.map((t) => orderTypeMap[t]),
+        active: rule.active,
+        // menu_ids is item-scoped server-side, not category-scoped like
+        // this app's menuCategoryIds - expanded to every item currently
+        // in the selected categories. A category edited after this saves
+        // won't retroactively update the tax's item list - this is a
+        // point-in-time snapshot, not a live link (see mapRawTaxType's
+        // own comment for the load-side half of this).
+        menu_ids: s.menuItems
+          .filter((m) => rule.menuCategoryIds.includes(m.categoryId))
+          .map((m) => Number(m.id)),
+        table_categ_ids: rule.tableCategoryIds.map(Number),
+      };
+      const run = async () => {
+        try {
+          if (isNew) {
+            await taxApi.create(payload);
+          } else {
+            await taxApi.update({ ...payload, id: Number(rule.id) });
+          }
+          await value.loadTaxRulesFromServer();
+          toast.success("Tax rule saved", { description: rule.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save tax rule");
+        }
+      };
+      void run();
     },
     removeTaxRule: (id) => {
       patch((p) => ({ ...p, taxRules: p.taxRules.filter((t) => t.id !== id) }));

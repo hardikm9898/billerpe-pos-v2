@@ -104,10 +104,44 @@ export const authApi = {
 // omitting the other fields it manages (gst_no, fssai_no, ...) leaves
 // them untouched rather than nulling them out (Sequelize drops undefined
 // keys from its SET clause).
+export type RawServiceCharge = {
+  id: number;
+  active: boolean;
+  service_charge_type: "fixed" | "percentage";
+  service_charge_value: number;
+  calculation_on: "core" | "total";
+  service_charge_automatic: unknown;
+  calculation_on_tax: boolean;
+  greater_less: "1" | "2" | "3";
+  greater_less_amount: number;
+};
+
 export const hotelApi = {
-  getSettings: () => apiGet<{ upiId: string; hotel_name: string }>("/singleHotel"),
+  getSettings: () =>
+    apiGet<{ upiId: string; hotel_name: string; hms_serviceCharge_mst: RawServiceCharge | null }>(
+      "/singleHotel",
+    ),
   updateUpiId: (upiId: string) =>
     apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: { upiId } }),
+
+  // One row per hotel - addEditServiceCharge upserts based on whether a
+  // row already exists (its own findOne check), but its update branch's
+  // WHERE clause uses `id` straight from the request body, not the row it
+  // just found - confirmed live that omitting `id` on an update (i.e.
+  // once a row already exists) 500s outright, not a silent no-op. `id`
+  // must be the real existing row's id from the last load, or omitted
+  // entirely only on the very first save for this hotel.
+  updateServiceCharge: (params: {
+    id?: number;
+    active: boolean;
+    service_charge_type: "fixed" | "percentage";
+    service_charge_value: number;
+    calculation_on: "core" | "total";
+    service_charge_automatic: string[];
+    calculation_on_tax: boolean;
+    greater_less: "1" | "2" | "3";
+    greater_less_amount: number;
+  }) => apiPost<{ message?: string }>("/service_charge", params),
 };
 
 // Raw shapes as uat-backend actually returns them (controller/hotel.js) -
@@ -624,4 +658,56 @@ export const printerApi = {
   }) => apiPost<{ message?: string }>("/setCategoriesForPrinter", params),
 
   remove: (id: number) => apiPost<{ message?: string }>("/deletePrinter", { id }),
+};
+
+export type RawTaxType = {
+  id: number;
+  tax_name: string;
+  tax_value: "fix" | "pr";
+  amount: number;
+  order_type: unknown;
+  active: boolean;
+  table_categ_ids: unknown;
+  menu_ids: unknown;
+};
+
+// There is no delete endpoint for tax rules at all (confirmed by reading
+// routes/tax.js in full - only GET/POST/PUT exist), and editTaxType can
+// only ever turn a rule ON: `if (active) updateObject.active = active`
+// means active:false is falsy and silently never gets included in the
+// update - confirmed live, toggling a rule off has no effect at all on
+// reload. Neither create nor edit here, both left local-only.
+export const taxApi = {
+  getAll: () => apiGet<{ taxtTypes: RawTaxType[] }>("/taxType/tax"),
+
+  // menu_ids is validated (Joi) as an array of individual menu item ids,
+  // not menu category ids - this app's TaxRule is category-scoped, so
+  // the caller has to expand categories to their member items before
+  // calling this (see store.tsx's upsertTaxRule). amount must be > 0,
+  // confirmed live (Joi rejects 0 outright) - this app's UI doesn't
+  // enforce that today, so callers need to check first.
+  create: (params: {
+    tax_name: string;
+    tax_value: "fix" | "pr";
+    amount: number;
+    order_type: ("dinin" | "pickup")[];
+    active: boolean;
+    menu_ids: number[];
+    table_categ_ids: number[];
+  }) => apiPost<{ message?: string }>("/taxType/tax", params),
+
+  // editTaxType's own destructure accesses order_type.length/menu_ids
+  // .length/table_categ_ids.length unconditionally - omitting any of the
+  // three throws a 500, confirmed live. All three are always sent here,
+  // never left out even when unchanged.
+  update: (params: {
+    id: number;
+    tax_name: string;
+    tax_value: "fix" | "pr";
+    amount: number;
+    order_type: ("dinin" | "pickup")[];
+    active: boolean;
+    menu_ids: number[];
+    table_categ_ids: number[];
+  }) => apiPut<{ message?: string }>("/taxType/tax", params),
 };
