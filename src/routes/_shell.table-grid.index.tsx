@@ -139,8 +139,8 @@ function TableGridPage() {
   const itemCountOf = (order: Order | undefined) =>
     order ? order.lines.reduce((s, l) => s + l.qty, 0) : 0;
 
-  const printBill = (t: RestaurantTable) => {
-    toast.success("Bill sent to printer", { description: t.name });
+  const handlePrintBill = (t: RestaurantTable) => {
+    if (t.orderId) void store.printBill(t.orderId);
   };
 
   const actionIconCls =
@@ -198,7 +198,7 @@ function TableGridPage() {
                   title="Print bill"
                   onClick={(e) => {
                     e.stopPropagation();
-                    printBill(t);
+                    handlePrintBill(t);
                   }}
                   className={actionIconCls}
                 >

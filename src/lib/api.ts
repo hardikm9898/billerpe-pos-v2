@@ -120,10 +120,27 @@ export type RawServiceCharge = {
 };
 
 export const hotelApi = {
+  // GET /singleHotel returns the full Hotel row (confirmed live) - only
+  // the fields this app actually reads are typed here. address2/gst_no/
+  // fssai_no/invoiceFormateHeaderText/invoiceFormateBottomText/
+  // printerSize are the real source for a printed bill's header/footer -
+  // this app's own local invoiceFormat.header/footer (mock/types.ts) are
+  // never synced from the server at all (loadInvoiceFormatFromServer only
+  // ever pulls upiId off this same response), so they're seed/mock text
+  // only and unsuitable for anything that has to be accurate.
   getSettings: () =>
-    apiGet<{ upiId: string; hotel_name: string; hms_serviceCharge_mst: RawServiceCharge | null }>(
-      "/singleHotel",
-    ),
+    apiGet<{
+      upiId: string;
+      hotel_name: string;
+      address1: string | null;
+      address2: string | null;
+      gst_no: string | null;
+      fssai_no: string | null;
+      invoiceFormateHeaderText: string | null;
+      invoiceFormateBottomText: string | null;
+      printerSize: string | null;
+      hms_serviceCharge_mst: RawServiceCharge | null;
+    }>("/singleHotel"),
   updateUpiId: (upiId: string) =>
     apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: { upiId } }),
 
@@ -522,6 +539,68 @@ export const orderApi = {
   // sentEbill seeding a new row at 49 credits after its first successful
   // send (50 - 1).
   getEBillCredit: () => apiGet<{ credit: number }>("/getEbillCredit"),
+
+  // controller/kto.js#invoiceGeneratePdf (POST /generateInvoicePdf).
+  // Renders the bill via Puppeteer and returns the PDF as a raw byte
+  // array inside JSON (`{type:"Buffer", data:[...]}`), not a URL or
+  // base64 - reconstruct with `new Uint8Array(pdf.data)`. Item addons are
+  // expected in a `{department_name, hms_addon_msts:[{addon_name,qty,
+  // price}]}[]` shape this app's own OrderLine.addons (flat
+  // {name,price}[]) doesn't carry - omitted from the printed bill rather
+  // than sent in a fabricated shape.
+  //
+  // Puppeteer's browser-launch path is keyed off `data.origin ===
+  // "http://localhost:3000"` exactly (an unrelated hardcoded dev port,
+  // confirmed by reading generateInvoicePDF) - any other origin, which is
+  // every origin this app will ever actually run on, falls through to a
+  // `/usr/bin/google-chrome-stable` path that doesn't exist on this
+  // Windows dev backend (confirmed live: the sibling generateKotPdf 500s
+  // outright, this endpoint instead silently returns `pdf:{}`, an empty
+  // object, with no error). The endpoint does produce a real PDF - this
+  // was confirmed by resending the exact same request with an Origin
+  // header spoofed to that hardcoded value and getting back real PDF
+  // bytes - but that's not something a real browser's fetch can do (the
+  // browser controls the Origin header, not app code). In a real Linux
+  // production deployment with Chrome installed at that path, real
+  // traffic would take the same branch that already works here, since
+  // production origins won't be "localhost:3000" either - there's just
+  // no way to verify that end-to-end from this dev environment.
+  generateInvoicePdf: (payload: {
+    orderId: number;
+    printerSize: string;
+    tableAndUserInfo: string;
+    dateAndTime: string;
+    type: "dinin" | "pickup";
+    token: number;
+    customerName?: string;
+    customerNumber?: string;
+    address?: string;
+    gstin?: string;
+    items: {
+      item_name: string;
+      qty: number;
+      price: number;
+      totalAmount: number;
+      variantData?: { variants_name: string } | null;
+    }[];
+    totalQty: number;
+    subtotal: number;
+    totalDiscount: number;
+    service_charge: number;
+    orderTax: {
+      hms_tax_type_mst: { tax_name: string };
+      amount: number;
+      tax_type: "pr" | "fix";
+      tax_value: number;
+    }[];
+    totalBill: number;
+    headerText: string[];
+    footerText: string[];
+  }) =>
+    apiPost<{ orderId: number; pdf: { type: "Buffer"; data: number[] } }>(
+      "/generateInvoicePdf",
+      payload,
+    ),
 };
 
 export type RawOrderHeader = {

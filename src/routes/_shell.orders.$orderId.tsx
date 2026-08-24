@@ -1,6 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Ban, ChefHat, Printer, Receipt, Send } from "lucide-react";
-import { toast } from "sonner";
 
 import {
   DataTable,
@@ -81,7 +80,7 @@ function OrderDetailPage() {
             <Button variant="ghost" onClick={() => navigate({ to: "/orders" })}>
               <ArrowLeft className="size-4" /> Back
             </Button>
-            <Button variant="outline" onClick={() => toast.success("Bill sent to printer")}>
+            <Button variant="outline" onClick={() => void store.printBill(order.id)}>
               <Printer className="size-4" /> Reprint bill
             </Button>
             <Button

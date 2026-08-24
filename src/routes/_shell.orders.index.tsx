@@ -1,7 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowRight, Clock, Printer, Receipt, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { toast } from "sonner";
 
 import {
   BulkActionsBar,
@@ -290,7 +289,7 @@ function OrdersPage() {
                       title="Reprint bill"
                       onClick={(e) => {
                         e.stopPropagation();
-                        toast.success("Bill sent to printer");
+                        void store.printBill(o.id);
                       }}
                     >
                       <Printer className="size-4" />

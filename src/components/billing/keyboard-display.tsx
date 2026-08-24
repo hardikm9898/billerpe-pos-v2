@@ -294,7 +294,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   };
   const doReprint = () => {
     if (!order) return;
-    toast.success("Bill sent to printer");
+    void store.printBill(order.id);
   };
   const openCustomItem = () => {
     if (!order || settled) return;

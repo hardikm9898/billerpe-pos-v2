@@ -626,6 +626,7 @@ interface Ctx extends State {
   settleDueBills: (ids: string[], payments: PaymentSplit[]) => void;
   setMaxOfflineDays: (days: number) => void;
   sendEBill: (orderId: string) => Promise<boolean>;
+  printBill: (orderId: string) => Promise<void>;
 }
 
 // uat-backend/model/table.js: table_status is R/F/P/H/B, not the mock's
@@ -5335,6 +5336,81 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not send the e-bill");
         return false;
+      }
+    },
+    printBill: async (orderId) => {
+      const o =
+        s.orders.find((x) => x.id === orderId) ?? s.orderHistory.find((x) => x.id === orderId);
+      if (!o) return;
+      if (!o.backendId) {
+        toast.error("Order isn't synced with the server yet");
+        return;
+      }
+      try {
+        // Real hotel_name/address/gst_no/fssai_no/invoiceFormate*Text -
+        // this app's own local invoiceFormat.header/footer are never
+        // synced from the server (see hotelApi.getSettings's comment), so
+        // they're mock text only and unusable for an actual printed bill.
+        const hotel = await hotelApi.getSettings();
+        const t = o.backendTotals
+          ? {
+              ...orderTotals(o, s),
+              grand: o.backendTotals.grand,
+              discount: o.backendTotals.discount,
+              service: o.backendTotals.serviceCharge,
+            }
+          : orderTotals(o, s);
+        const headerText = [
+          `<p class="hotel-name">${hotel.hotel_name}</p>`,
+          ...([hotel.address1, hotel.address2].filter(Boolean).length
+            ? [
+                `<p class="hotel-address">${[hotel.address1, hotel.address2].filter(Boolean).join(", ")}</p>`,
+              ]
+            : []),
+          ...(hotel.gst_no ? [`<p>GSTIN: ${hotel.gst_no}</p>`] : []),
+          ...(hotel.fssai_no ? [`<p>FSSAI: ${hotel.fssai_no}</p>`] : []),
+          ...(hotel.invoiceFormateHeaderText ? [`<p>${hotel.invoiceFormateHeaderText}</p>`] : []),
+        ];
+        const footerText = hotel.invoiceFormateBottomText
+          ? [`<p>${hotel.invoiceFormateBottomText}</p>`]
+          : [];
+        // Addon detail is dropped here (see orderApi.generateInvoicePdf's
+        // own comment on the department-grouped shape it actually wants).
+        const { pdf } = await orderApi.generateInvoicePdf({
+          orderId: o.backendId,
+          printerSize: hotel.printerSize ?? "1",
+          tableAndUserInfo: o.tableLabel,
+          dateAndTime: o.createdAt,
+          type: o.type === "Dine In" ? "dinin" : "pickup",
+          token: 0,
+          customerName: o.customerName,
+          customerNumber: o.customerPhone,
+          items: o.lines.map((l) => ({
+            item_name: l.name,
+            qty: l.qty,
+            price: l.price,
+            totalAmount: lineTotal(l),
+            variantData: l.variant ? { variants_name: l.variant } : null,
+          })),
+          totalQty: o.lines.reduce((sum, l) => sum + l.qty, 0),
+          subtotal: t.subtotal,
+          totalDiscount: t.discount,
+          service_charge: t.service,
+          orderTax: t.taxLines.map((tx) => ({
+            hms_tax_type_mst: { tax_name: tx.name },
+            amount: 0,
+            tax_type: "fix" as const,
+            tax_value: tx.amount,
+          })),
+          totalBill: t.grand,
+          headerText,
+          footerText,
+        });
+        const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
+        window.open(URL.createObjectURL(blob), "_blank");
+        toast.success("Bill ready to print");
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
       }
     },
   };
