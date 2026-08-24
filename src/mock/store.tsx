@@ -1518,13 +1518,86 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     generateBill: (orderId) => {
       if (guardBlocked()) return;
       const o = s.orders.find((x) => x.id === orderId);
-      patch((p) => ({
-        ...p,
-        orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Bill Generated" } : x)),
-        tables: p.tables.map((t) => (t.id === o?.tableId ? { ...t, status: "Bill Generated" } : t)),
-      }));
-      log("Bill Generated", `Order #${o?.orderNo}`, o?.status ?? "", "Bill Generated");
-      toast.success(`Bill generated for #${o?.orderNo}`);
+      if (!o) return;
+
+      if (o.type !== "Dine In") {
+        toast.error("Pickup billing isn't wired to the real backend yet", {
+          description:
+            "Its bill-generation step requires payment info this flow doesn't collect until settle.",
+        });
+        return;
+      }
+      if (!o.backendId) {
+        toast.error("Generate a KOT before billing", {
+          description: "The backend has no order to bill until the first KOT is sent.",
+        });
+        return;
+      }
+      const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
+      if (!table) {
+        toast.error("Could not find this order's table");
+        return;
+      }
+
+      const billSettings: BillSettings = {
+        serviceCharge: s.serviceCharge,
+        deliveryChargeRule: s.deliveryChargeRule,
+        packagingChargeRule: s.packagingChargeRule,
+        taxRules: s.taxRules,
+        invoiceFormat: s.invoiceFormat,
+      };
+      const totals = orderTotals(o, billSettings);
+      // Unlike generateKot, this must carry EVERY line the order has ever
+      // had (all KOT rounds), not just newly-added ones - see adminOrder's
+      // own comment in lib/api.ts for why.
+      const allMenuItems = o.lines.map((l) => {
+        const mi = s.menuItems.find((m) => m.id === l.itemId);
+        return {
+          id: Number(l.itemId),
+          qty: l.qty,
+          price: l.price,
+          discount: 0,
+          addons: l.addons ?? [],
+          comment: l.note ?? "",
+          menu_categ_id: mi ? Number(mi.categoryId) : 0,
+        };
+      });
+
+      const run = async () => {
+        try {
+          await orderApi.adminOrder({
+            order_type: "dinin",
+            order_id: o.backendId!,
+            table_id: Number(table.id),
+            cart: {
+              items: [{ status: "H", menuItems: allMenuItems }],
+              gst: totals.tax,
+              totalDiscount: totals.discount,
+              grandAmount: totals.grand,
+              myAmount: totals.subtotal,
+              service_charger: totals.service,
+              discount_reason: o.discount?.label ?? "",
+              discount_type: "fix",
+              discount_value: totals.discount,
+              taxes: [],
+            },
+          });
+          patch((p) => ({
+            ...p,
+            orders: p.orders.map((x) =>
+              x.id === orderId ? { ...x, status: "Bill Generated" } : x,
+            ),
+            tables: p.tables.map((t) =>
+              t.id === o.tableId ? { ...t, status: "Bill Generated" } : t,
+            ),
+          }));
+          log("Bill Generated", `Order #${o.orderNo}`, o.status, "Bill Generated");
+          toast.success(`Bill generated for #${o.orderNo}`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not generate bill");
+        }
+      };
+      void run();
     },
 
     settleOrder: (orderId, payments) => {

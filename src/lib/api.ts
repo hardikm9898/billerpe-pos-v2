@@ -293,7 +293,7 @@ export const userApi = {
     apiPost<{ message?: string }>("/userUpdate", params),
 };
 
-type KotCartItem = {
+export type KotCartItem = {
   id: number;
   qty: number;
   price: number;
@@ -340,4 +340,39 @@ export const orderApi = {
   // a real, current limitation, not a client-side gap.
   kotOrder: (payload: KotPayload) =>
     apiPost<{ message?: string; kotInfo: { order_id: number } }>("/kotOrder", payload),
+
+  // POST /adminOrder finalizes an order (Running -> table status "P",
+  // Pending Settle) - but ONLY the dine-in path is safe to call from a
+  // "generate bill, no payment info yet" step. Its order_id branch runs
+  // `OrderDetails.destroy({ where: { OrderId: order_id, ... } })` BEFORE
+  // rebuilding from cart.items - unconditionally, regardless of each row's
+  // status - so cart.items must carry the FULL accumulated set of order
+  // lines (every KOT round), not just newly-added ones. This is the
+  // opposite of kotOrder's contract and was confirmed the hard way: sending
+  // only new items here first wiped every existing line, verified by
+  // querying the table directly and finding 0 rows, then re-verified
+  // correct after resending the full list (which correctly merged
+  // identical lines into one row with combined qty, not duplicates).
+  //
+  // The pickup path additionally requires cash/card/upi/due and rejects
+  // with PAYMENT_MODE_NOT_SELECTED if none are set and the total is > 0 -
+  // this app's flow collects payment in a separate later settle step, so
+  // pickup bill generation isn't wired through this call; only dine-in is.
+  adminOrder: (payload: {
+    order_type: "dinin";
+    order_id: number;
+    table_id: number;
+    cart: {
+      items: [{ status: "H"; menuItems: KotCartItem[] }];
+      gst: number;
+      totalDiscount: number;
+      grandAmount: number;
+      myAmount: number;
+      service_charger: number;
+      discount_reason: string;
+      discount_type: "fix" | "pr";
+      discount_value: number;
+      taxes: unknown[];
+    };
+  }) => apiPost<{ message?: string; orderId?: number }>("/adminOrder", payload),
 };
