@@ -354,14 +354,29 @@ export const orderApi = {
   // correct after resending the full list (which correctly merged
   // identical lines into one row with combined qty, not duplicates).
   //
-  // The pickup path additionally requires cash/card/upi/due and rejects
-  // with PAYMENT_MODE_NOT_SELECTED if none are set and the total is > 0 -
-  // this app's flow collects payment in a separate later settle step, so
-  // pickup bill generation isn't wired through this call; only dine-in is.
+  // The pickup path additionally requires cash/card/upi/due (top-level
+  // fields, not nested in cart - confirmed by reading AdminOrder's
+  // destructuring of req.body) and rejects with PAYMENT_MODE_NOT_SELECTED
+  // if none are set and the total is > 0. Order.payment is set to
+  // STATUS.SUCCESS unconditionally for pickup in this same call (not
+  // PENDING like dine-in), so for pickup this call both finalizes the bill
+  // AND settles payment in one step - confirmed live: after calling this
+  // with order_type "pickup" and cash:220, the order row read back as
+  // status:"success", payment:"success", cash:220, and its OrderDetails
+  // rows as status:"delivered", payment_status:"success". Stock is also
+  // deducted in this same call for pickup (checkRawMaterialAvailableOrNot
+  // runs inline, before the response), unlike dine-in where it only
+  // happens later in settleBills - so there's no separate settle step to
+  // wire for pickup at all.
   adminOrder: (payload: {
-    order_type: "dinin";
+    order_type: "dinin" | "pickup";
     order_id: number;
-    table_id: number;
+    table_id?: number;
+    cash?: number;
+    upi?: number;
+    card?: number;
+    due?: number;
+    mobile?: string;
     cart: {
       items: [{ status: "H"; menuItems: KotCartItem[] }];
       gst: number;

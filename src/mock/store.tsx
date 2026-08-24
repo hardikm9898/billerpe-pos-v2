@@ -1520,19 +1520,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return;
 
-      if (o.type !== "Dine In") {
-        toast.error("Pickup billing isn't wired to the real backend yet", {
-          description:
-            "Its bill-generation step requires payment info this flow doesn't collect until settle.",
-        });
-        return;
-      }
       if (!o.backendId) {
         toast.error("Generate a KOT before billing", {
           description: "The backend has no order to bill until the first KOT is sent.",
         });
         return;
       }
+
+      if (o.type !== "Dine In") {
+        // Pickup has no backend-visible "bill generated" state -
+        // AdminOrder's pickup branch requires payment info up front and
+        // finalizes + settles in one call (confirmed live, see
+        // settleOrder and adminOrder's comment in lib/api.ts), so this
+        // step stays purely local until the real settle call.
+        patch((p) => ({
+          ...p,
+          orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Bill Generated" } : x)),
+        }));
+        log("Bill Generated", `Order #${o.orderNo}`, o.status, "Bill Generated");
+        toast.success(`Bill generated for #${o.orderNo}`);
+        return;
+      }
+
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
       if (!table) {
         toast.error("Could not find this order's table");
@@ -1613,13 +1622,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      if (o.type !== "Dine In") {
-        toast.error("Pickup settlement isn't wired to the real backend yet", {
-          description:
-            "Pickup pays at bill-generation time on the backend, not a separate settle step.",
-        });
-        return;
-      }
       if (!o.backendId) {
         toast.error("This order has no backend record to settle");
         return;
@@ -1652,15 +1654,65 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
       const run = async () => {
         try {
-          await orderApi.settleBills({
-            id: o.backendId!,
-            amount: settleTotal,
-            cash: cashAmt,
-            upi: upiAmt,
-            card: cardAmt,
-            due: dueAmt,
-            ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
-          });
+          if (o.type === "Dine In") {
+            await orderApi.settleBills({
+              id: o.backendId!,
+              amount: settleTotal,
+              cash: cashAmt,
+              upi: upiAmt,
+              card: cardAmt,
+              due: dueAmt,
+              ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
+            });
+          } else {
+            // Pickup has no settleBills equivalent - AdminOrder's pickup
+            // branch both finalizes the bill and records payment in one
+            // call, and (like generateBill for dine-in) must carry the
+            // FULL accumulated item list since it destroys and rebuilds
+            // OrderDetails from scratch every call - see adminOrder's
+            // comment in lib/api.ts.
+            const billSettings: BillSettings = {
+              serviceCharge: s.serviceCharge,
+              deliveryChargeRule: s.deliveryChargeRule,
+              packagingChargeRule: s.packagingChargeRule,
+              taxRules: s.taxRules,
+              invoiceFormat: s.invoiceFormat,
+            };
+            const totals = orderTotals(o, billSettings);
+            const allMenuItems = o.lines.map((l) => {
+              const mi = s.menuItems.find((m) => m.id === l.itemId);
+              return {
+                id: Number(l.itemId),
+                qty: l.qty,
+                price: l.price,
+                discount: 0,
+                addons: l.addons ?? [],
+                comment: l.note ?? "",
+                menu_categ_id: mi ? Number(mi.categoryId) : 0,
+              };
+            });
+            await orderApi.adminOrder({
+              order_type: "pickup",
+              order_id: o.backendId!,
+              cash: cashAmt,
+              upi: upiAmt,
+              card: cardAmt,
+              due: dueAmt,
+              ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
+              cart: {
+                items: [{ status: "H", menuItems: allMenuItems }],
+                gst: totals.tax,
+                totalDiscount: totals.discount,
+                grandAmount: totals.grand,
+                myAmount: totals.subtotal,
+                service_charger: totals.service,
+                discount_reason: o.discount?.label ?? "",
+                discount_type: "fix",
+                discount_value: totals.discount,
+                taxes: [],
+              },
+            });
+          }
           applySettlement();
           log("Bill Settled", `Order #${o.orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
           toast.success(`Order #${o.orderNo} settled`, {
