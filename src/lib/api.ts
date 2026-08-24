@@ -999,3 +999,47 @@ export const stockInHandApi = {
   stockOut: (params: { raw_material_id: number; qty: number }) =>
     apiPost<{ message?: string }>("/stock/stockOut", params),
 };
+
+export type RawWastage = {
+  id: number;
+  qty: number;
+  average_price: number;
+  reason: string;
+  notes: string;
+  business_date: string;
+  raw_material_id: number;
+  // hms_hotelUser_master comes back on this response with the full staff
+  // row attached - bcrypt password hash, JWT refresh token and all. Not
+  // declared here at all; never read a field off it below.
+  hms_hotelUser_master?: { name?: string };
+};
+
+// controller/stock_Mangement/westage.js - transactional both ways (create
+// and delete), unlike editPurchaseOrder. Deliberately not wired: delete -
+// this app's Wastage has no undo/remove action anywhere in its own store
+// or UI, so there's nothing on this side to call it from.
+export const wastageApi = {
+  getAll: (startDate: string, endDate: string) =>
+    apiGet<{ totalCost: number | null; data: RawWastage[] }>(
+      `/stock/wastage?page=1&limit=1000&startDate=${startDate}&endDate=${endDate}`,
+    ),
+
+  // raw_material_id/unit_id are validated as STRINGS here (Joi's
+  // joi.string(), confirmed live a numeric value gets rejected with
+  // '"[0].raw_material_id" must be a string') - the one place in this
+  // whole backend that requires numeric-looking ids as strings rather
+  // than numbers, everywhere else wired so far wants numbers. qty is
+  // always sent in consumption units with unit_id set to the material's
+  // own consumption unit, since this app's Wastage.qty is already in
+  // consumption units and the controller accepts either unit as long as
+  // unit_id matches it consistently.
+  create: (
+    items: {
+      raw_material_id: string;
+      qty: number;
+      unit_id: string;
+      reason: string;
+      notes?: string;
+    }[],
+  ) => apiPost<{ message?: string }>("/stock/wastage", items),
+};

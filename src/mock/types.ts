@@ -415,6 +415,8 @@ export interface Wastage {
   recordedBy: string;
   notes?: string;
   cost?: number;
+  /** uat-backend's hms_watage_mst.id - undefined for a row not yet synced. */
+  backendId?: number;
 }
 
 export interface StockAdjustment {

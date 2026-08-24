@@ -23,11 +23,13 @@ import {
   supplierApi,
   purchaseOrderApi,
   stockInHandApi,
+  wastageApi,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
   type RawPurchaseOrder,
   type RawStockInHand,
+  type RawWastage,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -501,6 +503,7 @@ interface Ctx extends State {
   loadRawMaterialsFromServer: () => Promise<void>;
   loadSuppliersFromServer: () => Promise<void>;
   loadPurchaseOrdersFromServer: () => Promise<void>;
+  loadWastageFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -901,6 +904,24 @@ function mapRawTaxType(
 
 function mapRawUnit(u: RawUnit): StockUnit {
   return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
+}
+
+function mapRawWastage(w: RawWastage, previous?: Wastage): Wastage {
+  const [y, m, d] = w.business_date.split("-");
+  return {
+    id: previous?.id ?? `w-${w.id}`,
+    materialId: String(w.raw_material_id),
+    qty: w.qty,
+    reason: w.reason || "Not specified",
+    date: `${d}/${m}/${y}`,
+    // hms_hotelUser_master?.name is the only field ever read off that
+    // nested object - see wastageApi's own comment on why nothing else
+    // on it is touched.
+    recordedBy: w.hms_hotelUser_master?.name ?? "Unknown",
+    ...(w.notes ? { notes: w.notes } : {}),
+    cost: w.average_price,
+    backendId: w.id,
+  };
 }
 
 function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): PurchaseOrder {
@@ -3141,6 +3162,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    loadWastageFromServer: async () => {
+      try {
+        const { data } = await wastageApi.getAll("2000-01-01", "2100-01-01");
+        const previousByBackendId = new Map(
+          s.wastages.filter((w) => w.backendId).map((w) => [w.backendId, w]),
+        );
+        patch((p) => ({
+          ...p,
+          wastages: data.map((w) => mapRawWastage(w, previousByBackendId.get(w.id))),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load wastage from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3712,6 +3747,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success(`Wastage posted for ${valid.length} item${valid.length > 1 ? "s" : ""}`, {
         description: "Stock reduced and cost captured.",
       });
+
+      // qty is sent as-is (already in consumption units, matching this
+      // app's own convention) with unit_id set to each material's own
+      // consumption unit - both ids sent as strings, the one place in
+      // this backend that requires that (see wastageApi's own comment).
+      const items = valid
+        .map((r) => {
+          const m = s.rawMaterials.find((x) => x.id === r.materialId);
+          const consumptionUnitId = m ? s.units.find((u) => u.shortName === m.unit)?.id : undefined;
+          if (!consumptionUnitId) return null;
+          return {
+            raw_material_id: r.materialId,
+            qty: r.qty,
+            unit_id: consumptionUnitId,
+            reason: r.reason || "Not specified",
+            ...(r.notes ? { notes: r.notes } : {}),
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => !!x);
+      if (items.length !== valid.length) {
+        toast.error("One or more materials has no consumption unit configured", {
+          description: "Recorded locally, but not synced to the server.",
+        });
+        return;
+      }
+      const run = async () => {
+        try {
+          await wastageApi.create(items);
+          await value.loadWastageFromServer();
+          await value.loadRawMaterialsFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Recorded locally but the backend sync failed",
+          );
+        }
+      };
+      void run();
     },
     upsertSemiFinished: (sf) => {
       patch((p) => ({
