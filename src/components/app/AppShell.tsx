@@ -131,6 +131,15 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (!store.authed) navigate({ to: "/login" });
   }, [store.authed, navigate]);
 
+  // Replaces the seeded mock tables/categories with real backend data once
+  // there's a session to fetch them with - covers both a fresh login and a
+  // page reload while already authed (the auth check above only handles
+  // the unauthenticated case).
+  useEffect(() => {
+    if (store.authed) void store.loadTablesFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.authed]);
+
   const unread = store.notifications.filter((n) => !n.read).length;
   const conn = connectionMeta[store.connection];
   const ConnIcon = conn.icon;

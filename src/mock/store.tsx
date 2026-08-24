@@ -6,6 +6,7 @@ import * as seed from "./data";
 import * as stockSeed from "./stock-seed";
 import * as opsSeed from "./ops-seed";
 import { nowStamp, todayLabel } from "./format";
+import { ApiError, tableApi, type RawTable, type RawTableCategory } from "@/lib/api";
 import type {
   AddonGroup,
   AppNotification,
@@ -59,6 +60,7 @@ import type {
   Supplier,
   SyncItem,
   TableCategory,
+  TableStatus,
   TableGridView,
   User,
   VariantOption,
@@ -436,6 +438,7 @@ interface Ctx extends State {
   addTables: (tables: RestaurantTable[]) => void;
   upsertTableCategory: (c: TableCategory) => void;
   removeTableCategory: (id: string) => void;
+  loadTablesFromServer: () => Promise<void>;
   upsertUser: (u: User) => void;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
@@ -526,6 +529,30 @@ interface Ctx extends State {
   settleDueBills: (ids: string[], payments: PaymentSplit[]) => void;
   setMaxOfflineDays: (days: number) => void;
   sendEBill: (orderId: string) => boolean;
+}
+
+// uat-backend/model/table.js: table_status is R/F/P/H/B, not the mock's
+// label strings - this is the one place that mapping happens.
+const TABLE_STATUS_MAP: Record<RawTable["table_status"], TableStatus> = {
+  F: "Free",
+  R: "Running",
+  P: "Bill Generated",
+  H: "Held",
+  B: "Reserved",
+};
+
+function mapRawCategory(c: RawTableCategory): TableCategory {
+  return { id: String(c.id), name: c.table_catag_nm, sortOrder: c.id };
+}
+
+function mapRawTable(t: RawTable): RestaurantTable {
+  return {
+    id: String(t.id),
+    name: t.table_name,
+    categoryId: String(t.table_catag_id),
+    seats: t.capacity ?? 0,
+    status: TABLE_STATUS_MAP[t.table_status],
+  };
 }
 
 const StoreContext = createContext<Ctx | null>(null);
@@ -1830,41 +1857,128 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       patch((p) => ({ ...p, addonGroups: p.addonGroups.filter((x) => x.id !== id) }));
       toast.success("Addon group removed");
     },
+    loadTablesFromServer: async () => {
+      try {
+        const [{ tables }, { tableCatagories }] = await Promise.all([
+          tableApi.getTables(),
+          tableApi.getCategories(),
+        ]);
+        patch((p) => ({
+          ...p,
+          tables: tables.map(mapRawTable),
+          tableCategories: tableCatagories.map(mapRawCategory),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load tables from server");
+      }
+    },
     upsertTable: (t) => {
-      patch((p) => ({
-        ...p,
-        tables: p.tables.some((x) => x.id === t.id)
-          ? p.tables.map((x) => (x.id === t.id ? t : x))
-          : [...p.tables, { ...t, id: t.id || uid("t") }],
-      }));
-      toast.success("Table saved", { description: t.name });
+      const isNew = !s.tables.some((x) => x.id === t.id);
+      const parsedName = Number(t.name);
+      const nameIsNumeric = t.name.trim() !== "" && Number.isFinite(parsedName);
+
+      if (isNew && !nameIsNumeric) {
+        toast.error("Backend only supports numeric table numbers for new tables", {
+          description: `"${t.name}" is not a number.`,
+        });
+        return;
+      }
+
+      const run = async () => {
+        try {
+          if (isNew) {
+            await tableApi.createTables({
+              startNo: parsedName,
+              endNo: parsedName,
+              table_catag_id: Number(t.categoryId),
+              type: "T",
+            });
+          } else {
+            // editTable accepts a free-text name (unlike bulk create, which
+            // only ever generates numeric names), so no numeric check here.
+            await tableApi.editTable({
+              id: Number(t.id),
+              table_name: t.name,
+              table_catag_id: Number(t.categoryId),
+              type: "T",
+            });
+          }
+          await value.loadTablesFromServer();
+          toast.success("Table saved", { description: t.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save table");
+        }
+      };
+      void run();
     },
     removeTable: (id) => {
-      patch((p) => ({ ...p, tables: p.tables.filter((t) => t.id !== id) }));
-      toast.success("Table removed");
+      value.removeTables([id]);
     },
     removeTables: (ids) => {
       const eligible = s.tables.filter((t) => ids.includes(t.id) && t.status === "Free");
       const skipped = ids.length - eligible.length;
-      const eligibleIds = new Set(eligible.map((t) => t.id));
-      patch((p) => ({ ...p, tables: p.tables.filter((t) => !eligibleIds.has(t.id)) }));
-      toast.success(`${eligible.length} table(s) removed`, {
-        description: skipped ? `${skipped} occupied table(s) skipped` : undefined,
-      });
+      if (eligible.length === 0) {
+        if (skipped > 0) {
+          toast.error("Table(s) in use", { description: "Only free tables can be removed." });
+        }
+        return;
+      }
+      const run = async () => {
+        try {
+          await tableApi.removeTables(eligible.map((t) => Number(t.id)));
+          await value.loadTablesFromServer();
+          toast.success(`${eligible.length} table(s) removed`, {
+            description: skipped ? `${skipped} occupied table(s) skipped` : undefined,
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove table(s)");
+        }
+      };
+      void run();
     },
     addTables: (tables) => {
-      const withIds = tables.map((t) => ({ ...t, id: t.id || uid("t") }));
-      patch((p) => ({ ...p, tables: [...p.tables, ...withIds] }));
-      toast.success(`${withIds.length} table(s) added`);
+      const nums = tables.map((t) => Number(t.name));
+      if (nums.some((n) => !Number.isFinite(n))) {
+        toast.error("Backend only supports numeric table numbers for bulk creation", {
+          description: "A name prefix can't be sent to the server - remove it and try again.",
+        });
+        return;
+      }
+      const categoryId = tables[0]?.categoryId;
+      const startNo = Math.min(...nums);
+      const endNo = Math.max(...nums);
+      const run = async () => {
+        try {
+          await tableApi.createTables({
+            startNo,
+            endNo,
+            table_catag_id: Number(categoryId),
+            type: "T",
+          });
+          await value.loadTablesFromServer();
+          toast.success(`${tables.length} table(s) added`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not add tables");
+        }
+      };
+      void run();
     },
     upsertTableCategory: (c) => {
-      patch((p) => ({
-        ...p,
-        tableCategories: p.tableCategories.some((x) => x.id === c.id)
-          ? p.tableCategories.map((x) => (x.id === c.id ? c : x))
-          : [...p.tableCategories, { ...c, id: c.id || uid("tc") }],
-      }));
-      toast.success("Table category saved");
+      const isNew = !s.tableCategories.some((x) => x.id === c.id);
+      const run = async () => {
+        try {
+          if (isNew) {
+            await tableApi.createCategory({ table_catag_nm: c.name, type: "T" });
+          } else {
+            await tableApi.editCategory({ id: Number(c.id), table_catag_nm: c.name, type: "T" });
+          }
+          await value.loadTablesFromServer();
+          toast.success("Table category saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save table category");
+        }
+      };
+      void run();
     },
     removeTableCategory: (id) => {
       if (s.tables.some((t) => t.categoryId === id)) {
@@ -1873,8 +1987,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      patch((p) => ({ ...p, tableCategories: p.tableCategories.filter((c) => c.id !== id) }));
-      toast.success("Section removed");
+      const run = async () => {
+        try {
+          await tableApi.removeCategories([Number(id)]);
+          await value.loadTablesFromServer();
+          toast.success("Section removed");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove section");
+        }
+      };
+      void run();
     },
     upsertUser: (u) => {
       patch((p) => ({
