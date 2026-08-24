@@ -22,10 +22,12 @@ import {
   rawMaterialApi,
   supplierApi,
   purchaseOrderApi,
+  stockInHandApi,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
   type RawPurchaseOrder,
+  type RawStockInHand,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -3055,16 +3057,46 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load units from server");
       }
     },
+    // Stock-in-hand is fetched here too, in the same async function
+    // rather than as a separate AppShell effect - both need
+    // rawMaterials to already be the fresh server list before merging,
+    // and two independent effects racing on the same store.authed
+    // trigger can't guarantee that ordering (whichever fetch resolves
+    // first would either merge against stale seed data or get
+    // immediately overwritten by the other).
     loadRawMaterialsFromServer: async () => {
       try {
         const { rawMaterials } = await rawMaterialApi.getAll();
         const previousCategoryById = new Map(s.rawMaterials.map((m) => [m.id, m.category]));
-        patch((p) => ({
-          ...p,
-          rawMaterials: rawMaterials.map((m) =>
-            mapRawMaterial(m, previousCategoryById.get(String(m.id))),
-          ),
-        }));
+        const mapped = rawMaterials.map((m) =>
+          mapRawMaterial(m, previousCategoryById.get(String(m.id))),
+        );
+        let withStock = mapped;
+        try {
+          const { stockInHand } = await stockInHandApi.getAll();
+          const byMaterialId = new Map(stockInHand.map((x) => [String(x.raw_material_id), x]));
+          withStock = mapped.map((m) => {
+            const entry = byMaterialId.get(m.id);
+            if (!entry) return { ...m, stock: 0 };
+            const avgPrice = Number(entry.average_price) || 0;
+            return {
+              ...m,
+              stock: entry.available_stock_Consiompsion_qty,
+              rate: m.conversion > 0 ? avgPrice / m.conversion : avgPrice,
+            };
+          });
+        } catch (stockErr) {
+          // Raw material master data loaded fine; stock levels just
+          // couldn't be fetched - materials still show (at whatever
+          // stock/rate mapRawMaterial defaulted to) rather than the
+          // whole screen failing.
+          toast.error(
+            stockErr instanceof ApiError
+              ? stockErr.message
+              : "Could not load stock levels from server",
+          );
+        }
+        patch((p) => ({ ...p, rawMaterials: withStock }));
       } catch (err) {
         toast.error(
           err instanceof ApiError ? err.message : "Could not load raw materials from server",
@@ -3597,6 +3629,46 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success(`${changed.length} row${changed.length > 1 ? "s" : ""} reconciled`, {
         description: "Current stock and adjustment history updated.",
       });
+
+      // Sync each changed material to the real backend - stockIn/stockOut
+      // both take qty in purchase units (StockInHand.qty), while this
+      // app's stock and variance are in consumption units, converted
+      // through each material's own conversion_qty.
+      const varianceByMaterialId = new Map(
+        changed.map((r) => {
+          const m = s.rawMaterials.find((x) => x.id === r.materialId)!;
+          return [r.materialId, r.countedQty - m.stock] as const;
+        }),
+      );
+      const run = async () => {
+        try {
+          for (const [materialId, variance] of varianceByMaterialId) {
+            const m = s.rawMaterials.find((x) => x.id === materialId);
+            if (!m || Math.abs(variance) < 0.0001) continue;
+            const purchaseQty = Math.abs(variance) / (m.conversion || 1);
+            if (variance > 0) {
+              await stockInHandApi.stockIn({
+                raw_material_id: Number(materialId),
+                qty: purchaseQty,
+                price: m.rate * (m.conversion || 1),
+              });
+            } else {
+              await stockInHandApi.stockOut({
+                raw_material_id: Number(materialId),
+                qty: purchaseQty,
+              });
+            }
+          }
+          await value.loadRawMaterialsFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Reconciled locally but the backend sync failed",
+          );
+        }
+      };
+      void run();
     },
     addWastageBatch: (rows) => {
       const who = currentUser?.name ?? "Taj";

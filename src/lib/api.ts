@@ -977,3 +977,25 @@ export const purchaseOrderApi = {
     paidAmount: number;
   }) => apiPost<{ message?: string }>("/stock/payment", params),
 };
+
+export type RawStockInHand = {
+  id: number;
+  qty: number;
+  price: string;
+  average_price: string;
+  total_amount: number;
+  available_stock_Consiompsion_qty: number;
+  raw_material_id: number;
+};
+
+// controller/stock_Mangement/stockInOut.js. qty here is always in
+// purchase units (matching StockInHand.qty); consumption-unit quantity
+// is available_stock_Consiompsion_qty, already converted server-side.
+// stockOut has no price field - only stockIn does.
+export const stockInHandApi = {
+  getAll: () => apiGet<{ stockInHand: RawStockInHand[] }>("/stock/stockInHand"),
+  stockIn: (params: { raw_material_id: number; qty: number; price: number }) =>
+    apiPost<{ message?: string }>("/stock/stockIn", params),
+  stockOut: (params: { raw_material_id: number; qty: number }) =>
+    apiPost<{ message?: string }>("/stock/stockOut", params),
+};
