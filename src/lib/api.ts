@@ -292,3 +292,52 @@ export const userApi = {
   editUser: (params: UserPayload & { id: number }) =>
     apiPost<{ message?: string }>("/userUpdate", params),
 };
+
+type KotCartItem = {
+  id: number;
+  qty: number;
+  price: number;
+  discount: number;
+  addons: { name: string; price: number }[];
+  comment: string;
+  menu_categ_id: number;
+};
+
+type KotPayload = {
+  order_type: "dinin" | "pickup";
+  order_id?: number;
+  table_id?: number;
+  tableNumber?: string;
+  cart: {
+    gst: number;
+    totalDiscount: number;
+    grandAmount: number;
+    myAmount: number;
+    service_charger: number;
+    discount_reason: string;
+    discount_type: "fix" | "pr";
+    discount_value: number;
+    taxes: unknown[]; // OrderTax rows - empty until Tax Configuration is wired
+    // Only one entry is ever sent: kotOrder's server-side code looks for
+    // `cart.items.find(el => el.status === 'H')` (creating a new order) or
+    // `cart.items.filter(el => el.status === 'H')[0]` (adding to an
+    // existing one) - "H" is the only status this client needs to produce,
+    // confirmed live for both the create and add-round paths.
+    items: [{ status: "H"; menuItems: KotCartItem[] }];
+  };
+};
+
+export const orderApi = {
+  // POST /kotOrder is dual-purpose: with no order_id it creates a new
+  // Order (and a placeholder Customer row, and sets the table to Running);
+  // with order_id set it adds another KOT round to an existing order
+  // (previously-fired rounds are untouched - only OrderDetails rows still
+  // in an interim "in progress" state get replaced, confirmed live by
+  // sending two rounds and checking both survived with separate
+  // kotNumbers). Hard-requires the hotel to have at least one printer with
+  // print_type "K" configured, or it fails outright with "Printer Not Set" -
+  // Operations -> Printers isn't wired to the real backend yet, so this is
+  // a real, current limitation, not a client-side gap.
+  kotOrder: (payload: KotPayload) =>
+    apiPost<{ message?: string; kotInfo: { order_id: number } }>("/kotOrder", payload),
+};

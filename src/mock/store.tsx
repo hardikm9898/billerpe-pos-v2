@@ -11,6 +11,7 @@ import {
   tableApi,
   menuApi,
   userApi,
+  orderApi,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -1340,71 +1341,122 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.info("Nothing new to send", { description: "Add items before generating a KOT." });
         return;
       }
-      const byStation = new Map<string, OrderLine[]>();
-      const fallbackKitchenName =
-        (s.kitchens.find((k) => k.isDefault) ?? s.kitchens[0])?.name ?? "Kitchen";
-      pending.forEach((l) => {
+
+      const billSettings: BillSettings = {
+        serviceCharge: s.serviceCharge,
+        deliveryChargeRule: s.deliveryChargeRule,
+        packagingChargeRule: s.packagingChargeRule,
+        taxRules: s.taxRules,
+        invoiceFormat: s.invoiceFormat,
+      };
+      const totals = orderTotals(o, billSettings);
+      const menuItemsPayload = pending.map((l) => {
         const mi = s.menuItems.find((m) => m.id === l.itemId);
-        const st = mi
-          ? (resolveKitchen(s.kitchens, mi.categoryId)?.name ?? fallbackKitchenName)
-          : fallbackKitchenName;
-        byStation.set(st, [...(byStation.get(st) ?? []), l]);
-      });
-      const newKots: Kot[] = [...byStation.entries()].map(([station, lines], i) => ({
-        id: uid("k"),
-        kotNo: Math.max(...s.kots.map((k) => k.kotNo), 300) + 1 + i,
-        orderId,
-        tableLabel: o.tableLabel,
-        round,
-        station,
-        status: "Pending",
-        createdAt: nowStamp(),
-        items: lines.map((l) => ({
-          name: `${l.name}${l.variant ? ` (${l.variant})` : ""}`,
+        return {
+          id: Number(l.itemId),
           qty: l.qty,
-          ...(l.note ? { note: l.note } : {}),
-        })),
-      }));
-      patch((p) => ({
-        ...p,
-        kots: [...newKots, ...p.kots],
-        orders: p.orders.map((x) =>
-          x.id === orderId ? { ...x, kotRounds: round, status: "Running" } : x,
-        ),
-        tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Running" } : t)),
-        syncItems: [
-          {
-            id: uid("sy"),
-            entity: "KOT",
-            reference: `Round ${round} · ${o.tableLabel}`,
-            action: "Create",
-            status: p.connection === "online" ? "Synced" : "Pending",
-            queuedAt: nowStamp(),
-            device: "Counter POS",
-          },
-          ...p.syncItems,
-        ],
-        notifications: [
-          {
-            id: uid("n"),
-            title: "KOT sent to kitchen",
-            body: `Round ${round} · ${o.tableLabel} · ${pending.length} item(s).`,
-            at: nowStamp(),
-            read: false,
-            kind: "order",
-          },
-          ...p.notifications,
-        ],
-      }));
-      log(
-        "KOT Sent",
-        `Order #${o.orderNo}`,
-        `Round ${round - 1}`,
-        `Round ${round} · ${pending.length} item(s)`,
-      );
-      toast.success(`KOT round ${round} sent`, {
-        description: `${newKots.length} station ticket(s) printed.`,
+          price: l.price,
+          discount: 0,
+          addons: l.addons ?? [],
+          comment: l.note ?? "",
+          menu_categ_id: mi ? Number(mi.categoryId) : 0,
+        };
       });
+      const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
+
+      const run = async () => {
+        try {
+          const res = await orderApi.kotOrder({
+            order_type: o.type === "Dine In" ? "dinin" : "pickup",
+            ...(o.backendId ? { order_id: o.backendId } : {}),
+            ...(o.type === "Dine In" && table
+              ? { table_id: Number(table.id), tableNumber: table.name }
+              : {}),
+            cart: {
+              gst: totals.tax,
+              totalDiscount: totals.discount,
+              grandAmount: totals.grand,
+              myAmount: totals.subtotal,
+              service_charger: totals.service,
+              discount_reason: o.discount?.label ?? "",
+              discount_type: "fix",
+              discount_value: totals.discount,
+              taxes: [],
+              items: [{ status: "H", menuItems: menuItemsPayload }],
+            },
+          });
+          const backendId = res.kotInfo.order_id;
+
+          const byStation = new Map<string, OrderLine[]>();
+          const fallbackKitchenName =
+            (s.kitchens.find((k) => k.isDefault) ?? s.kitchens[0])?.name ?? "Kitchen";
+          pending.forEach((l) => {
+            const mi = s.menuItems.find((m) => m.id === l.itemId);
+            const st = mi
+              ? (resolveKitchen(s.kitchens, mi.categoryId)?.name ?? fallbackKitchenName)
+              : fallbackKitchenName;
+            byStation.set(st, [...(byStation.get(st) ?? []), l]);
+          });
+          const newKots: Kot[] = [...byStation.entries()].map(([station, lines], i) => ({
+            id: uid("k"),
+            kotNo: Math.max(...s.kots.map((k) => k.kotNo), 300) + 1 + i,
+            orderId,
+            tableLabel: o.tableLabel,
+            round,
+            station,
+            status: "Pending",
+            createdAt: nowStamp(),
+            items: lines.map((l) => ({
+              name: `${l.name}${l.variant ? ` (${l.variant})` : ""}`,
+              qty: l.qty,
+              ...(l.note ? { note: l.note } : {}),
+            })),
+          }));
+          patch((p) => ({
+            ...p,
+            kots: [...newKots, ...p.kots],
+            orders: p.orders.map((x) =>
+              x.id === orderId ? { ...x, kotRounds: round, status: "Running", backendId } : x,
+            ),
+            tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Running" } : t)),
+            syncItems: [
+              {
+                id: uid("sy"),
+                entity: "KOT",
+                reference: `Round ${round} · ${o.tableLabel}`,
+                action: "Create",
+                status: p.connection === "online" ? "Synced" : "Pending",
+                queuedAt: nowStamp(),
+                device: "Counter POS",
+              },
+              ...p.syncItems,
+            ],
+            notifications: [
+              {
+                id: uid("n"),
+                title: "KOT sent to kitchen",
+                body: `Round ${round} · ${o.tableLabel} · ${pending.length} item(s).`,
+                at: nowStamp(),
+                read: false,
+                kind: "order",
+              },
+              ...p.notifications,
+            ],
+          }));
+          log(
+            "KOT Sent",
+            `Order #${o.orderNo}`,
+            `Round ${round - 1}`,
+            `Round ${round} · ${pending.length} item(s)`,
+          );
+          toast.success(`KOT round ${round} sent`, {
+            description: `${newKots.length} station ticket(s) printed.`,
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not send KOT");
+        }
+      };
+      void run();
     },
 
     applyDiscount: (orderId, label, amount) => {

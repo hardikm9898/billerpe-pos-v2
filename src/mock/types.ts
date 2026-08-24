@@ -224,6 +224,12 @@ export interface Order {
   mergedFrom?: string[];
   itemised: boolean;
   fallbackTotal?: number;
+  /** uat-backend's real numeric hms_order_msts.id, set once the first KOT
+   * round for this order succeeds against the real API. Undefined means
+   * this order only exists locally (cart being built, nothing fired yet) -
+   * matches the backend's own reality that no Order row exists until the
+   * first KOT. */
+  backendId?: number;
 }
 
 export type KotStatus =
