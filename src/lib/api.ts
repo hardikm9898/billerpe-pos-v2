@@ -62,10 +62,13 @@ async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return unwrap(json);
 }
 
-async function apiDelete<T>(path: string): Promise<T> {
+async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     method: "DELETE",
     credentials: "include",
+    ...(body !== undefined
+      ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+      : {}),
   });
   const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
   return unwrap(json);
@@ -791,4 +794,186 @@ export const supplierApi = {
   getAll: () => apiGet<{ suppliers: RawSupplier[] }>("/stock/supplier"),
   create: (name: string) => apiPost<unknown>("/stock/supplier", { name }),
   update: (id: number, name: string) => apiPut<unknown>("/stock/supplier", { id, name }),
+};
+
+export type RawPurchaseOrderLine = {
+  id: number;
+  raw_material_id: number;
+  raw_material_name?: string;
+  quantity: number;
+  unit?: RawUnit;
+  price: number;
+  amount: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+};
+
+export type RawPurchaseOrderPayment = {
+  id: number;
+  amount: number;
+  paymentDate: string;
+  payment_mode: string;
+  payment_ref_no: string;
+  deleted_status: boolean;
+  createdAt: string;
+};
+
+export type RawPurchaseOrder = {
+  id: number;
+  date: string;
+  invoice_date: string | null;
+  invoice_number: string;
+  Po_no: number;
+  grandAmount: number;
+  GSTNo: string;
+  deleted_status: boolean;
+  sub_total: number;
+  discount: number;
+  discount_type: "fix" | "pr";
+  discount_value: number;
+  supplier?: { id: number; name: string };
+  rawMaterials: RawPurchaseOrderLine[];
+  payments: number;
+  paymentList: RawPurchaseOrderPayment[];
+};
+
+// controller/stock_Mangement/purchaseOrder.js - the most consequential
+// contract read in full before writing anything, given real money and
+// stock quantities move through it. Two confirmed gaps that shape how
+// this is wired:
+//
+// 1. Creation immediately updates stock (calls stockInFunction for every
+// line, inside a transaction) - there is no "ordered but not received"
+// state server-side at all. This app's local Draft/Ordered stage before
+// receipt has nothing to call here; only the "receive" step maps to an
+// actual backend write (create, or edit if already received once).
+//
+// 2. createPurchaseOrder only records a payment (PurchaseOrderPayment)
+// when payment_type is exactly "paid" - sending paidAmount alongside
+// payment_type "partial" is silently discarded, confirmed live (created
+// a PO with paidAmount:1000 and payment_type:"partial", payments came
+// back 0). paidAmount > 0 is always recorded via the separate payment
+// endpoint afterward instead of relying on create's embedded logic at
+// all, for both "paid" and "partial".
+//
+// editPurchaseOrder is also NOT wrapped in a transaction (unlike create
+// and delete) - a partial failure mid-edit could leave the order, its
+// line items, and stock levels inconsistent. Pre-existing backend risk,
+// not something fixed here.
+//
+// getPurchaseOrders requires real startDate/endDate (getShiftedDateRange
+// defaults to "today" if omitted) and does NOT filter out
+// deleted_status:true rows - they stay in the list, which is what this
+// app's own "Cancelled" status already expects to see.
+export const purchaseOrderApi = {
+  getAll: (startDate: string, endDate: string) =>
+    apiGet<{
+      purchaseOrders: RawPurchaseOrder[];
+      summary: {
+        totalPurchase: number;
+        totalPayment: number;
+        outStandingPayment: number;
+        totalOrders: number;
+      };
+    }>(`/stock/purchaseOrder?startDate=${startDate}&endDate=${endDate}`),
+
+  getMaxPo: () => apiGet<{ maxPo: number }>("/stock/maxPo"),
+
+  // payment_type is always sent as "unpaid" (with payment_mode "cash" and
+  // payment_ref_no "" just to clear the Joi conditionals safely) - actual
+  // payments are always recorded through the separate payment() call
+  // below instead of relying on create's embedded payment_type === "paid"
+  // logic, which only ever records a payment for that one exact value
+  // (see this const's own comment above).
+  create: (params: {
+    supplier_id: number;
+    GSTNo: string;
+    grandAmount: number;
+    discount: number;
+    delivery_charge: number;
+    invoice_date?: string;
+    invoice_number: string;
+    Po_no: number;
+    discount_type: "fix" | "pr";
+    discount_value: number;
+    sub_total: number;
+    rawMaterialData: {
+      raw_material_id: number;
+      qty: number;
+      price: number;
+      amount: number;
+      cgst: number;
+      sgst: number;
+      igst: number;
+      unit_id: number;
+    }[];
+  }) =>
+    apiPost<{ message?: string }>("/stock/purchaseOrder", {
+      ...params,
+      payment_type: "unpaid",
+      payment_mode: "cash",
+      payment_ref_no: "",
+    }),
+
+  // rawMaterialData[].id is matched by editPurchaseOrder against this
+  // PO's *currently active* PurchaseRawMaterial rows only (deleted_status
+  // false); any line it fetched for this PO but that isn't claimed by a
+  // matching id in the sent array gets silently soft-deleted (its stock
+  // reversed) as "removed" - confirmed live the hard way: sending a line
+  // id that belonged to a different, already-deleted PO caused this
+  // PO's real line to be silently wiped, with no error surfaced at all.
+  // Callers must always source `id` here from this PO's own most recent
+  // load (mapRawPurchaseOrder's backendLineId), never a cached/stale one.
+  update: (params: {
+    id: number;
+    supplier_id: number;
+    GSTNo: string;
+    grandAmount: number;
+    discount: number;
+    delivery_charge: number;
+    invoice_date?: string;
+    invoice_number: string;
+    Po_no: number;
+    discount_type: "fix" | "pr";
+    discount_value: number;
+    sub_total: number;
+    rawMaterialData: {
+      id?: number;
+      raw_material_id: number;
+      qty: number;
+      price: number;
+      amount: number;
+      cgst: number;
+      sgst: number;
+      igst: number;
+      unit_id: number;
+    }[];
+  }) =>
+    apiPut<{ message?: string }>("/stock/purchaseOrder", {
+      ...params,
+      // updatePurchaseOrderSchema validates payment_type/payment_mode/
+      // payment_ref_no (payment_mode required only when payment_type is
+      // "paid"; payment_ref_no required whenever payment_mode isn't
+      // "cash", including when payment_mode is simply absent - Joi's
+      // `not: 'cash'` matches undefined too) even though
+      // editPurchaseOrder's controller body destructures payment_type
+      // but never actually uses it, and doesn't destructure payment_mode/
+      // payment_ref_no at all - confirmed by reading the whole function.
+      // Sent only to satisfy validation, with values that can't trip the
+      // conditional requirements.
+      payment_type: "unpaid",
+      payment_mode: "cash",
+      payment_ref_no: "",
+    }),
+
+  remove: (id: number) => apiDelete<{ message?: string }>("/stock/purchaseOrder", { id }),
+
+  payment: (params: {
+    id: number;
+    payment_mode: "cash" | "card" | "online" | "cheque" | "other";
+    payment_ref_no: string;
+    payment_date: string;
+    paidAmount: number;
+  }) => apiPost<{ message?: string }>("/stock/payment", params),
 };

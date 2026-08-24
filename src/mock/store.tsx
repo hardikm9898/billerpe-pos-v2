@@ -21,9 +21,11 @@ import {
   stockUnitApi,
   rawMaterialApi,
   supplierApi,
+  purchaseOrderApi,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
+  type RawPurchaseOrder,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -81,6 +83,7 @@ import type {
   PermissionOverrides,
   Printer,
   PurchaseOrder,
+  PurchaseLine,
   RawMaterial,
   Recipe,
   Reservation,
@@ -495,6 +498,7 @@ interface Ctx extends State {
   loadUnitsFromServer: () => Promise<void>;
   loadRawMaterialsFromServer: () => Promise<void>;
   loadSuppliersFromServer: () => Promise<void>;
+  loadPurchaseOrdersFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -895,6 +899,45 @@ function mapRawTaxType(
 
 function mapRawUnit(u: RawUnit): StockUnit {
   return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
+}
+
+function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): PurchaseOrder {
+  const lines: PurchaseLine[] = o.rawMaterials.map((l) => {
+    const taxAmount = (l.cgst || 0) + (l.sgst || 0) + (l.igst || 0);
+    return {
+      materialId: String(l.raw_material_id),
+      qty: l.quantity,
+      rate: l.price,
+      taxPct: l.amount > 0 ? Math.round((taxAmount / l.amount) * 10000) / 100 : undefined,
+      backendLineId: l.id,
+    };
+  });
+  const paid = o.payments;
+  return {
+    id: previous?.id ?? `po-${o.id}`,
+    poNo: `PO-2026-${String(o.Po_no).padStart(3, "0")}`,
+    supplierId: o.supplier ? String(o.supplier.id) : (previous?.supplierId ?? ""),
+    date: previous?.date ?? todayLabel,
+    // No status column at all server-side (confirmed by reading the
+    // model - the list endpoint's own response literally references
+    // order.status/order.paymentStatus, which come back undefined since
+    // neither is a real column). Creation there immediately updates
+    // stock, so every backend-sourced order is either "Received" or, if
+    // soft-deleted, "Cancelled" - the other three local statuses
+    // (Draft/Ordered/Partially Received) have nothing to derive from and
+    // are never assigned here.
+    status: o.deleted_status ? "Cancelled" : "Received",
+    lines,
+    invoiceNo: o.invoice_number || undefined,
+    gstin: o.GSTNo || undefined,
+    paymentStatus:
+      paid >= o.grandAmount && o.grandAmount > 0 ? "Paid" : paid > 0 ? "Partial" : "Unpaid",
+    paidAmount: paid,
+    discountType: o.discount_type === "pr" ? "percent" : "flat",
+    discountValue: o.discount_value,
+    requisitionId: previous?.requisitionId,
+    backendId: o.id,
+  };
 }
 
 function mapRawSupplier(
@@ -3040,6 +3083,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load suppliers from server");
       }
     },
+    loadPurchaseOrdersFromServer: async () => {
+      try {
+        const { purchaseOrders } = await purchaseOrderApi.getAll("2000-01-01", "2100-01-01");
+        const previousByBackendId = new Map(
+          s.purchaseOrders.filter((p) => p.backendId).map((p) => [p.backendId, p]),
+        );
+        const fresh = purchaseOrders.map((o) =>
+          mapRawPurchaseOrder(o, previousByBackendId.get(o.id)),
+        );
+        patch((p) => ({
+          ...p,
+          purchaseOrders: [
+            ...fresh,
+            // Draft/Ordered POs never sent to the backend yet - this
+            // endpoint has no way to represent "ordered but not received"
+            // at all (see purchaseOrderApi's own comment), so these stay
+            // exactly as local as before this was wired.
+            ...p.purchaseOrders.filter((x) => !x.backendId),
+          ],
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load purchase orders from server",
+        );
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3293,6 +3362,111 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ? "Stock, supplier outstanding and reports updated."
           : "Draft saved. Stock updates on receipt.",
       });
+
+      // The one moment this actually talks to the backend - creating a
+      // purchase order there immediately updates real stock (see
+      // purchaseOrderApi's own comment), so only receiving (not the
+      // local Draft/Ordered stage, which has no backend equivalent at
+      // all) maps to a write. Runs after the optimistic local update
+      // above, same pattern as the rest of this app: local state drives
+      // the UI immediately, this syncs it to the backend and reconciles
+      // once that resolves.
+      if (!receive) return;
+      const supplierId = Number(record.supplierId);
+      if (!supplierId) {
+        toast.error("Select a valid supplier before receiving");
+        return;
+      }
+      const rawMaterialData = record.lines.map((l) => {
+        const material = s.rawMaterials.find((m) => m.id === l.materialId);
+        const purchaseUnitId = material
+          ? s.units.find((u) => u.shortName === material.purchaseUnit)?.id
+          : undefined;
+        const amount = Math.round(l.qty * l.rate * 100) / 100;
+        const taxAmount = (amount * (l.taxPct ?? 0)) / 100;
+        return {
+          ...(l.backendLineId ? { id: l.backendLineId } : {}),
+          raw_material_id: Number(l.materialId),
+          qty: l.qty,
+          price: l.rate,
+          amount,
+          cgst: Math.round((taxAmount / 2) * 100) / 100,
+          sgst: Math.round((taxAmount / 2) * 100) / 100,
+          igst: 0,
+          unit_id: purchaseUnitId ? Number(purchaseUnitId) : 0,
+        };
+      });
+      if (rawMaterialData.some((l) => !l.unit_id)) {
+        toast.error("One or more materials has no purchase unit configured", {
+          description: "Set a purchase unit on it under Stock › Raw Materials first.",
+        });
+        return;
+      }
+      const payload = {
+        supplier_id: supplierId,
+        GSTNo: record.gstin ?? "",
+        grandAmount: totals.grand,
+        discount: totals.discount,
+        delivery_charge: 0,
+        invoice_number: record.invoiceNo ?? "",
+        Po_no: Number(record.poNo.split("-").pop()) || 0,
+        discount_type: record.discountType === "percent" ? ("pr" as const) : ("fix" as const),
+        discount_value: record.discountValue ?? 0,
+        sub_total: totals.subtotal,
+        rawMaterialData,
+      };
+      const backendId = record.backendId;
+      const previousBackendIds = new Set(
+        s.purchaseOrders.filter((p) => p.backendId).map((p) => p.backendId),
+      );
+      const paidAmount = record.paidAmount ?? 0;
+      const runSync = async () => {
+        try {
+          let realId = backendId;
+          if (!realId) {
+            // createPurchaseOrder doesn't return the new row's id -
+            // finding it by diffing the id set before/after, same
+            // pattern as Kitchens/Printers.
+            await purchaseOrderApi.create(payload);
+            const { purchaseOrders } = await purchaseOrderApi.getAll("2000-01-01", "2100-01-01");
+            const created = purchaseOrders.find((o) => !previousBackendIds.has(o.id));
+            if (!created) {
+              toast.error("Purchase order saved locally but couldn't be confirmed on the server", {
+                description: "Reload the Purchase Orders screen to check.",
+              });
+              return;
+            }
+            realId = created.id;
+          } else {
+            await purchaseOrderApi.update({ id: realId, ...payload });
+          }
+          if (paidAmount > 0) {
+            // paidAmount sent at create time only actually persists when
+            // payment_type is exactly "paid" (confirmed live) - always
+            // recorded through the separate payment endpoint instead, for
+            // both the first receipt and any later edit.
+            await purchaseOrderApi.payment({
+              id: realId,
+              payment_mode: "cash",
+              payment_ref_no: "",
+              payment_date: new Date().toISOString().slice(0, 10),
+              paidAmount,
+            });
+          }
+          await value.loadPurchaseOrdersFromServer();
+          patch((p) => ({
+            ...p,
+            // Drop the temporary local-only record now superseded by the
+            // backend-derived one loadPurchaseOrdersFromServer just added.
+            purchaseOrders: p.purchaseOrders.filter((x) => x.id !== id || !!x.backendId),
+          }));
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not sync purchase order to the server",
+          );
+        }
+      };
+      void runSync();
     },
     payPurchaseOrder: (id, amount) => {
       const po = s.purchaseOrders.find((x) => x.id === id);
@@ -3317,6 +3491,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       toast.success("Payment recorded", { description: `${po.poNo} · ₹${amount}` });
+
+      if (!po.backendId) return;
+      const run = async () => {
+        try {
+          await purchaseOrderApi.payment({
+            id: po.backendId!,
+            payment_mode: "cash",
+            payment_ref_no: "",
+            payment_date: new Date().toISOString().slice(0, 10),
+            paidAmount: amount,
+          });
+          await value.loadPurchaseOrdersFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Payment saved locally but couldn't be synced",
+          );
+        }
+      };
+      void run();
     },
     cancelPurchaseOrder: (id) => {
       const po = s.purchaseOrders.find((x) => x.id === id);
@@ -3334,6 +3527,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       toast.success(`${po.poNo} cancelled`);
+
+      if (!po.backendId) return;
+      const run = async () => {
+        try {
+          await purchaseOrderApi.remove(po.backendId!);
+          await value.loadPurchaseOrdersFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Cancelled locally but the backend reversal failed",
+          );
+        }
+      };
+      void run();
     },
     saveStockCount: (rows, note) => {
       const who = currentUser?.name ?? "Taj";

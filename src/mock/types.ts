@@ -376,6 +376,11 @@ export interface PurchaseLine {
   /** rate per purchase unit */
   rate: number;
   taxPct?: number;
+  /** uat-backend's hms_purchase_rawMaterial.id - lets an edit after
+   * receipt reuse the backend's own update-vs-create-vs-remove diff (by
+   * id) instead of this app trying to reimplement it. Undefined for a
+   * line that hasn't reached the backend yet. */
+  backendLineId?: number;
 }
 
 export interface PurchaseOrder {
@@ -392,6 +397,13 @@ export interface PurchaseOrder {
   discountType?: "flat" | "percent";
   discountValue?: number;
   requisitionId?: string;
+  /** uat-backend's hms_purchase_order.id, set once this PO is actually
+   * received (creation there immediately updates stock - there is no
+   * "ordered but not received" state server-side at all, confirmed by
+   * reading createPurchaseOrder in full). Undefined means this PO only
+   * exists locally as a Draft/Ordered stage, matching the backend's own
+   * reality that no row exists until receipt. */
+  backendId?: number;
 }
 
 export interface Wastage {
