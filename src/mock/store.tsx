@@ -20,8 +20,10 @@ import {
   taxApi,
   stockUnitApi,
   rawMaterialApi,
+  supplierApi,
   type RawUnit,
   type RawRawMaterial,
+  type RawSupplier,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -492,6 +494,7 @@ interface Ctx extends State {
   loadServiceChargeFromServer: () => Promise<void>;
   loadUnitsFromServer: () => Promise<void>;
   loadRawMaterialsFromServer: () => Promise<void>;
+  loadSuppliersFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -892,6 +895,24 @@ function mapRawTaxType(
 
 function mapRawUnit(u: RawUnit): StockUnit {
   return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
+}
+
+function mapRawSupplier(
+  s: RawSupplier,
+  previous?: Pick<Supplier, "contact" | "phone" | "gstin" | "outstanding">,
+): Supplier {
+  return {
+    id: String(s.id),
+    name: s.name,
+    // No backend field for any of these (model/Inventory/supplyer.js
+    // only has `name`) - carried over across reloads by id, same pattern
+    // as raw materials' `category`. `outstanding` is also meant to be
+    // derived from purchase orders once that's wired, not a raw field.
+    contact: previous?.contact ?? "",
+    phone: previous?.phone ?? "",
+    gstin: previous?.gstin ?? "",
+    outstanding: previous?.outstanding ?? 0,
+  };
 }
 
 function mapRawMaterial(m: RawRawMaterial, previousCategory?: string): RawMaterial {
@@ -3007,6 +3028,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    loadSuppliersFromServer: async () => {
+      try {
+        const { suppliers } = await supplierApi.getAll();
+        const previousById = new Map(s.suppliers.map((x) => [x.id, x]));
+        patch((p) => ({
+          ...p,
+          suppliers: suppliers.map((x) => mapRawSupplier(x, previousById.get(String(x.id)))),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load suppliers from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3098,13 +3131,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     upsertSupplier: (sup) => {
-      patch((p) => ({
-        ...p,
-        suppliers: p.suppliers.some((x) => x.id === sup.id)
-          ? p.suppliers.map((x) => (x.id === sup.id ? sup : x))
-          : [...p.suppliers, { ...sup, id: sup.id || uid("s") }],
-      }));
-      toast.success("Supplier saved");
+      if (!sup.name.trim()) {
+        toast.error("Supplier name is required");
+        return;
+      }
+      const previousIds = new Set(s.suppliers.map((x) => x.id));
+      const previousById = new Map(s.suppliers.map((x) => [x.id, x]));
+      const localFields = {
+        contact: sup.contact,
+        phone: sup.phone,
+        gstin: sup.gstin,
+        outstanding: sup.outstanding,
+      };
+      const run = async () => {
+        try {
+          if (sup.id) {
+            await supplierApi.update(Number(sup.id), sup.name);
+          } else {
+            await supplierApi.create(sup.name);
+          }
+          // create/edit responses use inconsistent shapes for the same
+          // key (see supplierApi's own comment) - reloading the canonical
+          // list instead of trusting either one.
+          const { suppliers } = await supplierApi.getAll();
+          patch((p) => ({
+            ...p,
+            suppliers: suppliers.map((x) => {
+              const id = String(x.id);
+              // The row this call just created or edited keeps the
+              // draft's local-only fields (contact/phone/gstin/
+              // outstanding - none of which the backend has); every
+              // other row keeps whatever it already had.
+              const isSavedRow = sup.id ? id === sup.id : !previousIds.has(id);
+              return mapRawSupplier(x, isSavedRow ? localFields : previousById.get(id));
+            }),
+          }));
+          toast.success("Supplier saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save supplier");
+        }
+      };
+      void run();
     },
     upsertPurchaseOrder: (po) => {
       patch((p) => ({

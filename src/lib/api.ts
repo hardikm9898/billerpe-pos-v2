@@ -778,3 +778,17 @@ export const rawMaterialApi = {
     mini_stock_level_qty: number;
   }) => apiPut<{ rawMaterials: RawRawMaterial[] }>("/stock/editRowMaterial", params),
 };
+
+export type RawSupplier = { id: number; name: string; deleted_status: boolean };
+
+// model/Inventory/supplyer.js only has `name` - no contact/phone/gstin/
+// outstanding at all, confirmed by reading the model. createSupplier's
+// response returns just the new row under `supplier` (singular object);
+// editSupplier's response reuses the exact same key name for the full
+// list instead (an array) - confirmed live, not assumed - so callers
+// reload via getAll after either write rather than trust either shape.
+export const supplierApi = {
+  getAll: () => apiGet<{ suppliers: RawSupplier[] }>("/stock/supplier"),
+  create: (name: string) => apiPost<unknown>("/stock/supplier", { name }),
+  update: (id: number, name: string) => apiPut<unknown>("/stock/supplier", { id, name }),
+};
