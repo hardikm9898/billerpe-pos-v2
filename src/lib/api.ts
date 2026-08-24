@@ -375,4 +375,24 @@ export const orderApi = {
       taxes: unknown[];
     };
   }) => apiPost<{ message?: string; orderId?: number }>("/adminOrder", payload),
+
+  // POST /settleBills only ever looks up orders with order_type "dinin"
+  // (its own WHERE clause) - pickup has no settlement step at all here,
+  // its payment is collected directly in adminOrder's pickup branch
+  // instead, confirmed by reading both functions together. Requires the
+  // order to already be payment:"pending" (i.e. adminOrder must have run
+  // first). cash+upi+card+due must sum to exactly `amount`, checked
+  // server-side. This is also the one and only place dine-in stock gets
+  // deducted (checkRawMaterialAvailableOrNot) - confirmed no other dine-in
+  // code path calls it, so there's no double-deduction risk here the way
+  // there is for pickup (which this app doesn't wire).
+  settleBills: (payload: {
+    id: number;
+    amount: number;
+    cash: number;
+    upi: number;
+    card: number;
+    due: number;
+    mobile?: string;
+  }) => apiPost<{ message?: string }>("/settleBills", payload),
 };

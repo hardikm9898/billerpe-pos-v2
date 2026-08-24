@@ -1613,90 +1613,141 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
+      if (o.type !== "Dine In") {
+        toast.error("Pickup settlement isn't wired to the real backend yet", {
+          description:
+            "Pickup pays at bill-generation time on the backend, not a separate settle step.",
+        });
+        return;
+      }
+      if (!o.backendId) {
+        toast.error("This order has no backend record to settle");
+        return;
+      }
+      // Backend only has cash/upi/card/due - any other configured payment
+      // mode (custom modes are supported by this app's PaymentModeConfig,
+      // the backend has no equivalent) can't be sent and would silently
+      // vanish from the real total if allowed through.
+      const known = new Set(["Cash", "UPI", "Card", "Due"]);
+      const unknownMode = payments.find((p) => !known.has(p.mode));
+      if (unknownMode) {
+        toast.error(`"${unknownMode.mode}" isn't a payment mode the backend supports yet`, {
+          description: "Only Cash, UPI, Card, and Due can be settled against the real order.",
+        });
+        return;
+      }
+      const sumFor = (mode: string) =>
+        payments.filter((p) => p.mode === mode).reduce((sum, p) => sum + p.amount, 0);
+      const cashAmt = sumFor("Cash");
+      const upiAmt = sumFor("UPI");
+      const cardAmt = sumFor("Card");
+      const dueAmt = sumFor("Due");
+      const settleTotal = payments.reduce((sum, p) => sum + p.amount, 0);
+
       const mode = payments.length > 1 ? "Split" : payments[0].mode;
       const cashPortion = payments
         .filter((p) => p.mode === "Cash")
         .reduce((sum, p) => sum + p.amount, 0);
       const total = payments.reduce((sum, p) => sum + p.amount, 0);
-      patch((p) => ({
-        ...p,
-        orders: p.orders.map((x) =>
-          x.id === orderId
-            ? {
-                ...x,
-                status: "Settled",
-                payments: [...(x.payments ?? []), ...payments],
-                paymentMode: mode,
-                settledAt: nowStamp(),
-                fallbackTotal: (x.fallbackTotal ?? 0) + total,
-              }
-            : x,
-        ),
-        dueBills:
-          duePortion > 0
-            ? [
-                {
-                  id: uid("due"),
-                  billNo: `#${o.orderNo}`,
-                  customerName: o.customerName ?? "Guest",
-                  mobile: o.customerPhone ?? "",
-                  date: todayLabel,
-                  daysAgo: 0,
-                  amount: duePortion,
-                  status: "Due" as const,
-                },
-                ...p.dueBills,
-              ]
-            : p.dueBills,
-        tables: p.tables.map((t) =>
-          t.id === o.tableId
-            ? {
-                ...t,
-                status: "Free",
-                guests: undefined,
-                orderId: undefined,
-                occupiedSince: undefined,
-              }
-            : t,
-        ),
-        cashSessions: p.cashSessions.map((cs) =>
-          cs.status === "Open" && cashPortion !== 0
-            ? {
-                ...cs,
-                movements: [
-                  ...cs.movements,
+
+      const run = async () => {
+        try {
+          await orderApi.settleBills({
+            id: o.backendId!,
+            amount: settleTotal,
+            cash: cashAmt,
+            upi: upiAmt,
+            card: cardAmt,
+            due: dueAmt,
+            ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
+          });
+          applySettlement();
+          log("Bill Settled", `Order #${o.orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
+          toast.success(`Order #${o.orderNo} settled`, {
+            description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not settle order");
+        }
+      };
+
+      const applySettlement = () =>
+        patch((p) => ({
+          ...p,
+          orders: p.orders.map((x) =>
+            x.id === orderId
+              ? {
+                  ...x,
+                  status: "Settled",
+                  payments: [...(x.payments ?? []), ...payments],
+                  paymentMode: mode,
+                  settledAt: nowStamp(),
+                  fallbackTotal: (x.fallbackTotal ?? 0) + total,
+                }
+              : x,
+          ),
+          dueBills:
+            duePortion > 0
+              ? [
                   {
-                    id: uid("cm"),
-                    type: "Settlement" as const,
-                    amount: cashPortion,
-                    reason:
-                      cashPortion < 0
-                        ? `Cash refund · Order #${o.orderNo}`
-                        : `Cash settlement · Order #${o.orderNo}`,
-                    at: nowStamp(),
-                    by: currentUser?.name ?? "Taj",
+                    id: uid("due"),
+                    billNo: `#${o.orderNo}`,
+                    customerName: o.customerName ?? "Guest",
+                    mobile: o.customerPhone ?? "",
+                    date: todayLabel,
+                    daysAgo: 0,
+                    amount: duePortion,
+                    status: "Due" as const,
                   },
-                ],
-              }
-            : cs,
-        ),
-        syncItems: [
-          {
-            id: uid("sy"),
-            entity: "Bill",
-            reference: `#${o.orderNo}`,
-            action: "Settle",
-            status: p.connection === "online" ? "Synced" : "Pending",
-            queuedAt: nowStamp(),
-            device: "Counter POS",
-          },
-          ...p.syncItems,
-        ],
-      }));
-      log("Bill Settled", `Order #${o.orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
-      toast.success(`Order #${o.orderNo} settled`, {
-        description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
-      });
+                  ...p.dueBills,
+                ]
+              : p.dueBills,
+          tables: p.tables.map((t) =>
+            t.id === o.tableId
+              ? {
+                  ...t,
+                  status: "Free",
+                  guests: undefined,
+                  orderId: undefined,
+                  occupiedSince: undefined,
+                }
+              : t,
+          ),
+          cashSessions: p.cashSessions.map((cs) =>
+            cs.status === "Open" && cashPortion !== 0
+              ? {
+                  ...cs,
+                  movements: [
+                    ...cs.movements,
+                    {
+                      id: uid("cm"),
+                      type: "Settlement" as const,
+                      amount: cashPortion,
+                      reason:
+                        cashPortion < 0
+                          ? `Cash refund · Order #${o.orderNo}`
+                          : `Cash settlement · Order #${o.orderNo}`,
+                      at: nowStamp(),
+                      by: currentUser?.name ?? "Taj",
+                    },
+                  ],
+                }
+              : cs,
+          ),
+          syncItems: [
+            {
+              id: uid("sy"),
+              entity: "Bill",
+              reference: `#${o.orderNo}`,
+              action: "Settle",
+              status: p.connection === "online" ? "Synced" : "Pending",
+              queuedAt: nowStamp(),
+              device: "Counter POS",
+            },
+            ...p.syncItems,
+          ],
+        }));
+      void run();
     },
 
     reopenOrder: (orderId) => {
