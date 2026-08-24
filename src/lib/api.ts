@@ -1228,3 +1228,106 @@ export const expenseApi = {
   }) => apiPut<{ message?: string }>("/expense/editExpense", params),
   remove: (id: number) => apiDelete<{ message?: string }>("/expense/deleteExpense", { id }),
 };
+
+export type RawDayWisePeriod = {
+  period: string;
+  totalAmount: number;
+  gst: number;
+  grandAmount: number;
+  totalDiscount: number;
+  card: number;
+  cash: number;
+  upi: number;
+  due: number;
+  totalOrders: number;
+};
+
+export type RawItemWiseRow = {
+  item_name: string;
+  variant_name: string;
+  catagoriesName: string;
+  totalQty: number;
+  totalSale: number;
+  gst: number;
+};
+
+export type RawCategoryWiseRow = {
+  categoryName: string;
+  totalQty: number;
+  totalSale: number;
+};
+
+export type RawTaxBreakdown = {
+  taxName: string;
+  totalAmount: string;
+  applicableOrders: number;
+};
+
+export type RawPosCollection = {
+  totalBills: number;
+  cashTotal: string;
+  dueTotal: string;
+  upiTotal: string;
+  cardTotal: string;
+  totalGst: string;
+  totalDiscount: string;
+  totalDynamicTax: number;
+  taxBreakdown: RawTaxBreakdown[];
+};
+
+export type RawDiscountedOrder = {
+  id: number;
+  bill_no: string;
+  grandAmount: string | number;
+  totalDiscount: string | number;
+  order_type: string;
+  createdAt: string;
+};
+
+// controller/reports/*.js. Every one of these requires BOTH
+// startDate/endDate (confirmed live - no "defaults to today" gap here),
+// and dayWiseSales additionally requires period=daily|monthly|yearly. The
+// Reports screen this feeds has never had a date-range picker of its own -
+// it always showed all-time data computed client-side from whatever was
+// in the local store - so this app always calls these with a fixed wide
+// range rather than adding a range control, since this is a backend swap
+// for the existing "show everything" behaviour, not a new feature.
+//
+// dayWiseSales's periodData array has an extra "Total" summary row
+// unshifted onto the front (period: "Total") - filter that out before
+// treating it as a per-day table.
+//
+// discountedOrders (controller/reports/orderRelated.js#DiscountedOrdersReport)
+// paginates server-side at a hardcoded 10 rows/page (the route's `limit`
+// query param, if any, is ignored - confirmed by reading getPaginatedData's
+// call site) - getAllDiscountedOrders below walks every page rather than
+// silently truncating to the first 10, capped at 50 pages (500 rows) as a
+// sanity bound.
+export const reportApi = {
+  dayWiseSales: (startDate: string, endDate: string) =>
+    apiGet<{ periodData: RawDayWisePeriod[] }>(
+      `/report/order-aggregation?period=daily&startDate=${startDate}&endDate=${endDate}`,
+    ),
+  itemAndCategoryWiseSales: (startDate: string, endDate: string) =>
+    apiGet<{ itemWise: RawItemWiseRow[]; categoryWise: RawCategoryWiseRow[] }>(
+      `/report/itemTextReports?startDate=${startDate}&endDate=${endDate}`,
+    ),
+  posCollection: (startDate: string, endDate: string) =>
+    apiGet<{ posCollections: RawPosCollection }>(
+      `/report/posCollection?startDate=${startDate}&endDate=${endDate}`,
+    ),
+  discountedOrdersPage: (startDate: string, endDate: string, page: number) =>
+    apiGet<{
+      discountedOrders: { data: RawDiscountedOrder[]; totalPages: number };
+    }>(`/report/discountedReports?startDate=${startDate}&endDate=${endDate}&page=${page}`),
+  getAllDiscountedOrders: async (startDate: string, endDate: string) => {
+    const first = await reportApi.discountedOrdersPage(startDate, endDate, 1);
+    const all = [...first.discountedOrders.data];
+    const totalPages = Math.min(first.discountedOrders.totalPages, 50);
+    for (let page = 2; page <= totalPages; page++) {
+      const next = await reportApi.discountedOrdersPage(startDate, endDate, page);
+      all.push(...next.discountedOrders.data);
+    }
+    return all;
+  },
+};
