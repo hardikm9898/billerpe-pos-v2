@@ -411,3 +411,14 @@ export const orderApi = {
     mobile?: string;
   }) => apiPost<{ message?: string }>("/settleBills", payload),
 };
+
+// GET /kitchen/kitchens is guarded by a *different* auth middleware
+// (middleware/adminAuth.js's adminAuth, which additionally requires a
+// matching UserSession row) than most of the routes above (middleware/
+// auth.js's isAuth) - confirmed live that restaurantLogin's cookies
+// satisfy both, so this doesn't need separate handling here, just noting
+// the backend isn't internally consistent about which auth guard it uses.
+export const kitchenApi = {
+  getKitchens: () =>
+    apiGet<{ kitchen: { id: number; kitchen_name: string }[] }>("/kitchen/kitchens"),
+};

@@ -1,10 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { ChefHat, Clock, Timer } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { EmptyState, Page, PageHeader, StatusBadge } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { connectKdsSocket } from "@/lib/kdsSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
 import { useStore } from "@/mock/store";
@@ -40,6 +41,22 @@ function KdsPage() {
   const store = useStore();
   const [station, setStation] = useState<string>("All");
   const stations = ["All", ...store.kitchens.map((k) => k.name)];
+
+  // Real-time visibility across devices only - see the KDS wiring
+  // decision: the backend has just one ready/not-ready flag per item, no
+  // equivalent of this board's Accepted/Preparing/Ready/Served stages, so
+  // those stay purely local (setKotStatus, unchanged). This only makes a
+  // KOT fired on one screen show up live on other screens, and clears it
+  // here once settled elsewhere.
+  useEffect(() => {
+    if (!store.authed) return;
+    const disconnect = connectKdsSocket({
+      onTicket: (ticket) => store.receiveKdsTicket(ticket),
+      onOrderComplete: (orderId) => store.receiveKdsOrderComplete(orderId),
+    });
+    return disconnect;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.authed]);
 
   const kots = store.kots
     .filter((k) => k.status !== "Served" && k.status !== "Cancelled")

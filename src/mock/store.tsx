@@ -20,6 +20,7 @@ import {
   type RawAddonGroup,
   type RawHotelUser,
 } from "@/lib/api";
+import type { KdsTicketPayload } from "@/lib/kdsSocket";
 import type {
   AddonGroup,
   AppNotification,
@@ -412,6 +413,8 @@ interface Ctx extends State {
   transferTable: (orderId: string, destTableId: string) => void;
   /* kds */
   setKotStatus: (kotId: string, status: Kot["status"]) => void;
+  receiveKdsTicket: (payload: KdsTicketPayload) => void;
+  receiveKdsOrderComplete: (backendOrderId: number) => void;
   /* reservations */
   addReservation: (r: Omit<Reservation, "id">) => void;
   setReservationStatus: (id: string, status: Reservation["status"]) => void;
@@ -1406,6 +1409,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             station,
             status: "Pending",
             createdAt: nowStamp(),
+            backendOrderId: backendId,
+            kotNumber: round,
             items: lines.map((l) => ({
               name: `${l.name}${l.variant ? ` (${l.variant})` : ""}`,
               qty: l.qty,
@@ -1989,6 +1994,72 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         kots: p.kots.map((k) => (k.id === kotId ? { ...k, status } : k)),
       }));
       toast.success(`KOT marked ${status}`);
+    },
+
+    // Live push from another device/tab's KDS socket connection (see
+    // lib/kdsSocket.ts) - a KOT round this tab didn't create itself, or
+    // one it did (in which case it's already present, tagged with the
+    // same backendOrderId+kotNumber by generateKot, and this is a no-op).
+    receiveKdsTicket: (payload) => {
+      patch((p) => {
+        const already = p.kots.some(
+          (k) => k.backendOrderId === payload.id && k.kotNumber === payload.kotNumber,
+        );
+        if (already) return p;
+
+        const fallbackKitchenName =
+          (p.kitchens.find((k) => k.isDefault) ?? p.kitchens[0])?.name ?? "Kitchen";
+        const byStation = new Map<string, KdsTicketPayload["items"]>();
+        payload.items.forEach((item) => {
+          const station =
+            resolveKitchen(p.kitchens, String(item.menu_categ_id))?.name ?? fallbackKitchenName;
+          byStation.set(station, [...(byStation.get(station) ?? []), item]);
+        });
+
+        const table =
+          payload.type === "dinin"
+            ? p.tables.find((t) => t.id === String(payload.tableId))
+            : undefined;
+        const category = table
+          ? p.tableCategories.find((c) => c.id === table.categoryId)
+          : undefined;
+        const tableLabel = table ? `${category?.name ?? ""} · ${table.name}` : "Take Away";
+        const order = p.orders.find((o) => o.backendId === payload.id);
+
+        const newKots: Kot[] = [...byStation.entries()].map(([station, items], i) => ({
+          id: uid("k"),
+          kotNo: Math.max(...p.kots.map((k) => k.kotNo), 300) + 1 + i,
+          orderId: order?.id ?? `remote-${payload.id}`,
+          tableLabel,
+          round: payload.kotNumber,
+          station,
+          status: "Pending",
+          createdAt: nowStamp(),
+          backendOrderId: payload.id,
+          kotNumber: payload.kotNumber,
+          items: items.map((item) => ({
+            name: item.name,
+            qty: item.qty,
+            ...(item.comment ? { note: item.comment } : {}),
+          })),
+        }));
+        return { ...p, kots: [...newKots, ...p.kots] };
+      });
+    },
+
+    // "orderComplete" fires on settlement (see kds.js's
+    // orderCompletedSendtoKdsCLient) - this tab's own settleOrder already
+    // handles its own order locally, so this only ever does real work for
+    // an order settled from another device.
+    receiveKdsOrderComplete: (backendOrderId) => {
+      patch((p) => ({
+        ...p,
+        kots: p.kots.map((k) =>
+          k.backendOrderId === backendOrderId && k.status !== "Served" && k.status !== "Cancelled"
+            ? { ...k, status: "Served" as const }
+            : k,
+        ),
+      }));
     },
 
     addReservation: (r) => {

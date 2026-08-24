@@ -246,6 +246,18 @@ export interface Kot {
   status: KotStatus;
   createdAt: string;
   items: { name: string; qty: number; note?: string }[];
+  /** uat-backend's hms_order_msts.id this round belongs to, paired with
+   * kotNumber as the dedupe key against live /kds socket pushes for the
+   * same round arriving from another device/tab - undefined for KOTs that
+   * predate real-backend wiring. */
+  backendOrderId?: number;
+  /** Assumed equal to the local `round` counter at KOT-fire time (both
+   * start at 1 and increment once per generateKot call for the order) -
+   * confirmed live for fresh orders, not exhaustively for every backend
+   * code path. A mismatch would at worst show a duplicate ticket on a
+   * session that has both the Orders and KDS pages open, not corrupt
+   * anything, per the "visibility only" scope this was built to. */
+  kotNumber?: number;
 }
 
 export interface Customer {
