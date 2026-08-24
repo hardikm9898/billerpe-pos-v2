@@ -1109,3 +1109,57 @@ export const semiFinishedApi = {
       params,
     ),
 };
+
+export type RawRecipeIngredient = {
+  ingredient_type: "raw_material" | "semi_finished";
+  raw_material_id?: number;
+  semi_finished_item_id?: number;
+  consumption_qty: number;
+};
+
+export type RawRecipeDetail = {
+  menu_id: number;
+  item_name: string;
+  variants: { variant_id: number | null; raw_materials: RawRecipeIngredient[] }[];
+};
+
+export type RawRecipeSummary = { menu_id: number };
+
+// controller/recipes.js. addRecipes/editRecipes each operate on exactly
+// ONE (menu_id, variant_id, addon_id) combination per call, not a whole
+// item's recipe at once - addRecipes 409s if that combination already
+// exists ("use edit instead"), editRecipes 404s if it doesn't ("use add
+// instead"), so the caller has to already know which one applies.
+// editRecipes fully replaces (destroy then bulkCreate) rather than
+// diffing by line id - the full current ingredient list is always sent,
+// never a partial one, confirmed live.
+//
+// This app's RecipeEditor has no way to pick which real Variant/Addon a
+// "variant group"/"addon group" corresponds to at all (its group `key`
+// is a random local string, `label` is free text) - only the base group
+// (variant_id: null, addon_id: null) is an unambiguous, addressable
+// combination, so only that one is wired here (store.tsx's upsertRecipe
+// warns rather than silently drops if a variant/addon group has content).
+export const recipeApi = {
+  getAllLinked: () => apiGet<{ recipes: RawRecipeSummary[] }>("/recipes/getAllRecipes"),
+  getSingle: (menuId: number) =>
+    apiGet<RawRecipeDetail>(`/recipes/getSingleRecipes?menu_id=${menuId}`),
+  add: (params: {
+    menu_id: number;
+    raw_material_data: {
+      raw_material_id?: number;
+      semi_finished_item_id?: number;
+      consumption_qty: number;
+    }[];
+  }) => apiPost<{ message?: string }>("/recipes/addRecipe", params),
+  edit: (params: {
+    menu_id: number;
+    raw_material_data: {
+      raw_material_id?: number;
+      semi_finished_item_id?: number;
+      consumption_qty: number;
+    }[];
+  }) => apiPut<{ message?: string }>("/recipes/editRecipe", params),
+  remove: (menuId: number) =>
+    apiDelete<{ message?: string }>("/recipes/deleteRecipe", { menu_id: menuId }),
+};

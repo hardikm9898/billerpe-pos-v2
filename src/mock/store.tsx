@@ -25,6 +25,7 @@ import {
   stockInHandApi,
   wastageApi,
   semiFinishedApi,
+  recipeApi,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
@@ -33,6 +34,7 @@ import {
   type RawWastage,
   type RawSFI,
   type RawSFIRecipeLine,
+  type RawRecipeDetail,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -62,6 +64,7 @@ import type {
   FranchiseRequisition,
   ProductionRun,
   RecipeGroup,
+  RecipeLine,
   RequisitionStatus,
   StockAdjustment,
   StockMovement,
@@ -508,6 +511,7 @@ interface Ctx extends State {
   loadPurchaseOrdersFromServer: () => Promise<void>;
   loadWastageFromServer: () => Promise<void>;
   loadSemiFinishedFromServer: () => Promise<void>;
+  loadRecipesFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -908,6 +912,31 @@ function mapRawTaxType(
 
 function mapRawUnit(u: RawUnit): StockUnit {
   return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
+}
+
+function mapRecipeDetail(
+  detail: RawRecipeDetail,
+  previous?: { yieldQty: number; yieldUnit: string },
+): Recipe {
+  const base = detail.variants.find((v) => v.variant_id === null);
+  const lines: RecipeLine[] = (base?.raw_materials ?? []).map((ing) => ({
+    type: ing.ingredient_type === "raw_material" ? "raw" : "semi",
+    refId: String(ing.raw_material_id ?? ing.semi_finished_item_id),
+    qty: ing.consumption_qty,
+  }));
+  return {
+    id: `recipe-${detail.menu_id}`,
+    itemName: detail.item_name,
+    // No backend field for either - a pure local yield/portioning note,
+    // carried over across reloads by id.
+    yieldQty: previous?.yieldQty ?? 1,
+    yieldUnit: previous?.yieldUnit ?? "plate",
+    menuItemId: String(detail.menu_id),
+    components: lines
+      .filter((l) => l.type === "raw")
+      .map((l) => ({ materialId: l.refId, qty: l.qty })),
+    groups: [{ key: "base", label: "Base recipe", kind: "base", lines }],
+  };
 }
 
 function mapRawSFI(
@@ -3241,6 +3270,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    loadRecipesFromServer: async () => {
+      try {
+        const { recipes: summaries } = await recipeApi.getAllLinked();
+        const previousById = new Map(
+          s.recipes.map((r) => [r.id, { yieldQty: r.yieldQty, yieldUnit: r.yieldUnit }]),
+        );
+        const mapped = (
+          await Promise.all(
+            summaries.map(async (summary) => {
+              try {
+                const detail = await recipeApi.getSingle(summary.menu_id);
+                const localId = `recipe-${summary.menu_id}`;
+                return mapRecipeDetail(detail, previousById.get(localId));
+              } catch {
+                return null;
+              }
+            }),
+          )
+        ).filter((r): r is Recipe => r !== null);
+        patch((p) => ({ ...p, recipes: mapped }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load recipes from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3974,17 +4027,64 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     upsertRecipe: (r) => {
-      patch((p) => ({
-        ...p,
-        recipes: p.recipes.some((x) => x.id === r.id)
-          ? p.recipes.map((x) => (x.id === r.id ? r : x))
-          : [...p.recipes, { ...r, id: r.id || uid("rc") }],
-      }));
-      toast.success("Recipe saved", { description: r.itemName });
+      if (!r.menuItemId) {
+        toast.error("Select a menu item for this recipe");
+        return;
+      }
+      const base = (r.groups ?? []).find((g) => g.kind === "base");
+      const rawMaterialData = (base?.lines ?? []).map((l) =>
+        l.type === "raw"
+          ? { raw_material_id: Number(l.refId), consumption_qty: l.qty }
+          : { semi_finished_item_id: Number(l.refId), consumption_qty: l.qty },
+      );
+      if (!rawMaterialData.length) {
+        toast.error("Add at least one ingredient to the recipe");
+        return;
+      }
+      // Variant/addon groups have no backend equivalent yet (no real
+      // Variant/Addon picker in this editor) - only the base group is
+      // synced, so anything in the other groups is silently dropped on
+      // the next reload. Warn rather than pretend it was saved.
+      const hasExtraGroups = (r.groups ?? []).some((g) => g.kind !== "base" && g.lines.length);
+      const menuId = Number(r.menuItemId);
+      const isNew = !s.recipes.some((x) => x.id === `recipe-${menuId}`);
+      const run = async () => {
+        try {
+          if (isNew) {
+            await recipeApi.add({ menu_id: menuId, raw_material_data: rawMaterialData });
+          } else {
+            await recipeApi.edit({ menu_id: menuId, raw_material_data: rawMaterialData });
+          }
+          await value.loadRecipesFromServer();
+          toast.success(
+            hasExtraGroups
+              ? "Recipe saved (variant/addon groups aren't synced to the backend)"
+              : "Recipe saved",
+            { description: r.itemName },
+          );
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save recipe");
+        }
+      };
+      void run();
     },
     removeRecipe: (id) => {
+      const menuId = id.startsWith("recipe-") ? Number(id.replace("recipe-", "")) : undefined;
       patch((p) => ({ ...p, recipes: p.recipes.filter((x) => x.id !== id) }));
       toast.success("Recipe deleted");
+      if (!menuId) return;
+      const run = async () => {
+        try {
+          await recipeApi.remove(menuId);
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Deleted locally but the backend removal failed",
+          );
+        }
+      };
+      void run();
     },
     recipeGroupCost: (g) =>
       Math.round(
