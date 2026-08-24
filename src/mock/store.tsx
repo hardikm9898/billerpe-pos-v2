@@ -10,12 +10,14 @@ import {
   ApiError,
   tableApi,
   menuApi,
+  userApi,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
   type RawMenuItem,
   type RawVariant,
   type RawAddonGroup,
+  type RawHotelUser,
 } from "@/lib/api";
 import type {
   AddonGroup,
@@ -452,6 +454,7 @@ interface Ctx extends State {
   removeTableCategory: (id: string) => void;
   loadTablesFromServer: () => Promise<void>;
   upsertUser: (u: User) => void;
+  loadUsersFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -641,6 +644,125 @@ function toShortCode(sku: string | undefined, name: string, seed: string): strin
   if (fromSku) return fromSku.slice(0, 20);
   const fromName = name.replace(/[^a-zA-Z0-9]/g, "");
   return (fromName || `ITEM${seed}`).slice(0, 20);
+}
+
+function mapRawUser(u: RawHotelUser): User {
+  const accessByName = new Map((u.hms_user_accesses ?? []).map((a) => [a.access_name, a]));
+  return {
+    id: String(u.id),
+    name: u.name,
+    // role_mst.role_name is only reliably one of the 7 new-design role
+    // names after migrations/20260824062338-extend-role-name-enum.js -
+    // older rows may still carry a legacy single-letter code (or, for rows
+    // created before that migration, an empty string the enum silently
+    // coerced invalid values to). Falling back to "Cashier" rather than
+    // leaving it blank/invalid in the UI.
+    role: (u.role_mst?.role_name && ROLE_VALUES.includes(u.role_mst.role_name as Role)
+      ? u.role_mst.role_name
+      : "Cashier") as Role,
+    mobile: u.number,
+    email: u.email,
+    status: u.active ? "Active" : "Inactive",
+    // The real PIN is never returned (only its bcrypt hash) - there is no
+    // way to display or re-derive it. Left blank; only a re-save sets a
+    // new one.
+    pin: "",
+    permissionOverrides: (() => {
+      const modules: Partial<Record<PermissionModule, Partial<ModuleGrant>>> = {};
+      for (const [permModule, backendArea] of Object.entries(MODULE_TO_ACCESS_AREA) as [
+        PermissionModule,
+        string,
+      ][]) {
+        const access = accessByName.get(backendArea);
+        if (access) {
+          modules[permModule] = {
+            view: access.read,
+            create: access.create,
+            edit: access.edit,
+            delete: access.delete,
+          };
+        }
+      }
+      return Object.keys(modules).length ? { modules } : undefined;
+    })(),
+  };
+}
+
+const ROLE_VALUES: Role[] = [
+  "Owner",
+  "Manager",
+  "Cashier",
+  "Captain",
+  "Kitchen Staff",
+  "Inventory Manager",
+  "Accountant",
+];
+
+// Backend's UserAccess is a flat 10-area x (read/create/edit/delete) grid
+// with no per-user overrides and no concept of the frontend's 23 granular
+// modules or its 7 "special permissions" (orders.editAfterKot etc) at all -
+// wiring the full rich permission editor to it isn't a data-mapping problem,
+// it's a product/schema decision (does the backend even gain per-user
+// overrides? which of the 23 modules collapse into which of the 10 areas?)
+// that hasn't been made. This is a best-effort default mapping used only to
+// give a newly-created user *some* real, sensible starting permissions
+// (derived from their role's default grants) - it is not a live sync of the
+// permission editor, and per-user overrides in the UI are not persisted to
+// the backend at all.
+const MODULE_TO_ACCESS_AREA: Partial<Record<PermissionModule, string>> = {
+  orders: "Order",
+  tables: "Table",
+  menu: "Menu",
+  dashboard: "DashBoard",
+  reports: "Reports",
+  biller: "Biller",
+  users: "User",
+  reservations: "Booking",
+  "stock-masters": "Stock",
+  expense: "Expense",
+};
+
+// Every backend access area gets at least a false-filled row (some areas,
+// like "Zomato", have no frontend module equivalent at all and stay
+// all-false) - the controllers require the full 10-entry array regardless.
+const BACKEND_ACCESS_AREAS = [
+  "Order",
+  "Table",
+  "Menu",
+  "DashBoard",
+  "Reports",
+  "Biller",
+  "User",
+  "Booking",
+  "Stock",
+  "Expense",
+  "Zomato",
+];
+
+function buildAccessNameFromRole(role: Role, rolePermissions: Record<Role, RolePermissions>) {
+  const grants = rolePermissions[role];
+  const grantFor = (area: string) => {
+    const permModule = (Object.entries(MODULE_TO_ACCESS_AREA) as [PermissionModule, string][]).find(
+      ([, a]) => a === area,
+    )?.[0];
+    const g = permModule ? grants[permModule] : undefined;
+    return {
+      read: g?.view ?? false,
+      create: g?.create ?? false,
+      edit: g?.edit ?? false,
+      delete: g?.delete ?? false,
+    };
+  };
+  return BACKEND_ACCESS_AREAS.map((access) => ({ access, permissions: grantFor(access) }));
+}
+
+// The new design's staff accounts authenticate via PIN (login.tsx's PIN
+// tab), not a password - there's no password field on the User type at
+// all. The backend requires one regardless (userSchema/userSchemaUpdate),
+// so this derives a placeholder that satisfies its min-length-6 rule.
+// It's never shown or used as a real credential anywhere in the UI.
+function placeholderPassword(pin: string) {
+  return `Pin${pin || "0000"}`;
 }
 
 const StoreContext = createContext<Ctx | null>(null);
@@ -2198,15 +2320,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       void run();
     },
+    loadUsersFromServer: async () => {
+      try {
+        const { hotelUsers } = await userApi.getUsers();
+        patch((p) => ({ ...p, users: hotelUsers.map(mapRawUser) }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load users from server");
+      }
+    },
     upsertUser: (u) => {
-      patch((p) => ({
-        ...p,
-        users: p.users.some((x) => x.id === u.id)
-          ? p.users.map((x) => (x.id === u.id ? u : x))
-          : [...p.users, { ...u, id: u.id || uid("u") }],
-      }));
-      log("User Saved", u.name, "—", `${u.role} · ${u.status}`);
-      toast.success("User saved", { description: `${u.name} · ${u.role}` });
+      const isNew = !s.users.some((x) => x.id === u.id);
+      const payload = {
+        active: u.status === "Active",
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        number: u.mobile,
+        password: placeholderPassword(u.pin),
+        ...(u.pin ? { pin: u.pin } : {}),
+        // Best-effort role-default permissions, not a live sync of the
+        // permission editor - see buildAccessNameFromRole's own comment.
+        access_name: buildAccessNameFromRole(u.role, s.rolePermissions),
+      };
+      const run = async () => {
+        try {
+          if (isNew) {
+            await userApi.createUser(payload);
+          } else {
+            await userApi.editUser({ ...payload, id: Number(u.id) });
+          }
+          await value.loadUsersFromServer();
+          log("User Saved", u.name, "—", `${u.role} · ${u.status}`);
+          toast.success("User saved", { description: `${u.name} · ${u.role}` });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save user");
+        }
+      };
+      void run();
     },
     upsertExpense: (e) => {
       patch((p) => ({

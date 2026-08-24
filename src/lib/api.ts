@@ -243,3 +243,52 @@ export const menuApi = {
   editAddonGroup: (params: AddonGroupPayload & { id: number }) =>
     apiPut<{ message?: string; addons: RawAddonGroup[] }>("/addon", params),
 };
+
+export type RawUserAccess = {
+  access_name: string;
+  read: boolean;
+  create: boolean;
+  edit: boolean;
+  delete: boolean;
+};
+
+export type RawHotelUser = {
+  id: number;
+  name: string;
+  email: string;
+  number: string;
+  active: boolean;
+  pin: string | null; // bcrypt hash, never the real PIN
+  role_mst?: { role_cd: number; role_name: string };
+  hms_user_accesses?: RawUserAccess[];
+};
+
+type UserPayload = {
+  active: boolean;
+  name: string;
+  email: string;
+  role: string;
+  number: string;
+  password: string;
+  pin?: string;
+  access_name: {
+    access: string;
+    permissions: { read: boolean; create: boolean; edit: boolean; delete: boolean };
+  }[];
+};
+
+export const userApi = {
+  // GET /captain hardcodes a role_name IN ('C','A','B') filter (the old
+  // 3-role convention) - a user created with any of the new design's role
+  // names would never show up in it. GET /offlineHotelUser has no such
+  // filter (built for the offline-sync cache, not role-scoped), so it's
+  // used here instead even though its name suggests a different purpose.
+  getUsers: () => apiGet<{ hotelUsers: RawHotelUser[] }>("/offlineHotelUser"),
+
+  createUser: (params: UserPayload) => apiPost<{ message?: string }>("/user", params),
+  // userSchemaUpdate requires `password` unconditionally (unlike create,
+  // where it's optional in the schema but the controller hashes it
+  // unconditionally anyway - effectively required either way).
+  editUser: (params: UserPayload & { id: number }) =>
+    apiPost<{ message?: string }>("/userUpdate", params),
+};
