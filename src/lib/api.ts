@@ -729,3 +729,52 @@ export const stockUnitApi = {
   update: (params: { id: number; unitName: string; shortName: string }) =>
     apiPut<{ units: RawUnit[] }>("/stock/editUnit", params),
 };
+
+export type RawRawMaterial = {
+  id: number;
+  raw_material_name: string;
+  purchase_price: string;
+  conversion_qty: number;
+  // Genuinely an INTEGER column (0/1) despite being Joi-validated as a
+  // boolean going in - the model's actual BOOLEAN column
+  // (minimum_stock_level) is never written by either controller,
+  // confirmed by reading both addRawMaterial and editRawMaterial in full.
+  mini_stock_level: number;
+  mini_stock_level_qty: number;
+  unit_id: number;
+  consumption_unit: number;
+  purchaseUnit?: RawUnit;
+  consumptionUnit?: RawUnit;
+};
+
+// controller/stock_Mangement/rawMaterial.js. purchase_price is a STRING
+// matching /^\d+(\.\d+)?$/ (Joi), not a number - confirmed by reading the
+// schema. editRawMaterial also blocks changing unit/consumption_unit/
+// conversion_qty once any stock has been received against this material
+// (a StockInHand row with available_stock_Consiompsion_qty > 0) - a real
+// business rule surfaced as a normal ApiError, not specially handled here.
+export const rawMaterialApi = {
+  getAll: (search?: string) =>
+    apiGet<{ rawMaterials: RawRawMaterial[] }>(
+      `/stock/getAllRawMaterial${search ? `?search=${encodeURIComponent(search)}` : ""}`,
+    ),
+  create: (params: {
+    raw_material_name: string;
+    purchase_price: string;
+    unit: number;
+    consumption_unit: number;
+    conversion_qty: number;
+    mini_stock_level: boolean;
+    mini_stock_level_qty: number;
+  }) => apiPost<{ rawMaterials: RawRawMaterial[] }>("/stock/addRowMaterial", params),
+  update: (params: {
+    id: number;
+    raw_material_name: string;
+    purchase_price: string;
+    unit: number;
+    consumption_unit: number;
+    conversion_qty: number;
+    mini_stock_level: boolean;
+    mini_stock_level_qty: number;
+  }) => apiPut<{ rawMaterials: RawRawMaterial[] }>("/stock/editRowMaterial", params),
+};

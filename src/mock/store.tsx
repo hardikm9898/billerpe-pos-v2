@@ -19,7 +19,9 @@ import {
   printerApi,
   taxApi,
   stockUnitApi,
+  rawMaterialApi,
   type RawUnit,
+  type RawRawMaterial,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -489,6 +491,7 @@ interface Ctx extends State {
   loadTaxRulesFromServer: () => Promise<void>;
   loadServiceChargeFromServer: () => Promise<void>;
   loadUnitsFromServer: () => Promise<void>;
+  loadRawMaterialsFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -889,6 +892,29 @@ function mapRawTaxType(
 
 function mapRawUnit(u: RawUnit): StockUnit {
   return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
+}
+
+function mapRawMaterial(m: RawRawMaterial, previousCategory?: string): RawMaterial {
+  const conversion = m.conversion_qty || 1;
+  const purchasePrice = Number(m.purchase_price) || 0;
+  return {
+    id: String(m.id),
+    name: m.raw_material_name,
+    unit: m.consumptionUnit?.shortName ?? "",
+    purchaseUnit: m.purchaseUnit?.shortName ?? "",
+    conversion,
+    // Not part of this endpoint's response at all - populated by a later
+    // Stock In/Out slice, 0 until then.
+    stock: 0,
+    reorderLevel: m.mini_stock_level_qty,
+    // This app's `rate` is per consumption unit; the backend stores
+    // purchase_price per purchase unit - converted with conversion_qty.
+    rate: purchasePrice / conversion,
+    // No backend field for this at all (model/rawItem.js has none) -
+    // carried over across reloads by id, defaults to "Uncategorized".
+    category: previousCategory ?? "Uncategorized",
+    minStockEnabled: !!m.mini_stock_level,
+  };
 }
 
 const ROLE_VALUES: Role[] = [
@@ -2965,6 +2991,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load units from server");
       }
     },
+    loadRawMaterialsFromServer: async () => {
+      try {
+        const { rawMaterials } = await rawMaterialApi.getAll();
+        const previousCategoryById = new Map(s.rawMaterials.map((m) => [m.id, m.category]));
+        patch((p) => ({
+          ...p,
+          rawMaterials: rawMaterials.map((m) =>
+            mapRawMaterial(m, previousCategoryById.get(String(m.id))),
+          ),
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load raw materials from server",
+        );
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3014,13 +3056,46 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Expense head saved");
     },
     upsertRawMaterial: (m) => {
-      patch((p) => ({
-        ...p,
-        rawMaterials: p.rawMaterials.some((x) => x.id === m.id)
-          ? p.rawMaterials.map((x) => (x.id === m.id ? m : x))
-          : [...p.rawMaterials, { ...m, id: m.id || uid("rm") }],
-      }));
-      toast.success("Raw material saved");
+      const purchaseUnitId = s.units.find((u) => u.shortName === m.purchaseUnit)?.id;
+      const consumptionUnitId = s.units.find((u) => u.shortName === m.unit)?.id;
+      if (!purchaseUnitId || !consumptionUnitId) {
+        toast.error("Select a valid purchase and consumption unit");
+        return;
+      }
+      const payload = {
+        raw_material_name: m.name,
+        purchase_price: String(Math.round(m.rate * m.conversion * 100) / 100),
+        unit: Number(purchaseUnitId),
+        consumption_unit: Number(consumptionUnitId),
+        conversion_qty: m.conversion,
+        mini_stock_level: m.minStockEnabled ?? m.reorderLevel > 0,
+        mini_stock_level_qty: m.reorderLevel,
+      };
+      const previousIds = new Set(s.rawMaterials.map((x) => x.id));
+      const previousCategoryById = new Map(s.rawMaterials.map((x) => [x.id, x.category]));
+      const run = async () => {
+        try {
+          const { rawMaterials } = m.id
+            ? await rawMaterialApi.update({ ...payload, id: Number(m.id) })
+            : await rawMaterialApi.create(payload);
+          patch((p) => ({
+            ...p,
+            rawMaterials: rawMaterials.map((r) => {
+              const id = String(r.id);
+              // The row this call just created or edited keeps the
+              // draft's category (a purely local field, see
+              // mapRawMaterial's own comment); every other row keeps
+              // whatever category it already had.
+              const isSavedRow = m.id ? id === m.id : !previousIds.has(id);
+              return mapRawMaterial(r, isSavedRow ? m.category : previousCategoryById.get(id));
+            }),
+          }));
+          toast.success("Raw material saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save raw material");
+        }
+      };
+      void run();
     },
     upsertSupplier: (sup) => {
       patch((p) => ({
