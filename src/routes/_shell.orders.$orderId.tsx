@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Ban, ChefHat, Printer, Receipt, RotateCcw, Send } from "lucide-react";
+import { ArrowLeft, Ban, ChefHat, Printer, Receipt, Send } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -51,8 +51,23 @@ function OrderDetailPage() {
     );
   }
 
-  const t = orderTotals(order, store);
+  // Synced history carries real backendTotals - preferring those over a
+  // fresh recompute avoids drift from today's tax/service-charge config
+  // (see Order.backendTotals's own comment in mock/types.ts).
+  const t = order.backendTotals
+    ? {
+        ...orderTotals(order, store),
+        grand: order.backendTotals.grand,
+        discount: order.backendTotals.discount,
+        service: order.backendTotals.serviceCharge,
+      }
+    : orderTotals(order, store);
   const kots = store.kots.filter((k) => k.orderId === order.id);
+  // Historical entries (id "oh-...") are always "Settled" (see
+  // mapRawOrderHistoryEntry), so this already excludes them from Cancel -
+  // that's now a real, irreversible soft-delete against the live backend
+  // (see store.cancelOrder's own comment), not something to expose
+  // casually on old records anyway.
   const editable = !["Settled", "Cancelled"].includes(order.status);
 
   return (
@@ -71,27 +86,12 @@ function OrderDetailPage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => {
-                const sent = store.sendEBill(order.id);
-                if (sent) {
-                  toast.success("Bill shared on WhatsApp", {
-                    description: `${order.customerPhone ?? "No customer attached"} · ${Math.max(0, store.eBillCredit - 1)} e-bill credits left`,
-                  });
-                } else {
-                  toast.error("E-bill credits exhausted", {
-                    description:
-                      "Top up e-bill credits from Operations to send digital bills again.",
-                  });
-                }
-              }}
+              disabled={!order.customerPhone}
+              title={order.customerPhone ? undefined : "No customer phone number attached"}
+              onClick={() => void store.sendEBill(order.id)}
             >
               <Send className="size-4" /> Share
             </Button>
-            {order.status === "Settled" ? (
-              <Button variant="outline" onClick={() => store.reopenOrder(order.id)}>
-                <RotateCcw className="size-4" /> Reopen bill
-              </Button>
-            ) : null}
             {editable ? (
               <Button
                 onClick={() =>

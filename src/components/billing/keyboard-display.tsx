@@ -806,18 +806,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
           className="h-10"
           disabled={settled || !order.customerPhone}
           title={order.customerPhone ? undefined : "Attach a customer phone number first"}
-          onClick={() => {
-            const sent = store.sendEBill(order.id);
-            if (sent) {
-              toast.success("Bill shared on WhatsApp", {
-                description: `${order.customerPhone} · ${Math.max(0, store.eBillCredit - 1)} e-bill credits left`,
-              });
-            } else {
-              toast.error("E-bill credits exhausted", {
-                description: "Top up e-bill credits from Operations to send digital bills again.",
-              });
-            }
-          }}
+          onClick={() => void store.sendEBill(order.id)}
         >
           <Send className="size-4" /> E-Bill
         </Button>

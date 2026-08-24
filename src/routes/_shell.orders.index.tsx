@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Clock, Printer, Receipt, RotateCcw, Search, Trash2 } from "lucide-react";
+import { ArrowRight, Clock, Printer, Receipt, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -28,6 +28,21 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { orderTotals, useStore } from "@/mock/store";
 import type { Order, OrderStatus } from "@/mock/types";
+
+// Historical orders (synced via loadOrderHistoryFromServer, id prefixed
+// "oh-") carry real backendTotals - preferring those over a fresh
+// orderTotals() recompute avoids drift from today's tax/service-charge
+// config for the grand/discount/service figures shown in this list.
+function totalsOf(o: Order, store: ReturnType<typeof useStore>) {
+  const t = orderTotals(o, store);
+  if (!o.backendTotals) return t;
+  return {
+    ...t,
+    grand: o.backendTotals.grand,
+    discount: o.backendTotals.discount,
+    service: o.backendTotals.serviceCharge,
+  };
+}
 
 export const Route = createFileRoute("/_shell/orders/")({
   head: () => ({
@@ -70,7 +85,8 @@ function OrdersPage() {
 
   const rows = useMemo(
     () =>
-      [...store.orders]
+      store
+        .allOrders()
         .sort((a, b) => b.orderNo - a.orderNo)
         .filter((o) => status === "All" || o.status === status)
         .filter((o) => {
@@ -83,13 +99,17 @@ function OrdersPage() {
             (o.customerPhone ?? "").includes(q)
           );
         }),
-    [store.orders, status, q],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store.orders, store.orderHistory, status, q],
   );
   const paged = usePagedRows(rows, 10);
 
   useEffect(() => setSelected([]), [status, q]);
 
-  const pageIds = paged.pageRows.map((o) => o.id);
+  // "Delete selected" is still a local-only action (see the actions
+  // column's own comment) - history rows are excluded from bulk selection
+  // entirely so it can't be used against real settled orders.
+  const pageIds = paged.pageRows.filter((o) => !o.id.startsWith("oh-")).map((o) => o.id);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
   const toggleAllOnPage = () =>
     setSelected((prev) =>
@@ -109,7 +129,7 @@ function OrdersPage() {
       <PageHeader
         icon={Receipt}
         title="Orders"
-        description="Every order created on this business date, across all terminals."
+        description="Live orders from this session, plus real settled history from the last 90 days."
       />
 
       <SectionCard>
@@ -172,13 +192,14 @@ function OrdersPage() {
                   aria-label="Select all on this page"
                 />
               ),
-              cell: (o) => (
-                <Checkbox
-                  checked={selected.includes(o.id)}
-                  onClick={(e) => e.stopPropagation()}
-                  onCheckedChange={() => toggleOne(o.id)}
-                />
-              ),
+              cell: (o) =>
+                o.id.startsWith("oh-") ? null : (
+                  <Checkbox
+                    checked={selected.includes(o.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onCheckedChange={() => toggleOne(o.id)}
+                  />
+                ),
             },
             {
               key: "no",
@@ -221,7 +242,7 @@ function OrdersPage() {
               header: "Service Charge",
               className: "text-right",
               cell: (o) => {
-                const t = orderTotals(o, store);
+                const t = totalsOf(o, store);
                 return t.service ? (
                   <Money value={t.service} />
                 ) : (
@@ -234,7 +255,7 @@ function OrdersPage() {
               header: "Discount",
               className: "text-right",
               cell: (o) => {
-                const t = orderTotals(o, store);
+                const t = totalsOf(o, store);
                 return t.discount ? (
                   <Money value={t.discount} />
                 ) : (
@@ -247,13 +268,20 @@ function OrdersPage() {
               key: "total",
               header: "Total",
               className: "text-right",
-              cell: (o) => <Money value={orderTotals(o, store).grand} className="font-semibold" />,
+              cell: (o) => <Money value={totalsOf(o, store).grand} className="font-semibold" />,
             },
             {
               key: "actions",
               header: "",
               cell: (o) => {
                 const editable = !["Settled", "Cancelled"].includes(o.status);
+                // Synced history (id "oh-...") is a read-only snapshot of
+                // real backend state - delete is a real, irreversible
+                // soft-delete against the live backend now (see
+                // store.removeOrder's own comment), so it's hidden for
+                // history rows rather than exposed casually on old
+                // records.
+                const isHistorical = o.id.startsWith("oh-");
                 return (
                   <div className="flex items-center gap-1">
                     <Button
@@ -291,31 +319,20 @@ function OrdersPage() {
                         <ArrowRight className="size-4" />
                       </Button>
                     ) : null}
-                    {o.status === "Settled" ? (
+                    {!isHistorical ? (
                       <Button
                         size="icon"
                         variant="ghost"
-                        title="Reopen bill"
+                        className="text-primary"
+                        title="Delete order"
                         onClick={(e) => {
                           e.stopPropagation();
-                          store.reopenOrder(o.id);
+                          store.removeOrder(o.id);
                         }}
                       >
-                        <RotateCcw className="size-4" />
+                        <Trash2 className="size-4" />
                       </Button>
                     ) : null}
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="text-primary"
-                      title="Delete order"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        store.removeOrder(o.id);
-                      }}
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
                   </div>
                 );
               },

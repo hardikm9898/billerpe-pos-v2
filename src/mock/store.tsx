@@ -438,6 +438,12 @@ interface Ctx extends State {
   tableById: (id: string) => RestaurantTable | undefined;
   orderById: (id: string) => Order | undefined;
   orderForTable: (tableId: string) => Order | undefined;
+  /** `orders` (live working set) merged with `orderHistory` (synced real
+   * settled history), deduplicated by backendId so an order already
+   * present in orderHistory isn't shown twice just because it also still
+   * sits in the live array from earlier this session. Historical entries
+   * win the dedup since they carry accurate backendTotals. */
+  allOrders: () => Order[];
   /* order lifecycle */
   startOrder: (tableId: string, guests: number) => string;
   startTakeAway: () => string;
@@ -462,7 +468,6 @@ interface Ctx extends State {
   setCharges: (orderId: string, delivery: number, packaging: number) => void;
   generateBill: (orderId: string) => void;
   settleOrder: (orderId: string, payments: PaymentSplit[]) => void;
-  reopenOrder: (orderId: string) => void;
   mergeTables: (sourceTableId: string, destTableId: string) => void;
   transferTable: (orderId: string, destTableId: string) => void;
   /* kds */
@@ -531,6 +536,7 @@ interface Ctx extends State {
   loadExpensesFromServer: () => Promise<void>;
   loadOrderHistoryFromServer: () => Promise<void>;
   loadPromoCodesFromServer: () => Promise<void>;
+  loadEBillCreditFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -619,7 +625,7 @@ interface Ctx extends State {
   toggleCustomer: (id: string) => void;
   settleDueBills: (ids: string[], payments: PaymentSplit[]) => void;
   setMaxOfflineDays: (days: number) => void;
-  sendEBill: (orderId: string) => boolean;
+  sendEBill: (orderId: string) => Promise<boolean>;
 }
 
 // uat-backend/model/table.js: table_status is R/F/P/H/B, not the mock's
@@ -1465,11 +1471,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     canSpecial,
     tableLabel,
     tableById: (id) => s.tables.find((t) => t.id === id),
-    orderById: (id) => s.orders.find((o) => o.id === id),
+    orderById: (id) => s.orders.find((o) => o.id === id) ?? s.orderHistory.find((o) => o.id === id),
     orderForTable: (tableId) =>
       s.orders.find(
         (o) => o.tableId === tableId && ["Held", "Running", "Bill Generated"].includes(o.status),
       ),
+    allOrders: () => {
+      const historyBackendIds = new Set(
+        s.orderHistory.map((o) => o.backendId).filter((id): id is number => id !== undefined),
+      );
+      const liveOnly = s.orders.filter((o) => !(o.backendId && historyBackendIds.has(o.backendId)));
+      return [...liveOnly, ...s.orderHistory];
+    },
 
     updateRoleDefaults: (role, permissions) => {
       if (guardForbidden("permissions", "edit")) return;
@@ -1813,14 +1826,73 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
       log("Order Cancelled", `Order #${o?.orderNo}`, o?.status ?? "", "Cancelled");
       toast.success(`Order #${o?.orderNo} cancelled`);
+      // The backend has no concept of "cancel" distinct from delete (see
+      // orderApi.remove's comment) - this soft-deletes the order for
+      // real, so it will not reappear anywhere, including under this
+      // app's own "Cancelled" filter, once orders/orderHistory reload.
+      if (!o?.backendId) return;
+      const run = async () => {
+        try {
+          await orderApi.remove(o.backendId!, { free: true });
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Cancelled locally but the backend removal failed",
+          );
+        }
+      };
+      void run();
     },
     removeOrder: (id) => {
-      patch((p) => ({ ...p, orders: p.orders.filter((o) => o.id !== id) }));
+      const o = s.orders.find((x) => x.id === id) ?? s.orderHistory.find((x) => x.id === id);
+      patch((p) => ({
+        ...p,
+        orders: p.orders.filter((x) => x.id !== id),
+        orderHistory: p.orderHistory.filter((x) => x.id !== id),
+      }));
       toast.success("Order removed");
+      if (!o?.backendId) return;
+      const run = async () => {
+        try {
+          await orderApi.remove(o.backendId!);
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Removed locally but the backend removal failed",
+          );
+        }
+      };
+      void run();
     },
     removeOrders: (ids) => {
-      patch((p) => ({ ...p, orders: p.orders.filter((o) => !ids.includes(o.id)) }));
+      const backendIds = ids
+        .map(
+          (id) =>
+            (s.orders.find((x) => x.id === id) ?? s.orderHistory.find((x) => x.id === id))
+              ?.backendId,
+        )
+        .filter((id): id is number => id !== undefined);
+      patch((p) => ({
+        ...p,
+        orders: p.orders.filter((o) => !ids.includes(o.id)),
+        orderHistory: p.orderHistory.filter((o) => !ids.includes(o.id)),
+      }));
       toast.success(`${ids.length} order(s) removed`);
+      if (!backendIds.length) return;
+      const run = async () => {
+        try {
+          await orderApi.removeBulk(backendIds);
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Removed locally but the backend removal failed",
+          );
+        }
+      };
+      void run();
     },
 
     remakeOrderSequence: (startFrom) => {
@@ -2319,33 +2391,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
 
-    reopenOrder: (orderId) => {
-      if (guardBlocked()) return;
-      const o = s.orders.find((x) => x.id === orderId);
-      if (!o || o.status !== "Settled") return;
-      if (o.tableId) {
-        const table = s.tables.find((t) => t.id === o.tableId);
-        if (table && table.status !== "Free") {
-          toast.error("Can't reopen — table is now in use", {
-            description: `${o.tableLabel} has another active order.`,
-          });
-          return;
-        }
-      }
-      patch((p) => ({
-        ...p,
-        orders: p.orders.map((x) =>
-          x.id === orderId ? { ...x, status: "Running", settledAt: undefined } : x,
-        ),
-        tables: o.tableId
-          ? p.tables.map((t) =>
-              t.id === o.tableId ? { ...t, status: "Running", guests: o.guests, orderId: o.id } : t,
-            )
-          : p.tables,
-      }));
-      log("Bill Reopened", `Order #${o.orderNo}`, "Settled", "Running");
-      toast.success(`Order #${o.orderNo} reopened for editing`);
-    },
+    // reopenOrder was removed: confirmed by reading every order-mutating
+    // controller in this backend that there is no capability anywhere to
+    // reset a Settled order's payment back to "pending" (settleBills
+    // itself only ever operates on payment:"pending" rows) or to free its
+    // table server-side. A local-only "reopen" would desync from the
+    // backend's real state - the order stays Settled there regardless of
+    // what this app shows - so it's gone rather than left as a dead end
+    // that quietly corrupts local state.
 
     mergeTables: (sourceTableId, destTableId) => {
       if (guardBlocked()) return;
@@ -3529,6 +3582,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         toast.error(
           err instanceof ApiError ? err.message : "Could not load promo codes from server",
+        );
+      }
+    },
+    loadEBillCreditFromServer: async () => {
+      try {
+        const { credit } = await orderApi.getEBillCredit();
+        patch((p) => ({ ...p, eBillCredit: credit }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load e-bill credit from server",
         );
       }
     },
@@ -5235,17 +5298,44 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       patch((p) => ({ ...p, maxOfflineDays: days }));
       toast.success(`Maximum offline duration set to ${days} day(s)`);
     },
-    sendEBill: (orderId) => {
-      if (s.eBillCredit <= 0) return false;
-      const o = s.orders.find((x) => x.id === orderId);
-      patch((p) => ({ ...p, eBillCredit: p.eBillCredit - 1 }));
-      log(
-        "E-Bill Sent",
-        `Order #${o?.orderNo ?? orderId}`,
-        `${s.eBillCredit} credits`,
-        `${s.eBillCredit - 1} credits`,
-      );
-      return true;
+    sendEBill: async (orderId) => {
+      const o =
+        s.orders.find((x) => x.id === orderId) ?? s.orderHistory.find((x) => x.id === orderId);
+      if (!o?.customerPhone) {
+        toast.error("No customer phone number attached to this order");
+        return false;
+      }
+      if (!o.backendId) {
+        toast.error("Order isn't synced with the server yet");
+        return false;
+      }
+      // Local credit check for instant feedback before round-tripping -
+      // the real gate is server-side too (sentEbill 400s once credit hits
+      // 0), so this is just avoiding an unnecessary request, not the
+      // source of truth.
+      if (s.eBillCredit <= 0) {
+        toast.error("E-bill credits exhausted", {
+          description: "Top up e-bill credits from Operations to send digital bills again.",
+        });
+        return false;
+      }
+      try {
+        await orderApi.sendEBill({ orderId: o.backendId, mobile: o.customerPhone });
+        await value.loadEBillCreditFromServer();
+        log(
+          "E-Bill Sent",
+          `Order #${o.orderNo}`,
+          `${s.eBillCredit} credits`,
+          `${Math.max(0, s.eBillCredit - 1)} credits`,
+        );
+        toast.success("Bill shared on WhatsApp", {
+          description: `${o.customerPhone} · sent via WhatsApp`,
+        });
+        return true;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not send the e-bill");
+        return false;
+      }
     },
   };
 

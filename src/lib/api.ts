@@ -480,6 +480,48 @@ export const orderApi = {
     due: number;
     mobile?: string;
   }) => apiPost<{ message?: string }>("/settleBills", payload),
+
+  // controller/order.js#deleteOrder (POST /orderRemove). Soft-delete only
+  // (Order.deleted=true) - the row and its OrderDetails stay in the DB
+  // forever, no stock is ever reversed (the one real stock-reversal
+  // function in this backend, cancelOrderStock in controller/recipes.js,
+  // is dead code - never called from here or anywhere), and there's no
+  // status-transition guard: a fully-Settled order with real payment
+  // recorded soft-deletes exactly the same way as a brand-new unpaid one,
+  // no confirmation, no undo. Every order-read endpoint in this backend
+  // filters deleted:false, so once this succeeds the order is gone from
+  // every future load for good - confirmed live (deleted an order, then
+  // both GET /order/:id and GET /searchOrder/all stopped returning it
+  // entirely). There is no separate "Cancelled" list to browse
+  // afterward: cancelOrderReport itself defines a "cancelled" order as
+  // nothing but a soft-deleted, previously-settled row - this backend has
+  // no real concept of cancel distinct from delete.
+  remove: (id: number, opts?: { free?: boolean }) =>
+    apiPost<{ message?: string }>("/orderRemove", {
+      id,
+      ...(opts?.free ? { free: "free" } : {}),
+    }),
+  // Same endpoint, bulk form (`allId` instead of `id`) - confirmed by
+  // reading deleteOrder that the bulk path never frees tables even if
+  // `free` is sent, unlike the single-id path.
+  removeBulk: (ids: number[]) => apiPost<{ message?: string }>("/orderRemove", { allId: ids }),
+
+  // controller/kto.js#sentEbill (POST /sentEbill). A genuine WhatsApp
+  // Cloud API template send (graph.facebook.com), not a stub - but the
+  // backend never awaits that call before responding, so a success
+  // response here only means the request was credit-gated and accepted,
+  // not that WhatsApp actually delivered anything. Requires a real
+  // mobile number; the backend never looks one up automatically from the
+  // order. Not tested live against a real send (would message a real
+  // phone number) - wired from reading the controller in full instead.
+  sendEBill: (params: { orderId: number; mobile: string }) =>
+    apiPost<{ message?: string }>("/sentEbill", params),
+
+  // controller/kto.js#getEbillCredit (GET /getEbillCredit). Returns 50 by
+  // default when no credit row exists yet for this hotel - matches
+  // sentEbill seeding a new row at 49 credits after its first successful
+  // send (50 - 1).
+  getEBillCredit: () => apiGet<{ credit: number }>("/getEbillCredit"),
 };
 
 export type RawOrderHeader = {

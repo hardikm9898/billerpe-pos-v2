@@ -497,17 +497,7 @@ function OrderCartPage() {
               variant="outline"
               disabled={!order.customerPhone}
               onClick={() => {
-                const sent = store.sendEBill(order.id);
-                if (sent) {
-                  toast.success("Bill shared on WhatsApp", {
-                    description: `${order.customerPhone} · ${Math.max(0, store.eBillCredit - 1)} e-bill credits left`,
-                  });
-                } else {
-                  toast.error("E-bill credits exhausted", {
-                    description:
-                      "Top up e-bill credits from Operations to send digital bills again.",
-                  });
-                }
+                void store.sendEBill(order.id);
                 navigate({ to: "/table-grid" });
               }}
             >
