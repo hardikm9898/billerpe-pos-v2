@@ -15,8 +15,10 @@ import {
   hotelApi,
   dueApi,
   customerApi,
+  kitchenApi,
   type RawDueOrder,
   type RawCustomer,
+  type RawKitchen,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -467,6 +469,7 @@ interface Ctx extends State {
   loadInvoiceFormatFromServer: () => Promise<void>;
   loadDueBillsFromServer: () => Promise<void>;
   loadCustomersFromServer: () => Promise<void>;
+  loadKitchensFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -733,6 +736,38 @@ function mapRawCustomer(c: RawCustomer, previousActive?: boolean): Customer {
     // the customer model) - stays purely local, carried over across
     // reloads by id rather than reset to true every time.
     active: previousActive ?? true,
+  };
+}
+
+function mapRawKitchen(k: RawKitchen, previousIsDefault?: boolean): Kitchen {
+  // model/kitchen.js's columns are JSON-typed but confirmed live to come
+  // back as JSON-encoded strings ("[1,2]"), not already-parsed arrays -
+  // handling both rather than assuming the string shape is permanent.
+  const parseIdArray = (v: unknown): string[] => {
+    try {
+      const arr = typeof v === "string" ? JSON.parse(v || "[]") : Array.isArray(v) ? v : [];
+      return (arr as unknown[]).map((n) => String(n));
+    } catch {
+      return [];
+    }
+  };
+  const parseOrderTypes = (v: unknown): OpsOrderType[] => {
+    try {
+      const arr = typeof v === "string" ? JSON.parse(v || "[]") : Array.isArray(v) ? v : [];
+      return (arr as string[]).map((t) => (t === "dinin" ? "Dine-in" : "Pickup"));
+    } catch {
+      return [];
+    }
+  };
+  return {
+    id: String(k.id),
+    name: k.kitchen_name,
+    menuCategoryIds: parseIdArray(k.menu_categ_ids),
+    tableIds: parseIdArray(k.table_ids),
+    orderTypes: parseOrderTypes(k.order_type),
+    // No backend equivalent (see kitchenApi's own comment) - carried over
+    // across reloads by id rather than reset every time.
+    isDefault: previousIsDefault,
   };
 }
 
@@ -2725,6 +2760,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load customers from server");
       }
     },
+    loadKitchensFromServer: async () => {
+      try {
+        const { kitchen } = await kitchenApi.getKitchens();
+        const previousDefaultId = s.kitchens.find((k) => k.isDefault)?.id;
+        const mapped = kitchen.map((k) => mapRawKitchen(k));
+        const withDefault = mapped.some((k) => k.id === previousDefaultId)
+          ? mapped.map((k) => ({ ...k, isDefault: k.id === previousDefaultId }))
+          : mapped.map((k, i) => ({ ...k, isDefault: i === 0 }));
+        patch((p) => ({ ...p, kitchens: withDefault }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load kitchens from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3410,19 +3458,45 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         promoCodes: p.promoCodes.map((x) => (x.id === id ? { ...x, active: !x.active } : x)),
       })),
     upsertKitchen: (kitchen) => {
-      patch((p) => {
-        const saved = { ...kitchen, id: kitchen.id || uid("k") };
-        const kitchens = p.kitchens.some((k) => k.id === saved.id)
-          ? p.kitchens.map((k) => (k.id === saved.id ? saved : k))
-          : [...p.kitchens, saved];
-        return {
-          ...p,
-          kitchens: saved.isDefault
-            ? kitchens.map((k) => (k.id === saved.id ? k : { ...k, isDefault: false }))
-            : kitchens,
-        };
-      });
-      toast.success("Kitchen saved", { description: kitchen.name });
+      const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
+        "Dine-in": "dinin",
+        Pickup: "pickup",
+      };
+      const run = async () => {
+        try {
+          let backendId: number;
+          if (!kitchen.id) {
+            // createKitchen only accepts the name (see kitchenApi's own
+            // comment) - it auto-populates every other field and doesn't
+            // return the new row's id, so the actual order types/
+            // categories/tables the dialog chose still have to be applied
+            // in a follow-up setCategoryForKitchen call, and the new id
+            // has to be found by looking the fresh list up by name.
+            await kitchenApi.createKitchen(kitchen.name);
+            const { kitchen: created } = await kitchenApi.getKitchens();
+            const match = created.find((k) => k.kitchen_name === kitchen.name);
+            if (!match) {
+              toast.error("Kitchen was created but couldn't be found afterward");
+              return;
+            }
+            backendId = match.id;
+          } else {
+            backendId = Number(kitchen.id);
+          }
+          await kitchenApi.setCategoryForKitchen({
+            id: backendId,
+            table_ids: kitchen.tableIds.map(Number),
+            menu_categ_ids: kitchen.menuCategoryIds.map(Number),
+            order_type: kitchen.orderTypes.map((t) => orderTypeMap[t]),
+          });
+          await value.loadKitchensFromServer();
+          log("Kitchen Saved", kitchen.name, "—", kitchen.orderTypes.join(", "));
+          toast.success("Kitchen saved", { description: kitchen.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save kitchen");
+        }
+      };
+      void run();
     },
     removeKitchen: (id) => {
       const target = s.kitchens.find((k) => k.id === id);
@@ -3439,8 +3513,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      patch((p) => ({ ...p, kitchens: p.kitchens.filter((k) => k.id !== id) }));
-      toast.success("Kitchen removed");
+      const run = async () => {
+        try {
+          await kitchenApi.deleteKitchen(Number(id));
+          await value.loadKitchensFromServer();
+          toast.success("Kitchen removed", { description: target.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove kitchen");
+        }
+      };
+      void run();
     },
     setDefaultKitchen: (id) => {
       patch((p) => ({

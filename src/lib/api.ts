@@ -62,6 +62,15 @@ async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return unwrap(json);
 }
 
+async function apiDelete<T>(path: string): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+  return unwrap(json);
+}
+
 export const authApi = {
   pinLogin: (mobile: string, pin: string, deviceId: string) =>
     apiPost<{ message?: string; token?: string }>("/pinLogin", {
@@ -436,15 +445,53 @@ export const orderApi = {
   }) => apiPost<{ message?: string }>("/settleBills", payload),
 };
 
-// GET /kitchen/kitchens is guarded by a *different* auth middleware
+// Every /kitchen/* route is guarded by a *different* auth middleware
 // (middleware/adminAuth.js's adminAuth, which additionally requires a
 // matching UserSession row) than most of the routes above (middleware/
 // auth.js's isAuth) - confirmed live that restaurantLogin's cookies
 // satisfy both, so this doesn't need separate handling here, just noting
 // the backend isn't internally consistent about which auth guard it uses.
+export type RawKitchen = {
+  id: number;
+  kitchen_name: string;
+  // JSON-typed columns (model/kitchen.js) but confirmed live to come back
+  // as JSON-encoded strings ("[1,2]"), not parsed arrays - kept as unknown
+  // here so the adapter (store.tsx's mapRawKitchen) has to handle both
+  // rather than assume one.
+  table_ids: unknown;
+  menu_categ_ids: unknown;
+  order_type: unknown;
+};
+
 export const kitchenApi = {
-  getKitchens: () =>
-    apiGet<{ kitchen: { id: number; kitchen_name: string }[] }>("/kitchen/kitchens"),
+  getKitchens: () => apiGet<{ kitchen: RawKitchen[] }>("/kitchen/kitchens"),
+
+  // Only accepts kitchen_name - table_ids/menu_categ_ids/order_type are
+  // NOT settable at creation, the controller auto-populates them with
+  // every currently-active table/category and both order types. Doesn't
+  // return the new row's id either, so the caller has to reload and look
+  // it up by name (kitchen_name is enforced unique per hotel - confirmed
+  // by reading createKitchen's own duplicate-name check).
+  createKitchen: (kitchenName: string) =>
+    apiPost<{ message?: string }>("/kitchen/kitchens", { kitchen_name: kitchenName }),
+
+  // The only way to actually set table_ids/menu_categ_ids/order_type -
+  // used both right after createKitchen (to apply what the create dialog
+  // actually chose, since create itself can't) and for editing an
+  // existing kitchen. Does NOT accept kitchen_name - renaming a kitchen
+  // has no endpoint anywhere in this backend at all (kds.js's editKitchen
+  // function exists but the only route that could reach it is commented
+  // out, and even uncommented it's wired to the wrong controller
+  // function - editRecipes, not editKitchen. Confirmed by reading
+  // routes/kitchen.js in full, not by a failed request).
+  setCategoryForKitchen: (params: {
+    id: number;
+    table_ids: number[];
+    menu_categ_ids: number[];
+    order_type: ("dinin" | "pickup")[];
+  }) => apiPost<{ message?: string }>("/kitchen/setCategoryForKitchen", params),
+
+  deleteKitchen: (id: number) => apiDelete<{ message?: string }>(`/kitchen/deleteKitchen/${id}`),
 };
 
 export type RawDueOrder = {

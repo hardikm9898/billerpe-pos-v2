@@ -172,8 +172,14 @@ export function KitchenSection() {
                 <Input
                   value={draft.name}
                   placeholder="Tandoor Section"
+                  disabled={!!draft.id}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                {draft.id ? (
+                  <p className="text-xs text-muted-foreground">
+                    Can't be renamed after creation — the backend has no endpoint for it.
+                  </p>
+                ) : null}
               </div>
               <ChipSelect
                 label="Order types"
