@@ -50,6 +50,18 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return unwrap(json);
 }
 
+async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE_URL}${path}`, {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+  return unwrap(json);
+}
+
 export const authApi = {
   pinLogin: (mobile: string, pin: string, deviceId: string) =>
     apiPost<{ message?: string; token?: string }>("/pinLogin", {
@@ -130,4 +142,104 @@ export const tableApi = {
 
   removeCategories: (allId: number[]) =>
     apiPost<{ message?: string }>("/removeTableCatagories", { allId }),
+};
+
+export type RawMenuCategory = {
+  id: number;
+  menu_categ_nm: string;
+  active: boolean;
+  rank?: number;
+};
+
+export type RawMenuItem = {
+  id: number;
+  item_name: string;
+  price: string; // model field is DataTypes.STRING, not a number
+  favorite: boolean;
+  active: boolean;
+  sub_categories: string;
+  description: string;
+  shortCode: string;
+  barcode_value: string;
+  foodImage: string | null;
+  gst_type: "S" | "G";
+  menu_categ_id: number;
+  hms_menu_categ?: RawMenuCategory;
+};
+
+export type RawVariant = { id: number; variants_name: string; active: boolean };
+
+export type RawAddonOption = { id: number; addon_name: string; price: number; attributes: string };
+export type RawAddonGroup = {
+  id: number;
+  department_name: string;
+  maximum_allowed_addon: number;
+  minimum_allowed_addon: number;
+  singleSelection: boolean;
+  hms_addon_msts?: RawAddonOption[];
+};
+
+type MenuItemPayload = {
+  item_name: string;
+  menu_categ_id: number;
+  price: number;
+  shortCode: string;
+  favorite: boolean;
+  sub_categories?: string;
+  description?: string;
+  gst_type: "S" | "G";
+  barcode_value: string;
+  imageUrl?: string;
+  // Always required by the controller - it does `addons.length` with no
+  // optional-chaining, on both create and edit, so an omitted array throws
+  // a 500 rather than being treated as "no addons".
+  addons: number[];
+};
+
+type AddonGroupPayload = {
+  department_name: string;
+  maximum_allowed_addon: number;
+  minimum_allowed_addon: number;
+  singleSelection: boolean;
+  addons: { addon_name: string; price: number; attributes: string }[];
+};
+
+export const menuApi = {
+  // /catagories/all inner-joins on active menu items (Menu_categ.findAll
+  // with include:{model:Menu, where:{active:true}}, no required:false) -
+  // categories with zero items are silently excluded, which is wrong for
+  // an admin "manage categories" screen (you need to see an empty category
+  // to add items to it). /catagories/<substring> has no such join; a
+  // literal "%" as the search key becomes a no-op LIKE pattern ("%%%"),
+  // so this returns every category regardless of item count. Confirmed
+  // live: /catagories/all silently dropped a just-created empty category
+  // that /catagories/%25 correctly returned.
+  getCategories: () => apiGet<{ catagories: RawMenuCategory[] }>("/catagories/%25"),
+  getItems: () => apiGet<{ menu: RawMenuItem[] }>("/menuShow/all"),
+  getVariants: () => apiGet<{ variants: RawVariant[] }>("/variant"),
+  getAddonGroups: () => apiGet<{ addons: RawAddonGroup[] }>("/addon"),
+
+  createCategory: (name: string) =>
+    apiPost<{ message?: string }>("/catagories", { catagoriesFrom: { catagories_name: name } }),
+  editCategory: (id: number, name: string, rank?: number) =>
+    apiPost<{ message?: string }>("/catagoriesEdit", {
+      editCatagoriesFrom: { id, menu_categ_nm: name, rank: rank ?? 0 },
+    }),
+  removeCategories: (allId: number[]) =>
+    apiPost<{ message?: string }>("/catagoriesRemove", { allId }),
+
+  createItem: (params: MenuItemPayload) => apiPost<{ message?: string }>("/menu", params),
+  editItem: (params: MenuItemPayload & { id: number }) =>
+    apiPost<{ message?: string }>("/menuEdit", params),
+  removeItems: (allId: number[]) => apiPost<{ message?: string }>("/menuRemove", { allId }),
+
+  createVariant: (variants_name: string, active: boolean) =>
+    apiPost<{ message?: string; variants: RawVariant[] }>("/variant", { variants_name, active }),
+  editVariant: (id: number, variants_name: string, active: boolean) =>
+    apiPut<{ message?: string; variants: RawVariant[] }>("/variant", { id, variants_name, active }),
+
+  createAddonGroup: (params: AddonGroupPayload) =>
+    apiPost<{ message?: string; addons: RawAddonGroup[] }>("/addon", params),
+  editAddonGroup: (params: AddonGroupPayload & { id: number }) =>
+    apiPut<{ message?: string; addons: RawAddonGroup[] }>("/addon", params),
 };

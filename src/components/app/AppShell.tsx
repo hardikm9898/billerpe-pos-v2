@@ -140,6 +140,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.authed]);
 
+  useEffect(() => {
+    if (store.authed) void store.loadMenuFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.authed]);
+
   const unread = store.notifications.filter((n) => !n.read).length;
   const conn = connectionMeta[store.connection];
   const ConnIcon = conn.icon;

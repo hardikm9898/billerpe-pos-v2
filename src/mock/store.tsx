@@ -6,7 +6,17 @@ import * as seed from "./data";
 import * as stockSeed from "./stock-seed";
 import * as opsSeed from "./ops-seed";
 import { nowStamp, todayLabel } from "./format";
-import { ApiError, tableApi, type RawTable, type RawTableCategory } from "@/lib/api";
+import {
+  ApiError,
+  tableApi,
+  menuApi,
+  type RawTable,
+  type RawTableCategory,
+  type RawMenuCategory,
+  type RawMenuItem,
+  type RawVariant,
+  type RawAddonGroup,
+} from "@/lib/api";
 import type {
   AddonGroup,
   AppNotification,
@@ -36,6 +46,7 @@ import type {
   Kot,
   Menu,
   MenuCategory,
+  MenuDietary,
   MenuItem,
   ModuleGrant,
   NotificationSetting,
@@ -432,6 +443,7 @@ interface Ctx extends State {
   removeVariant: (id: string) => void;
   upsertAddonGroup: (g: AddonGroup) => void;
   removeAddonGroup: (id: string) => void;
+  loadMenuFromServer: () => Promise<void>;
   upsertTable: (t: RestaurantTable) => void;
   removeTable: (id: string) => void;
   removeTables: (ids: string[]) => void;
@@ -553,6 +565,82 @@ function mapRawTable(t: RawTable): RestaurantTable {
     seats: t.capacity ?? 0,
     status: TABLE_STATUS_MAP[t.table_status],
   };
+}
+
+// Backend has no concept of multiple menu catalogues - every category/item/
+// variant/addon it returns belongs to the whole hotel. Server-loaded rows
+// get tagged with whichever menu is currently marked default so the
+// existing menu-scoped UI keeps working, but switching menus after real
+// data has loaded won't filter anything - there's only ever one real
+// catalogue behind it.
+const DIETARY_VALUES: MenuDietary[] = ["Regular Veg", "Jain", "Non-Veg", "Vegan", "Swaminarayan"];
+
+function mapRawMenuCategory(c: RawMenuCategory, menuId: string): MenuCategory {
+  return {
+    id: String(c.id),
+    name: c.menu_categ_nm,
+    active: c.active,
+    sortOrder: c.rank ?? c.id,
+    menuId,
+  };
+}
+
+function mapRawMenuItem(m: RawMenuItem, menuId: string): MenuItem {
+  const dietary = DIETARY_VALUES.includes(m.sub_categories as MenuDietary)
+    ? (m.sub_categories as MenuDietary)
+    : undefined;
+  return {
+    id: String(m.id),
+    name: m.item_name,
+    categoryId: String(m.menu_categ_id),
+    price: Number(m.price),
+    favourite: m.favorite,
+    active: m.active,
+    // No separate veg flag on the backend - inferred from the dietary text.
+    veg: dietary ? dietary !== "Non-Veg" : true,
+    dietary,
+    sku: m.shortCode,
+    barcode: m.barcode_value || undefined,
+    description: m.description || undefined,
+    imageUrl: m.foodImage || undefined,
+    menuId,
+  } as MenuItem;
+}
+
+function mapRawVariant(v: RawVariant, menuId: string): VariantOption {
+  // The Variants master (GET /variant) has no price field at all - only
+  // `id`/`variants_name`/`active` (confirmed live and in getAllVariant's
+  // own `attributes` allowlist). Real pricing only exists per-menu-item,
+  // on the MenuVariants join row (variant_price), set when a variant is
+  // attached to a specific item - out of scope here, no UI for it yet.
+  return { id: String(v.id), name: v.variants_name, price: 0, menuId };
+}
+
+function mapRawAddonGroup(g: RawAddonGroup, menuId: string): AddonGroup {
+  return {
+    id: String(g.id),
+    name: g.department_name,
+    min: g.minimum_allowed_addon,
+    max: g.maximum_allowed_addon,
+    selection: g.singleSelection ? "Single" : "Multiple",
+    options: (g.hms_addon_msts ?? []).map((a) => ({
+      id: String(a.id),
+      name: a.addon_name,
+      price: a.price,
+    })),
+    menuId,
+  };
+}
+
+// Backend requires a non-empty alphanumeric shortCode on every menu item
+// (menuSchema: .alphanum().required()) but the current Items form's SKU
+// field is optional and free-text. Derives one when missing/invalid rather
+// than blocking save on a field the UI doesn't make mandatory.
+function toShortCode(sku: string | undefined, name: string, seed: string): string {
+  const fromSku = (sku ?? "").replace(/[^a-zA-Z0-9]/g, "");
+  if (fromSku) return fromSku.slice(0, 20);
+  const fromName = name.replace(/[^a-zA-Z0-9]/g, "");
+  return (fromName || `ITEM${seed}`).slice(0, 20);
 }
 
 const StoreContext = createContext<Ctx | null>(null);
@@ -1755,30 +1843,84 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     openSessionRecord: () => s.cashSessions.find((c) => c.status === "Open"),
 
+    loadMenuFromServer: async () => {
+      const menuId = s.menus.find((m) => m.isDefault)?.id ?? s.menus[0]?.id ?? "menu-default";
+      try {
+        const [{ catagories }, { menu }, { variants }, { addons }] = await Promise.all([
+          menuApi.getCategories(),
+          menuApi.getItems(),
+          menuApi.getVariants(),
+          menuApi.getAddonGroups(),
+        ]);
+        patch((p) => ({
+          ...p,
+          menuCategories: catagories.map((c) => mapRawMenuCategory(c, menuId)),
+          menuItems: menu.map((m) => mapRawMenuItem(m, menuId)),
+          variantMasters: variants.filter((v) => v.active).map((v) => mapRawVariant(v, menuId)),
+          addonGroups: addons.map((g) => mapRawAddonGroup(g, menuId)),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load menu from server");
+      }
+    },
     upsertMenuItem: (item) => {
-      patch((p) => ({
-        ...p,
-        menuItems: p.menuItems.some((m) => m.id === item.id)
-          ? p.menuItems.map((m) => (m.id === item.id ? item : m))
-          : [{ ...item, id: item.id || uid("m") }, ...p.menuItems],
-      }));
-      toast.success("Menu item saved", { description: item.name });
+      const isNew = !s.menuItems.some((m) => m.id === item.id);
+      const seed = String(Date.now()).slice(-6);
+      const payload = {
+        item_name: item.name,
+        menu_categ_id: Number(item.categoryId),
+        price: item.price,
+        shortCode: toShortCode(item.sku, item.name, seed),
+        favorite: item.favourite,
+        gst_type: "S" as const, // no UI field yet - defaults to the model's own default
+        barcode_value: item.barcode ?? "",
+        addons: [] as number[], // per-item addon attachment has no UI yet
+        ...(item.dietary ? { sub_categories: item.dietary } : {}),
+        ...(item.description ? { description: item.description } : {}),
+        ...(item.imageUrl ? { imageUrl: item.imageUrl } : {}),
+      };
+      const run = async () => {
+        try {
+          if (isNew) {
+            await menuApi.createItem(payload);
+          } else {
+            await menuApi.editItem({ ...payload, id: Number(item.id) });
+          }
+          await value.loadMenuFromServer();
+          toast.success("Menu item saved", { description: item.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save menu item");
+        }
+      };
+      void run();
     },
     removeMenuItem: (id) => {
-      patch((p) => ({ ...p, menuItems: p.menuItems.filter((m) => m.id !== id) }));
-      toast.success("Menu item removed");
+      value.removeMenuItems([id]);
     },
     setMenuItemsActive: (ids, active) => {
-      patch((p) => ({
-        ...p,
-        menuItems: p.menuItems.map((m) => (ids.includes(m.id) ? { ...m, active } : m)),
-      }));
-      toast.success(`${ids.length} item(s) ${active ? "activated" : "deactivated"}`);
+      if (!active) {
+        value.removeMenuItems(ids);
+        return;
+      }
+      // /menuRemove soft-deletes (active:false); no reactivate/un-delete
+      // endpoint exists on the backend to undo that.
+      toast.error("Reactivating items isn't supported by the backend yet");
     },
     removeMenuItems: (ids) => {
-      patch((p) => ({ ...p, menuItems: p.menuItems.filter((m) => !ids.includes(m.id)) }));
-      toast.success(`${ids.length} item(s) removed`);
+      const run = async () => {
+        try {
+          await menuApi.removeItems(ids.map(Number));
+          await value.loadMenuFromServer();
+          toast.success(`${ids.length} item(s) removed`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove item(s)");
+        }
+      };
+      void run();
     },
+    // Not yet wired to the real backend - would mean looping create-category
+    // and create-item calls per row, a bigger separate piece of work than
+    // the rest of this pass. Still mock-only.
     bulkImportMenuItems: (rows, menuId) => {
       patch((p) => {
         let categories = p.menuCategories;
@@ -1813,13 +1955,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success(`${rows.length} item(s) imported`);
     },
     upsertMenuCategory: (c) => {
-      patch((p) => ({
-        ...p,
-        menuCategories: p.menuCategories.some((x) => x.id === c.id)
-          ? p.menuCategories.map((x) => (x.id === c.id ? c : x))
-          : [...p.menuCategories, { ...c, id: c.id || uid("mc") }],
-      }));
-      toast.success("Category saved", { description: c.name });
+      const isNew = !s.menuCategories.some((x) => x.id === c.id);
+      const run = async () => {
+        try {
+          if (isNew) {
+            await menuApi.createCategory(c.name);
+          } else {
+            await menuApi.editCategory(Number(c.id), c.name, c.sortOrder);
+          }
+          await value.loadMenuFromServer();
+          toast.success("Category saved", { description: c.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save category");
+        }
+      };
+      void run();
     },
     removeMenuCategory: (id) => {
       if (s.menuItems.some((i) => i.categoryId === id)) {
@@ -1828,34 +1978,84 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      patch((p) => ({ ...p, menuCategories: p.menuCategories.filter((c) => c.id !== id) }));
-      toast.success("Category removed");
+      const run = async () => {
+        try {
+          await menuApi.removeCategories([Number(id)]);
+          await value.loadMenuFromServer();
+          toast.success("Category removed");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove category");
+        }
+      };
+      void run();
     },
     upsertVariant: (v) => {
-      patch((p) => ({
-        ...p,
-        variantMasters: p.variantMasters.some((x) => x.id === v.id)
-          ? p.variantMasters.map((x) => (x.id === v.id ? v : x))
-          : [...p.variantMasters, { ...v, id: v.id || uid("v") }],
-      }));
-      toast.success("Variant saved", { description: v.name });
+      const isNew = !s.variantMasters.some((x) => x.id === v.id);
+      const run = async () => {
+        try {
+          if (isNew) {
+            await menuApi.createVariant(v.name, true);
+          } else {
+            await menuApi.editVariant(Number(v.id), v.name, true);
+          }
+          await value.loadMenuFromServer();
+          toast.success("Variant saved", { description: v.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save variant");
+        }
+      };
+      void run();
     },
     removeVariant: (id) => {
-      patch((p) => ({ ...p, variantMasters: p.variantMasters.filter((x) => x.id !== id) }));
-      toast.success("Variant removed");
+      // No delete endpoint exists for variants - soft-delete via the edit
+      // endpoint's `active` field instead (it's the same convention used
+      // for tables/categories/items everywhere else in this backend).
+      // loadMenuFromServer only keeps active:true rows, so this disappears
+      // from the list the same way a real delete would.
+      const v = s.variantMasters.find((x) => x.id === id);
+      if (!v) return;
+      const run = async () => {
+        try {
+          await menuApi.editVariant(Number(id), v.name, false);
+          await value.loadMenuFromServer();
+          toast.success("Variant removed");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove variant");
+        }
+      };
+      void run();
     },
     upsertAddonGroup: (g) => {
-      patch((p) => ({
-        ...p,
-        addonGroups: p.addonGroups.some((x) => x.id === g.id)
-          ? p.addonGroups.map((x) => (x.id === g.id ? g : x))
-          : [...p.addonGroups, { ...g, id: g.id || uid("ag") }],
-      }));
-      toast.success("Addon group saved", { description: g.name });
+      const isNew = !s.addonGroups.some((x) => x.id === g.id);
+      const payload = {
+        department_name: g.name,
+        maximum_allowed_addon: g.max,
+        minimum_allowed_addon: g.min,
+        singleSelection: g.selection === "Single",
+        // No veg/non-veg/egg field in the UI yet - backend requires one per
+        // option, so every option defaults to "veg" until that's added.
+        addons: g.options.map((o) => ({ addon_name: o.name, price: o.price, attributes: "veg" })),
+      };
+      const run = async () => {
+        try {
+          if (isNew) {
+            await menuApi.createAddonGroup(payload);
+          } else {
+            await menuApi.editAddonGroup({ ...payload, id: Number(g.id) });
+          }
+          await value.loadMenuFromServer();
+          toast.success("Addon group saved", { description: g.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save addon group");
+        }
+      };
+      void run();
     },
-    removeAddonGroup: (id) => {
-      patch((p) => ({ ...p, addonGroups: p.addonGroups.filter((x) => x.id !== id) }));
-      toast.success("Addon group removed");
+    removeAddonGroup: () => {
+      // No delete or soft-delete path exists: there's no remove endpoint,
+      // and updatedAddons doesn't accept `active` even though the model
+      // has the column - confirmed by reading the controller, not assumed.
+      toast.error("Removing addon groups isn't supported by the backend yet");
     },
     loadTablesFromServer: async () => {
       try {
