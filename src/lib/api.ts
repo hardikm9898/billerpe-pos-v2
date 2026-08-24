@@ -489,3 +489,35 @@ export const dueApi = {
   settleAllDue: (idArray: number[], mode: "cash" | "upi" | "card") =>
     apiPost<{ message?: string }>("/allSettleDue", { idArray, mode }),
 };
+
+export type RawCustomer = {
+  id: number;
+  number: string;
+  name: string;
+  address: string;
+  gstin: string;
+};
+
+// /customer/getAll (controller/user.js's getNumberSuggestion, reused under
+// a clearer route name) GROUP BYs on number - dedupes the many User rows
+// that can share a phone number (one gets created per order unless a
+// matching number already exists) down to one row per number, taking the
+// MAX (i.e. most recently inserted) non-empty name/address/gstin/id for
+// each. It's an identity list, not an order join, so there's no order
+// count or last-visit date to load from here - confirmed by reading the
+// query, nothing this app's Customer type wants for those two fields
+// exists in the response.
+export const customerApi = {
+  // limit set high rather than wired to true pagination - this loads "the
+  // first N customers" once and the existing local name/phone search runs
+  // against that set, same pattern as loadDueBillsFromServer.
+  getAll: () => apiGet<{ numbers: RawCustomer[]; total: number }>("/customer/getAll?limit=500"),
+
+  // Rejects a duplicate number outright (its own findOne check) - not
+  // silently deduped or merged.
+  create: (params: { name: string; number: string; gstin: string; address: string }) =>
+    apiPost<{ message?: string }>("/customer/create", params),
+
+  update: (params: { id: number; name: string; number: string; gstin: string; address: string }) =>
+    apiPut<{ message?: string }>("/customer/update", params),
+};

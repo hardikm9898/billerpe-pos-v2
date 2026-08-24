@@ -14,7 +14,9 @@ import {
   orderApi,
   hotelApi,
   dueApi,
+  customerApi,
   type RawDueOrder,
+  type RawCustomer,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -464,6 +466,7 @@ interface Ctx extends State {
   loadUsersFromServer: () => Promise<void>;
   loadInvoiceFormatFromServer: () => Promise<void>;
   loadDueBillsFromServer: () => Promise<void>;
+  loadCustomersFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -712,6 +715,24 @@ function mapRawDueOrder(o: RawDueOrder): DueBill {
     daysAgo,
     amount: o.due,
     status: "Due",
+  };
+}
+
+function mapRawCustomer(c: RawCustomer, previousActive?: boolean): Customer {
+  return {
+    id: String(c.id),
+    name: c.name || "",
+    phone: c.number,
+    // No order-count or last-visit date in this endpoint's response (see
+    // customerApi's own comment) - nothing to load these from.
+    orders: 0,
+    lastVisit: "—",
+    gstin: c.gstin || undefined,
+    address: c.address || undefined,
+    // "Autofill" has no backend equivalent (no active/enabled column on
+    // the customer model) - stays purely local, carried over across
+    // reloads by id rather than reset to true every time.
+    active: previousActive ?? true,
   };
 }
 
@@ -2692,6 +2713,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load due bills from server");
       }
     },
+    loadCustomersFromServer: async () => {
+      try {
+        const { numbers } = await customerApi.getAll();
+        const previousActiveById = new Map(s.customers.map((c) => [c.id, c.active]));
+        patch((p) => ({
+          ...p,
+          customers: numbers.map((c) => mapRawCustomer(c, previousActiveById.get(String(c.id)))),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load customers from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3594,13 +3627,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Custom item added", { description: `${name.trim()} · ₹${price}` });
     },
     upsertCustomer: (customer) => {
-      patch((p) => ({
-        ...p,
-        customers: p.customers.some((c) => c.id === customer.id)
-          ? p.customers.map((c) => (c.id === customer.id ? customer : c))
-          : [{ ...customer, id: customer.id || uid("c") }, ...p.customers],
-      }));
-      toast.success("Customer saved", { description: customer.name });
+      const isNew = !customer.id;
+      const payload = {
+        name: customer.name,
+        number: customer.phone,
+        gstin: customer.gstin ?? "",
+        address: customer.address ?? "",
+      };
+      const run = async () => {
+        try {
+          if (isNew) {
+            await customerApi.create(payload);
+          } else {
+            await customerApi.update({ ...payload, id: Number(customer.id) });
+          }
+          await value.loadCustomersFromServer();
+          toast.success("Customer saved", { description: customer.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save customer");
+        }
+      };
+      void run();
     },
     toggleCustomer: (id) =>
       patch((p) => ({
