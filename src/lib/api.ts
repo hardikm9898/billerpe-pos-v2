@@ -1043,3 +1043,69 @@ export const wastageApi = {
     }[],
   ) => apiPost<{ message?: string }>("/stock/wastage", items),
 };
+
+export type RawSFI = {
+  id: number;
+  name: string;
+  unit_id: number | null;
+  min_stock_level: boolean;
+  min_stock_qty: string;
+  unit?: { unit_name: string };
+  stock?: { available_qty: string; cost_per_unit: string; total_amount: string };
+};
+
+export type RawSFIRecipeLine = {
+  id: number;
+  raw_material_id: number;
+  consumption_qty: string;
+};
+
+export type RawSFIDetail = RawSFI & { recipes: RawSFIRecipeLine[] };
+
+// controller/semiFinishedItems.js - genuinely well-built: real
+// transactions on every write, row locking on production, hard deletes
+// (not the soft-delete pattern most of the rest of this backend uses),
+// correct weighted-average cost math (verified live). GET /all doesn't
+// include each item's recipe lines, only GET /single does (confirmed
+// live) - loading the full picture needs one /single call per item,
+// acceptable since a hotel only has a handful of semi-finished items,
+// not the N+1 concern it'd be for a larger list.
+export const semiFinishedApi = {
+  getAll: () => apiGet<RawSFI[]>("/semiFinished/all"),
+  getSingle: (id: number) => apiGet<RawSFIDetail>(`/semiFinished/single?id=${id}`),
+
+  create: (params: {
+    name: string;
+    unit_id: number;
+    min_stock_level: boolean;
+    min_stock_qty: number;
+    recipes: { raw_material_id: number; consumption_qty: number }[];
+  }) => apiPost<{ id: number }>("/semiFinished/add", params),
+
+  update: (params: {
+    id: number;
+    name: string;
+    unit_id: number;
+    min_stock_level: boolean;
+    min_stock_qty: number;
+    recipes: { raw_material_id: number; consumption_qty: number }[];
+  }) => apiPut<Record<string, never>>("/semiFinished/edit", params),
+
+  remove: (id: number) => apiDelete<Record<string, never>>(`/semiFinished/delete?id=${id}`),
+
+  // consumption_qty on each recipe line is "per 1 unit produced" both
+  // sides already (this app's own SemiFinished doc comment says the same
+  // thing about its BOM) - produced_qty multiplies straight through with
+  // no unit conversion needed, confirmed live (2 units at 200g/unit
+  // consumed exactly 400g and cost exactly what the weighted average
+  // predicted).
+  recordProduction: (params: {
+    semi_finished_item_id: number;
+    produced_qty: number;
+    notes?: string;
+  }) =>
+    apiPost<{ produced_qty: number; raw_material_cost: number }>(
+      "/semiFinished/production",
+      params,
+    ),
+};

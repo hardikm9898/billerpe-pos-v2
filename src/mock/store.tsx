@@ -24,12 +24,15 @@ import {
   purchaseOrderApi,
   stockInHandApi,
   wastageApi,
+  semiFinishedApi,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
   type RawPurchaseOrder,
   type RawStockInHand,
   type RawWastage,
+  type RawSFI,
+  type RawSFIRecipeLine,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -504,6 +507,7 @@ interface Ctx extends State {
   loadSuppliersFromServer: () => Promise<void>;
   loadPurchaseOrdersFromServer: () => Promise<void>;
   loadWastageFromServer: () => Promise<void>;
+  loadSemiFinishedFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -904,6 +908,33 @@ function mapRawTaxType(
 
 function mapRawUnit(u: RawUnit): StockUnit {
   return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
+}
+
+function mapRawSFI(
+  item: RawSFI,
+  recipeLines: RawSFIRecipeLine[],
+  units: StockUnit[],
+  previousBatchQty?: number,
+): SemiFinished {
+  // GET /all's nested unit only carries unit_name (the long name, e.g.
+  // "Gram") - this app's own unit convention everywhere is the short
+  // name ("g"), resolved here against the already-wired Units list
+  // instead of trusting the long name.
+  const unitShort = units.find((u) => u.id === String(item.unit_id))?.shortName ?? "";
+  return {
+    id: `sf-${item.id}`,
+    name: item.name,
+    unit: unitShort,
+    // No backend field at all - a pure local production-run-size
+    // suggestion, carried over across reloads.
+    batchQty: previousBatchQty ?? 1,
+    stock: item.stock ? Number(item.stock.available_qty) : 0,
+    components: recipeLines.map((r) => ({
+      materialId: String(r.raw_material_id),
+      qty: Number(r.consumption_qty),
+    })),
+    minStock: item.min_stock_level ? Number(item.min_stock_qty) : undefined,
+  };
 }
 
 function mapRawWastage(w: RawWastage, previous?: Wastage): Wastage {
@@ -3176,6 +3207,40 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load wastage from server");
       }
     },
+    // Units are fetched fresh here rather than read off s.units - this is
+    // an independent AppShell effect from loadUnitsFromServer, and two
+    // effects racing on the same store.authed trigger can't guarantee
+    // units would already be loaded by the time this runs (same reasoning
+    // as loadRawMaterialsFromServer folding in its own stockInHand fetch).
+    loadSemiFinishedFromServer: async () => {
+      try {
+        const [items, { units: rawUnits }] = await Promise.all([
+          semiFinishedApi.getAll(),
+          stockUnitApi.getAll(),
+        ]);
+        const units = rawUnits.map(mapRawUnit);
+        const previousBatchQtyById = new Map(s.semiFinished.map((sf) => [sf.id, sf.batchQty]));
+        const mapped = await Promise.all(
+          items.map(async (item) => {
+            const localId = `sf-${item.id}`;
+            try {
+              const detail = await semiFinishedApi.getSingle(item.id);
+              return mapRawSFI(item, detail.recipes, units, previousBatchQtyById.get(localId));
+            } catch {
+              // Base item still shows even if its recipe lines couldn't
+              // be fetched - an empty BOM rather than the whole item
+              // disappearing.
+              return mapRawSFI(item, [], units, previousBatchQtyById.get(localId));
+            }
+          }),
+        );
+        patch((p) => ({ ...p, semiFinished: mapped }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load semi-finished items from server",
+        );
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3786,17 +3851,61 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     upsertSemiFinished: (sf) => {
-      patch((p) => ({
-        ...p,
-        semiFinished: p.semiFinished.some((x) => x.id === sf.id)
-          ? p.semiFinished.map((x) => (x.id === sf.id ? sf : x))
-          : [...p.semiFinished, { ...sf, id: sf.id || uid("sf") }],
-      }));
-      toast.success("Semi-finished item saved");
+      if (!sf.components.length) {
+        toast.error("Add at least one raw material to the recipe");
+        return;
+      }
+      const unitId = s.units.find((u) => u.shortName === sf.unit)?.id;
+      if (!unitId) {
+        toast.error("Select a valid unit");
+        return;
+      }
+      const payload = {
+        name: sf.name,
+        unit_id: Number(unitId),
+        min_stock_level: !!sf.minStock,
+        min_stock_qty: sf.minStock ?? 0,
+        recipes: sf.components.map((c) => ({
+          raw_material_id: Number(c.materialId),
+          consumption_qty: c.qty,
+        })),
+      };
+      // Ids for anything already loaded from the server are always
+      // "sf-<backend id>" (see mapRawSFI) - a genuinely new draft's id is
+      // "" (blankSemi), so this alone tells create from update apart.
+      const backendId = sf.id ? Number(sf.id.replace("sf-", "")) : undefined;
+      const run = async () => {
+        try {
+          if (!backendId) {
+            await semiFinishedApi.create(payload);
+          } else {
+            await semiFinishedApi.update({ ...payload, id: backendId });
+          }
+          await value.loadSemiFinishedFromServer();
+          toast.success("Semi-finished item saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save semi-finished item");
+        }
+      };
+      void run();
     },
     removeSemiFinished: (id) => {
+      const backendId = id ? Number(id.replace("sf-", "")) : undefined;
       patch((p) => ({ ...p, semiFinished: p.semiFinished.filter((x) => x.id !== id) }));
       toast.success("Semi-finished item deleted");
+      if (!backendId) return;
+      const run = async () => {
+        try {
+          await semiFinishedApi.remove(backendId);
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Deleted locally but the backend removal failed",
+          );
+        }
+      };
+      void run();
     },
     semiUnitCost,
     recordProduction: (semiId, qty, notes) => {
@@ -3839,6 +3948,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Production recorded", {
         description: `${qty} ${sf.unit} of ${sf.name} · raw materials consumed`,
       });
+
+      const backendId = semiId ? Number(semiId.replace("sf-", "")) : undefined;
+      if (!backendId) {
+        toast.error("This item hasn't been saved to the server yet", {
+          description: "Save it first, then record production - stock won't sync until then.",
+        });
+        return;
+      }
+      const run = async () => {
+        try {
+          await semiFinishedApi.recordProduction({
+            semi_finished_item_id: backendId,
+            produced_qty: qty,
+            ...(notes ? { notes } : {}),
+          });
+          await value.loadSemiFinishedFromServer();
+          await value.loadRawMaterialsFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Recorded locally but the backend sync failed",
+          );
+        }
+      };
+      void run();
     },
     upsertRecipe: (r) => {
       patch((p) => ({
