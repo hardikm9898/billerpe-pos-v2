@@ -711,3 +711,21 @@ export const taxApi = {
     table_categ_ids: number[];
   }) => apiPut<{ message?: string }>("/taxType/tax", params),
 };
+
+export type RawUnit = {
+  id: number;
+  unit_name: string;
+  shortName: string;
+};
+
+// controller/stock_Mangement/unit.js - unlike most of the CRUD wired so
+// far, this is genuinely clean: rejects a duplicate unit_name, and every
+// mutation returns the fresh full list in the same response, so no
+// separate reload call is needed after create/edit.
+export const stockUnitApi = {
+  getAll: () => apiGet<{ units: RawUnit[] }>("/stock/getAllUnit"),
+  create: (params: { unitName: string; shortName: string }) =>
+    apiPost<{ units: RawUnit[] }>("/stock/addUnit", params),
+  update: (params: { id: number; unitName: string; shortName: string }) =>
+    apiPut<{ units: RawUnit[] }>("/stock/editUnit", params),
+};

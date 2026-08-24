@@ -18,6 +18,8 @@ import {
   kitchenApi,
   printerApi,
   taxApi,
+  stockUnitApi,
+  type RawUnit,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -486,6 +488,7 @@ interface Ctx extends State {
   loadPrintersFromServer: () => Promise<void>;
   loadTaxRulesFromServer: () => Promise<void>;
   loadServiceChargeFromServer: () => Promise<void>;
+  loadUnitsFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -882,6 +885,10 @@ function mapRawTaxType(
     menuCategoryIds,
     active: t.active,
   };
+}
+
+function mapRawUnit(u: RawUnit): StockUnit {
+  return { id: String(u.id), unitName: u.unit_name, shortName: u.shortName };
 }
 
 const ROLE_VALUES: Role[] = [
@@ -2950,6 +2957,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    loadUnitsFromServer: async () => {
+      try {
+        const { units } = await stockUnitApi.getAll();
+        patch((p) => ({ ...p, units: units.map(mapRawUnit) }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load units from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3071,13 +3086,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     /* ---------------- stock module ---------------- */
     upsertUnit: (u) => {
-      patch((p) => ({
-        ...p,
-        units: p.units.some((x) => x.id === u.id)
-          ? p.units.map((x) => (x.id === u.id ? u : x))
-          : [...p.units, { ...u, id: u.id || uid("u") }],
-      }));
-      toast.success("Unit saved");
+      const run = async () => {
+        try {
+          const { units } = u.id
+            ? await stockUnitApi.update({
+                id: Number(u.id),
+                unitName: u.unitName,
+                shortName: u.shortName,
+              })
+            : await stockUnitApi.create({ unitName: u.unitName, shortName: u.shortName });
+          patch((p) => ({ ...p, units: units.map(mapRawUnit) }));
+          toast.success("Unit saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save unit");
+        }
+      };
+      void run();
     },
     poTotals,
     savePurchase: (po, opts) => {
