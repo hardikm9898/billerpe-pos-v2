@@ -568,3 +568,60 @@ export const customerApi = {
   update: (params: { id: number; name: string; number: string; gstin: string; address: string }) =>
     apiPut<{ message?: string }>("/customer/update", params),
 };
+
+export type RawPrinter = {
+  id: number;
+  printer_name: string;
+  print_type: "K" | "I";
+  printer_size: "2" | "3" | "4";
+  number_of_copies: number;
+  table_ids: unknown;
+  menu_categ_ids: unknown;
+  order_type: unknown;
+};
+
+// GET /printer (controller/printer_setting.js's getPrinter) strips every
+// row's id before returning it - only printer_size/printer_name/
+// number_of_copies survive, reshaped into a
+// {defaultPrinter:{K,I,multi}, primaryPrinters:[...]} envelope. There is
+// no way to edit, delete, or setCategoriesForPrinter on anything loaded
+// from it, confirmed by reading the controller, not by a failed request.
+// GET /offlinePrinterSetting (built for offline-sync caching) returns the
+// raw model rows instead, id included - used here as the list endpoint
+// instead, same kind of substitution as menuApi.getCategories using
+// /catagories/%25 instead of the lossy /catagories/all.
+export const printerApi = {
+  getAll: () => apiGet<{ printerSettings: RawPrinter[] }>("/offlinePrinterSetting"),
+
+  // setPrinterSetting hardcodes default:true on every row it creates (no
+  // uniqueness check on printer_name either, unlike Kitchens) - confirmed
+  // live creating two printers with the same name is allowed, so the
+  // caller can't safely find a just-created row by name; it has to diff
+  // the id set before/after instead (see upsertPrinter).
+  create: (params: {
+    printer_name: string;
+    printer_size: string;
+    number_of_copies: number;
+    print_type: "K" | "I";
+  }) => apiPost<{ message?: string }>("/setPrinter", params),
+
+  update: (params: {
+    id: number;
+    printer_name: string;
+    printer_size: string;
+    number_of_copies: number;
+    print_type: "K" | "I";
+  }) => apiPost<{ message?: string }>("/EditPrinter", params),
+
+  // items_ids is a genuine typo in the controller (the model's column is
+  // item_ids) - confirmed live it never actually persists. Not sent here;
+  // this app's Printer type has no per-item routing to lose anyway.
+  setCategories: (params: {
+    id: number;
+    table_ids: number[];
+    menu_categ_ids: number[];
+    order_type: ("dinin" | "pickup")[];
+  }) => apiPost<{ message?: string }>("/setCategoriesForPrinter", params),
+
+  remove: (id: number) => apiPost<{ message?: string }>("/deletePrinter", { id }),
+};

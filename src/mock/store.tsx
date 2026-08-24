@@ -16,9 +16,11 @@ import {
   dueApi,
   customerApi,
   kitchenApi,
+  printerApi,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
+  type RawPrinter,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -470,6 +472,7 @@ interface Ctx extends State {
   loadDueBillsFromServer: () => Promise<void>;
   loadCustomersFromServer: () => Promise<void>;
   loadKitchensFromServer: () => Promise<void>;
+  loadPrintersFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -768,6 +771,65 @@ function mapRawKitchen(k: RawKitchen, previousIsDefault?: boolean): Kitchen {
     // No backend equivalent (see kitchenApi's own comment) - carried over
     // across reloads by id rather than reset every time.
     isDefault: previousIsDefault,
+  };
+}
+
+// model/printer_setting.js's printer_size ENUM ('2'/'3'/'4') is never
+// actually interpreted anywhere server-side (create/edit/list just carry
+// the string through) - no source documents what each value means, so
+// this ascending-width guess (58mm/80mm/A4, matching the model's own
+// default of '3' to this app's own default of 80mm) is an assumption,
+// not a confirmed mapping. It has no behavioral consequence server-side
+// either way.
+const PRINTER_SIZE_TO_BACKEND: Record<NonNullable<Printer["size"]>, "2" | "3" | "4"> = {
+  "58mm": "2",
+  "80mm": "3",
+  A4: "4",
+};
+const PRINTER_SIZE_FROM_BACKEND: Record<"2" | "3" | "4", NonNullable<Printer["size"]>> = {
+  "2": "58mm",
+  "3": "80mm",
+  "4": "A4",
+};
+
+function mapRawPrinter(p: RawPrinter, menuCategories: MenuCategory[]): Printer {
+  const parseArray = (v: unknown): unknown[] => {
+    try {
+      return typeof v === "string" ? JSON.parse(v || "[]") : Array.isArray(v) ? v : [];
+    } catch {
+      return [];
+    }
+  };
+  const categoryIds = parseArray(p.menu_categ_ids).map((n) => String(n));
+  const categoryNames = categoryIds
+    .map((id) => menuCategories.find((c) => c.id === id)?.name)
+    .filter((n): n is string => !!n);
+  const tableIds = parseArray(p.table_ids).map((n) => String(n));
+  const orderTypes = (parseArray(p.order_type) as string[]).map((t) =>
+    t === "dinin" ? "Dine-in" : "Pickup",
+  ) as OpsOrderType[];
+  const printType: Printer["printType"] = p.print_type === "K" ? "KOT" : "Invoice";
+  return {
+    id: String(p.id),
+    name: p.printer_name,
+    size: PRINTER_SIZE_FROM_BACKEND[p.printer_size] ?? "80mm",
+    type:
+      p.printer_size === "2"
+        ? "Thermal 58mm"
+        : p.printer_size === "4"
+          ? "A4 Laser"
+          : "Thermal 80mm",
+    // "connection" (LAN/USB/Bluetooth) and "status" (Ready/Offline/Paper
+    // Out) are physical-hardware properties this cloud backend has no way
+    // to know - not loaded from anywhere, stay at prototype defaults.
+    connection: "LAN",
+    status: "Ready",
+    role: printType === "Invoice" ? "Bill" : "KOT",
+    printType,
+    copies: p.number_of_copies,
+    categories: categoryNames,
+    orderTypes,
+    tableIds,
   };
 }
 
@@ -2773,6 +2835,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load kitchens from server");
       }
     },
+    loadPrintersFromServer: async () => {
+      try {
+        const { printerSettings } = await printerApi.getAll();
+        const previousDefaultId = s.printers.find((p) => p.isDefault)?.id;
+        const mapped = printerSettings.map((p) => mapRawPrinter(p, s.menuCategories));
+        // isDefault (which KOT printer categories fall back to) has no
+        // backend column that means anything - setPrinterSetting
+        // hardcodes every row to default:true, confirmed live, so it
+        // can't be read back from there either. Carried over across
+        // reloads by id; falls back to the first KOT-capable printer.
+        const fallbackId = mapped.find((p) => p.role !== "Bill")?.id;
+        const withDefault = mapped.map((p) => ({
+          ...p,
+          isDefault: mapped.some((m) => m.id === previousDefaultId)
+            ? p.id === previousDefaultId
+            : p.id === fallbackId,
+        }));
+        patch((p) => ({ ...p, printers: withDefault }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load printers from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3342,13 +3426,69 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Device deregistered");
     },
     upsertPrinter: (pr) => {
-      patch((p) => ({
-        ...p,
-        printers: p.printers.some((x) => x.id === pr.id)
-          ? p.printers.map((x) => (x.id === pr.id ? pr : x))
-          : [...p.printers, { ...pr, id: pr.id || uid("p") }],
-      }));
-      toast.success("Printer saved", { description: pr.name });
+      const print_type: "K" | "I" = pr.printType === "Invoice" ? "I" : "K";
+      const printer_size = PRINTER_SIZE_TO_BACKEND[pr.size ?? "80mm"];
+      const menuCategIds = pr.categories
+        .map((name) => s.menuCategories.find((c) => c.name === name)?.id)
+        .filter((id): id is string => !!id)
+        .map(Number);
+      const tableIdsNum = (pr.tableIds ?? []).map(Number);
+      const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
+        "Dine-in": "dinin",
+        Pickup: "pickup",
+      };
+      const orderTypesBackend = (pr.orderTypes ?? ["Dine-in", "Pickup"]).map(
+        (t) => orderTypeMap[t],
+      );
+
+      const run = async () => {
+        try {
+          let backendId: number;
+          if (!pr.id) {
+            // setPrinterSetting doesn't return the new row's id and
+            // doesn't enforce unique names (see printerApi's own
+            // comment), so a just-created row can't be found safely by
+            // name - diffing the id set before/after is the only
+            // reliable way.
+            const before = await printerApi.getAll();
+            const beforeIds = new Set(before.printerSettings.map((x) => x.id));
+            await printerApi.create({
+              printer_name: pr.name,
+              printer_size,
+              number_of_copies: pr.copies ?? 1,
+              print_type,
+            });
+            const after = await printerApi.getAll();
+            const created = after.printerSettings.find((x) => !beforeIds.has(x.id));
+            if (!created) {
+              toast.error("Printer was created but couldn't be found afterward");
+              return;
+            }
+            backendId = created.id;
+          } else {
+            backendId = Number(pr.id);
+            await printerApi.update({
+              id: backendId,
+              printer_name: pr.name,
+              printer_size,
+              number_of_copies: pr.copies ?? 1,
+              print_type,
+            });
+          }
+          await printerApi.setCategories({
+            id: backendId,
+            table_ids: tableIdsNum,
+            menu_categ_ids: menuCategIds,
+            order_type: orderTypesBackend,
+          });
+          await value.loadPrintersFromServer();
+          log("Printer Saved", pr.name, "—", `${pr.printType ?? "KOT"} · ${printer_size}`);
+          toast.success("Printer saved", { description: pr.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save printer");
+        }
+      };
+      void run();
     },
     markNotificationRead: (id) =>
       patch((p) => ({
@@ -3544,8 +3684,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      patch((p) => ({ ...p, printers: p.printers.filter((x) => x.id !== id) }));
-      toast.success("Printer removed");
+      const run = async () => {
+        try {
+          await printerApi.remove(Number(id));
+          await value.loadPrintersFromServer();
+          toast.success("Printer removed", { description: target.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove printer");
+        }
+      };
+      void run();
     },
     setDefaultKotPrinter: (id) => {
       patch((p) => ({
