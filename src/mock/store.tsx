@@ -26,6 +26,8 @@ import {
   wastageApi,
   semiFinishedApi,
   recipeApi,
+  expenseHeadApi,
+  expenseApi,
   type RawUnit,
   type RawRawMaterial,
   type RawSupplier,
@@ -35,6 +37,8 @@ import {
   type RawSFI,
   type RawSFIRecipeLine,
   type RawRecipeDetail,
+  type RawExpenseHead,
+  type RawExpenseEntry,
   type RawDueOrder,
   type RawCustomer,
   type RawKitchen,
@@ -512,6 +516,8 @@ interface Ctx extends State {
   loadWastageFromServer: () => Promise<void>;
   loadSemiFinishedFromServer: () => Promise<void>;
   loadRecipesFromServer: () => Promise<void>;
+  loadExpenseHeadsFromServer: () => Promise<void>;
+  loadExpensesFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -936,6 +942,35 @@ function mapRecipeDetail(
       .filter((l) => l.type === "raw")
       .map((l) => ({ materialId: l.refId, qty: l.qty })),
     groups: [{ key: "base", label: "Base recipe", kind: "base", lines }],
+  };
+}
+
+function mapRawExpenseHead(
+  h: RawExpenseHead,
+  previous?: { type: ExpenseHead["type"]; active: boolean },
+): ExpenseHead {
+  return {
+    id: `eh-${h.id}`,
+    name: h.expense_head_name,
+    // Neither field exists on the backend (only expense_head_name/deleted)
+    // - both are pure local classification, carried over across reloads.
+    type: previous?.type ?? "Variable",
+    active: previous?.active ?? true,
+  };
+}
+
+function mapRawExpenseEntry(e: RawExpenseEntry): Expense {
+  const [y, m, d] = e.business_date.split("-");
+  return {
+    id: `exp-${e.id}`,
+    headId: `eh-${e.expense_head_id}`,
+    amount: Number(e.amount),
+    date: `${d}/${m}/${y}`,
+    mode: e.paymentMode === "Cash" || e.paymentMode === "UPI" ? e.paymentMode : "Bank",
+    note: e.reason,
+    // No user info comes back on this endpoint at all - see expenseApi's
+    // comment on why.
+    createdBy: "Staff",
   };
 }
 
@@ -2604,6 +2639,34 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       toast.success("Expense attached to session", { description: `${head?.name} · ₹${amount}` });
+
+      // Cash Sessions have no backend representation at all (confirmed
+      // earlier this session - no hotel_id/status/cashier on the model,
+      // no controller code touches it) - the movement above stays purely
+      // local. The expense entry itself is real though, so it's synced.
+      const headBackendId = headId.startsWith("eh-")
+        ? Number(headId.replace("eh-", ""))
+        : undefined;
+      if (!headBackendId) return;
+      const run = async () => {
+        try {
+          await expenseApi.create({
+            expense_head_id: headBackendId,
+            amount,
+            paymentMode: "Cash",
+            reason: note,
+            addExpense: true,
+          });
+          await value.loadExpensesFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError
+              ? err.message
+              : "Attached to the cash session locally but the backend sync failed",
+          );
+        }
+      };
+      void run();
     },
 
     closeSession: (counted, reason) => {
@@ -3294,6 +3357,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load recipes from server");
       }
     },
+    loadExpenseHeadsFromServer: async () => {
+      try {
+        const { expenseHeads } = await expenseHeadApi.getAll();
+        const previousById = new Map(
+          s.expenseHeads.map((h) => [h.id, { type: h.type, active: h.active }]),
+        );
+        patch((p) => ({
+          ...p,
+          expenseHeads: expenseHeads.map((h) =>
+            mapRawExpenseHead(h, previousById.get(`eh-${h.id}`)),
+          ),
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load expense heads from server",
+        );
+      }
+    },
+    loadExpensesFromServer: async () => {
+      try {
+        const { entry } = await expenseApi.getAll("2000-01-01", "2100-01-01");
+        patch((p) => ({ ...p, expenses: entry.map(mapRawExpenseEntry) }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load expenses from server");
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3325,22 +3414,82 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     upsertExpense: (e) => {
-      patch((p) => ({
-        ...p,
-        expenses: p.expenses.some((x) => x.id === e.id)
-          ? p.expenses.map((x) => (x.id === e.id ? e : x))
-          : [{ ...e, id: e.id || uid("e") }, ...p.expenses],
-      }));
-      toast.success("Expense saved");
+      const headBackendId = e.headId.startsWith("eh-")
+        ? Number(e.headId.replace("eh-", ""))
+        : undefined;
+      if (!headBackendId) {
+        toast.error("Select a valid expense head");
+        return;
+      }
+      const backendId = e.id.startsWith("exp-") ? Number(e.id.replace("exp-", "")) : undefined;
+      const payload = {
+        expense_head_id: headBackendId,
+        amount: e.amount,
+        paymentMode: e.mode,
+        reason: e.note,
+        addExpense: true,
+      };
+      const run = async () => {
+        try {
+          if (!backendId) {
+            await expenseApi.create(payload);
+          } else {
+            await expenseApi.update({ ...payload, id: backendId });
+          }
+          await value.loadExpensesFromServer();
+          toast.success("Expense saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save expense");
+        }
+      };
+      void run();
     },
     upsertExpenseHead: (h) => {
-      patch((p) => ({
-        ...p,
-        expenseHeads: p.expenseHeads.some((x) => x.id === h.id)
-          ? p.expenseHeads.map((x) => (x.id === h.id ? h : x))
-          : [...p.expenseHeads, { ...h, id: h.id || uid("eh") }],
-      }));
-      toast.success("Expense head saved");
+      if (!h.name.trim()) {
+        toast.error("Enter a head name");
+        return;
+      }
+      // type/active have no backend field at all (see mapRawExpenseHead) -
+      // a reload's previous-value lookup can't see an edit made in this
+      // same action (its "previous" map is built from state as of this
+      // render, before this save resolves), so rather than reload and
+      // risk losing the edit just made, the full local row (including the
+      // save's own type/active) is patched in directly once the real id
+      // is known.
+      const backendId = h.id.startsWith("eh-") ? Number(h.id.replace("eh-", "")) : undefined;
+      const knownIds = new Set(
+        s.expenseHeads
+          .filter((x) => x.id.startsWith("eh-"))
+          .map((x) => Number(x.id.replace("eh-", ""))),
+      );
+      const run = async () => {
+        try {
+          const { expenseHeads } = backendId
+            ? await expenseHeadApi.update(backendId, h.name)
+            : await expenseHeadApi.create(h.name);
+          const resolvedId = backendId ?? expenseHeads.find((x) => !knownIds.has(x.id))?.id;
+          if (!resolvedId) {
+            toast.error("Saved on the server but could not resolve its id");
+            return;
+          }
+          const mapped: ExpenseHead = {
+            id: `eh-${resolvedId}`,
+            name: h.name,
+            type: h.type,
+            active: h.active,
+          };
+          patch((p) => ({
+            ...p,
+            expenseHeads: p.expenseHeads.some((x) => x.id === mapped.id)
+              ? p.expenseHeads.map((x) => (x.id === mapped.id ? mapped : x))
+              : [...p.expenseHeads, mapped],
+          }));
+          toast.success("Expense head saved");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save expense head");
+        }
+      };
+      void run();
     },
     upsertRawMaterial: (m) => {
       const purchaseUnitId = s.units.find((u) => u.shortName === m.purchaseUnit)?.id;

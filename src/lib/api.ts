@@ -1163,3 +1163,68 @@ export const recipeApi = {
   remove: (menuId: number) =>
     apiDelete<{ message?: string }>("/recipes/deleteRecipe", { menu_id: menuId }),
 };
+
+export type RawExpenseHead = {
+  id: number;
+  expense_head_name: string;
+  deleted: boolean;
+};
+
+// controller/expence/expence.js. No delete endpoint for heads exists at all
+// (only add/edit) - a head created here can never be removed through this
+// app either.
+export const expenseHeadApi = {
+  getAll: () => apiGet<{ expenseHeads: RawExpenseHead[] }>("/expense/getAllExpenseHead"),
+  create: (expense_head_name: string) =>
+    apiPost<{ expenseHeads: RawExpenseHead[] }>("/expense/addExpenseHead", {
+      expense_head_name,
+    }),
+  update: (id: number, expense_head_name: string) =>
+    apiPut<{ expenseHeads: RawExpenseHead[] }>("/expense/editExpenseHead", {
+      id,
+      expense_head_name,
+    }),
+};
+
+export type RawExpenseEntry = {
+  id: number;
+  amount: string;
+  reason: string;
+  paymentMode: string;
+  addExpense: boolean;
+  business_date: string;
+  expense_head_id: number;
+  hms_expense_head_mst?: { expense_head_name?: string };
+};
+
+// controller/expence/expence.js. allEntry requires both startDate/endDate
+// (Joi-enforced - confirmed live there's no "defaults to today" gap here
+// unlike some other list endpoints), and buckets by business_date, not
+// createdAt. addExpense:true is money going out (an actual expense),
+// addExpense:false is money coming in - this app's Expense type only
+// models outgoing expenses, so every entry created here always sends
+// addExpense:true. No field on the response identifies which staff member
+// recorded the entry (no user include, unlike Wastage's
+// hms_hotelUser_master), so that's not something this app can show either.
+export const expenseApi = {
+  getAll: (startDate: string, endDate: string) =>
+    apiGet<{ entry: RawExpenseEntry[] }>(
+      `/expense/allEntry?startDate=${startDate}&endDate=${endDate}`,
+    ),
+  create: (params: {
+    expense_head_id: number;
+    amount: number;
+    paymentMode: string;
+    reason: string;
+    addExpense: boolean;
+  }) => apiPost<{ message?: string }>("/expense/addExpense", params),
+  update: (params: {
+    id: number;
+    expense_head_id: number;
+    amount: number;
+    paymentMode: string;
+    reason: string;
+    addExpense: boolean;
+  }) => apiPut<{ message?: string }>("/expense/editExpense", params),
+  remove: (id: number) => apiDelete<{ message?: string }>("/expense/deleteExpense", { id }),
+};
