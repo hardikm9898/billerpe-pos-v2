@@ -77,6 +77,30 @@ export const authApi = {
     }),
 };
 
+// hotelApi is scoped tightly to what's actually wired: the UPI VPA used to
+// build the bill's payment QR code. The rest of what GET /singleHotel and
+// POST /updateInvoiceFormate can read/write (gst_no, fssai_no,
+// multiLanguage, the 10-slot header/footer line config on a *separate*
+// hms_invoice_formate_mst row, etc.) stays local-only in this app's
+// InvoiceFormat settings for now - that model doesn't line up with the
+// backend's fixed-slot schema closely enough to force a full sync here.
+//
+// upiId itself had NO write path anywhere in the backend before this -
+// confirmed by reading every reference to it (kto.js only ever reads
+// hotel.upiId when rendering a bill) and live-testing
+// updateInvoiceFormate with it included, which silently dropped it.
+// Added it to that endpoint's destructure + update call (controller/
+// hotel.js) since it already updates exactly this kind of Hotel-level
+// setting - confirmed live afterward, and confirmed separately that
+// omitting the other fields it manages (gst_no, fssai_no, ...) leaves
+// them untouched rather than nulling them out (Sequelize drops undefined
+// keys from its SET clause).
+export const hotelApi = {
+  getSettings: () => apiGet<{ upiId: string; hotel_name: string }>("/singleHotel"),
+  updateUpiId: (upiId: string) =>
+    apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: { upiId } }),
+};
+
 // Raw shapes as uat-backend actually returns them (controller/hotel.js) -
 // kept separate from the app's mock RestaurantTable/TableCategory types so
 // the adapter that converts between the two (src/mock/store.tsx) has one

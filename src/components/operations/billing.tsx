@@ -1,5 +1,6 @@
 import { Plus, Receipt, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import QRCode from "qrcode";
 
 import {
   DataTable,
@@ -503,6 +504,38 @@ const CONTENT_LABEL: Record<string, string> = {
 export function InvoiceFormatSection() {
   const store = useStore();
   const [fmt, setFmt] = useState(store.invoiceFormat);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+
+  // Same sample totals already shown in the "Total" line below (485 with
+  // GST, 462 without) - reused here so the QR's encoded amount matches
+  // what the preview displays instead of drifting from it independently.
+  const previewAmount = fmt.gstCalculation ? 485 : 462;
+
+  // Mirrors uat-backend's own QR construction exactly (controller/kto.js's
+  // getHearderAndFooterData: pa left unencoded, pn/tn encoded, cu fixed to
+  // INR) - generated client-side rather than round-tripped through the
+  // backend since it's a pure function of (upiId, outlet name, amount),
+  // and this is just a settings preview, not a real order's bill.
+  useEffect(() => {
+    if (!fmt.upiId) {
+      setQrDataUrl(null);
+      return;
+    }
+    const merchantName = encodeURIComponent(RESTAURANT.name);
+    const transactionNote = encodeURIComponent(`Bill Payment - ${previewAmount}`);
+    const upiUrl = `upi://pay?pa=${fmt.upiId}&pn=${merchantName}&tn=${transactionNote}&am=${previewAmount}&cu=INR`;
+    let cancelled = false;
+    QRCode.toDataURL(upiUrl, { width: 150, margin: 2 })
+      .then((url) => {
+        if (!cancelled) setQrDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setQrDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [fmt.upiId, previewAmount]);
 
   const update = (patch: Partial<typeof fmt>) => setFmt((f) => ({ ...f, ...patch }));
   const updateLine = (slot: "header" | "footer", id: string, patch: Partial<InvoiceLine>) =>
@@ -533,11 +566,42 @@ export function InvoiceFormatSection() {
         return `GSTIN: ${fmt.gstNo}`;
       case "fssai":
         return `FSSAI: ${fmt.fssaiNo}`;
-      case "upi-qr":
-        return `[ UPI QR · ${fmt.upiId} ]`;
       default:
         return l.text || "…";
     }
+  };
+
+  const renderLine = (l: InvoiceLine) => {
+    if (l.content === "upi-qr") {
+      if (!fmt.upiId) {
+        return (
+          <p style={{ fontSize: l.fontSize }} className="leading-snug text-warning">
+            Set a UPI ID above to show a QR
+          </p>
+        );
+      }
+      if (!qrDataUrl) {
+        return (
+          <p style={{ fontSize: l.fontSize }} className="leading-snug text-muted-foreground">
+            Generating QR…
+          </p>
+        );
+      }
+      return (
+        <img
+          src={qrDataUrl}
+          alt="UPI payment QR code"
+          className="mx-auto"
+          width={120}
+          height={120}
+        />
+      );
+    }
+    return (
+      <p style={{ fontSize: l.fontSize }} className="leading-snug">
+        {lineText(l)}
+      </p>
+    );
   };
 
   return (
@@ -705,9 +769,7 @@ export function InvoiceFormatSection() {
         <SectionCard title="Print preview" bodyClassName="p-3 sm:p-4">
           <div className="mx-auto w-full max-w-[280px] rounded-lg border border-border bg-surface p-4 font-mono text-center">
             {fmt.header.map((l) => (
-              <p key={l.id} style={{ fontSize: l.fontSize }} className="leading-snug">
-                {lineText(l)}
-              </p>
+              <div key={l.id}>{renderLine(l)}</div>
             ))}
             <div className="my-3 border-t border-dashed border-border" />
             <div className="text-left text-[11px]">
@@ -738,9 +800,7 @@ export function InvoiceFormatSection() {
             </div>
             <div className="my-3 border-t border-dashed border-border" />
             {fmt.footer.map((l) => (
-              <p key={l.id} style={{ fontSize: l.fontSize }} className="leading-snug">
-                {lineText(l)}
-              </p>
+              <div key={l.id}>{renderLine(l)}</div>
             ))}
           </div>
           {!fmt.gstCalculation ? (

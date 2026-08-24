@@ -12,6 +12,7 @@ import {
   menuApi,
   userApi,
   orderApi,
+  hotelApi,
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
@@ -459,6 +460,7 @@ interface Ctx extends State {
   loadTablesFromServer: () => Promise<void>;
   upsertUser: (u: User) => void;
   loadUsersFromServer: () => Promise<void>;
+  loadInvoiceFormatFromServer: () => Promise<void>;
   upsertExpense: (e: Expense) => void;
   upsertExpenseHead: (h: ExpenseHead) => void;
   upsertRawMaterial: (m: RawMaterial) => void;
@@ -2627,6 +2629,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error(err instanceof ApiError ? err.message : "Could not load users from server");
       }
     },
+
+    // Only pulls upiId - see hotelApi's own comment for why the rest of
+    // this app's InvoiceFormat stays local-only.
+    loadInvoiceFormatFromServer: async () => {
+      try {
+        const { upiId } = await hotelApi.getSettings();
+        patch((p) => ({ ...p, invoiceFormat: { ...p.invoiceFormat, upiId: upiId ?? "" } }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load billing settings from server",
+        );
+      }
+    },
     upsertUser: (u) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
@@ -3271,6 +3286,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       })),
     setInvoiceFormat: (fmt) => {
       patch((p) => ({ ...p, invoiceFormat: fmt }));
+      // Only upiId has anywhere real to go on the backend right now (see
+      // hotelApi's comment) - everything else this form manages is saved
+      // locally above and nowhere else, same as before this was wired.
+      const upiChanged = fmt.upiId !== s.invoiceFormat.upiId;
+      if (upiChanged) {
+        void hotelApi
+          .updateUpiId(fmt.upiId)
+          .catch((err) =>
+            toast.error(
+              err instanceof ApiError ? err.message : "Saved locally, but the UPI ID didn't sync",
+            ),
+          );
+      }
       toast.success("Invoice format saved");
     },
     setGstCalculation: (on) => {
