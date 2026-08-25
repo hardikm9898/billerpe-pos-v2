@@ -109,22 +109,20 @@ Consider whether Dashboard-style range controls belong on the Reports hub too, a
 the 4 dead-end report types (cash-session, table-performance, staff-performance, kot-report)
 should be quietly removed from the hub's list rather than left pointing at local-only data.
 
-### 5. 🔲 Real backend fixes worth doing regardless of frontend work
-Found and documented this session, not yet fixed on the backend (all narrow, targeted —
-no schema redesign):
-- `generateInvoicePDF`'s Puppeteer launch path is hardcoded to `origin === "http://localhost:3000"`
-  with a Linux-only fallback — breaks for every real origin on a Windows deploy, and is
-  fragile even on Linux. Should key off `NODE_ENV` or an explicit config flag instead.
-- `PromoCode`/`ExpenseHead` duplicate-check queries in `discountPromocode.js` are missing
-  `hotel_id` scoping — a real cross-tenant bug (one hotel's promo code blocks another
-  hotel's identical code).
-- `getSingleOrderForAdminCart` and `editOrderClick` (`controller/order.js`/`kto.js`) fetch
-  `Order.findOne` with no `hotel_id` filter — real cross-tenant data leaks.
-- `EBillCreditDebit.orderId` column is commented out of the model — every e-bill debit
-  ledger row silently drops which order it was for.
-- Guest count has no column anywhere on `Order` — if guest-count accuracy in
+### 5. ✅ Real backend fixes (done 2026-08-25, backend commit `0e29291`)
+- Fixed: `getSingleOrderForAdminCart`/`editOrderClick` missing `hotel_id` filter (real
+  cross-tenant order read/edit leak), `editExpenseHead` missing `hotel_id` on both its
+  lookup and update (real cross-tenant write bug, worse than first documented) plus its
+  missing duplicate-name recheck, `PromoCode` duplicate-check missing `hotel_id`, the
+  5-site Puppeteer `origin === "http://localhost:3000"` launch hack (now `CHROME_PATH`
+  env var, matching `generatePdf.js`'s existing convention), and `EBillCreditDebit.orderId`
+  being commented out of the model (added a defensive migration + uncommented the field).
+- Still open: guest count has no column anywhere on `Order` — if guest-count accuracy in
   Dashboard/Reports matters, this needs a real migration (small, additive: one nullable
   column, no redesign).
+- Note: the local dev DB (`DATABASE_NAME=live_backup1`) appears to be a restored backup of
+  live production data, not synthetic seed data — worth being aware of before any further
+  live-curl testing that touches real records.
 
 ---
 
