@@ -12,11 +12,32 @@ export class ApiError extends Error {
 }
 
 // uat-backend's error()/success() helpers (responce/res.js) shape every
-// response as { error: boolean, results: {...}, code }. Most error paths
-// never call res.status(...) before res.json(...), so the HTTP status is
-// commonly 200 even on auth failure - `error`/`results` are the only
-// reliable signal, not res.ok.
+// response as { error: boolean, results: {...}, code }. Most business-logic
+// error paths never call res.status(...) before res.json(...), so the HTTP
+// status is commonly 200 even on failure - `error`/`results` are the only
+// reliable signal there, not res.ok. adminAuth (middleware/adminAuth.js) is
+// the one path that's actually reliable: every branch (no token, bad token,
+// expired/logged-out-elsewhere session, deactivated user) real-401s via
+// res.status(...), so that's what session-expiry detection below keys off.
 type ApiEnvelope<T> = { error: boolean; results: T };
+
+// A session that's expired, been logged out from another device, or been
+// deactivated server-side previously surfaced as just another failed
+// request - a "Could not load X" toast per in-flight call, nothing ever
+// sending the user back to /login. Every wrapper below checks for the
+// adminAuth 401 first and, if seen, clears the local session and hard-
+// navigates to /login - a full reload so loadInitialState() (store.tsx)
+// re-resolves cleanly with no session, rather than trying to unwind
+// whatever React/store state was mid-flight. Returns a Promise that never
+// settles so the caller's own .catch()/toast never fires on top of the
+// redirect (the page is about to unload anyway).
+function handleUnauthorized<T>(): Promise<T> {
+  if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+    window.localStorage.removeItem("billerpe.session");
+    window.location.href = "/login";
+  }
+  return new Promise<T>(() => {});
+}
 
 function unwrap<T>(json: ApiEnvelope<T> | null): T {
   if (!json || json.error) {
@@ -34,6 +55,7 @@ async function apiGet<T>(path: string): Promise<T> {
     method: "GET",
     credentials: "include",
   });
+  if (res.status === 401) return handleUnauthorized<T>();
   const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
   return unwrap(json);
 }
@@ -45,6 +67,7 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (res.status === 401) return handleUnauthorized<T>();
 
   const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
   return unwrap(json);
@@ -57,6 +80,7 @@ async function apiPut<T>(path: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (res.status === 401) return handleUnauthorized<T>();
 
   const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
   return unwrap(json);
@@ -70,6 +94,7 @@ async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
       ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
       : {}),
   });
+  if (res.status === 401) return handleUnauthorized<T>();
   const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
   return unwrap(json);
 }
