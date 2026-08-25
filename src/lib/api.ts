@@ -256,6 +256,25 @@ export type RawMenuItem = {
 
 export type RawVariant = { id: number; variants_name: string; active: boolean };
 
+// controller/menu.js#getMenuItemsWithVariants (GET /menuShowWithVariants).
+// Every other menu-list endpoint (MenuShow/MenuShowByCatagories/etc.)
+// only ever includes Menu_categ - none of them read back a menu item's
+// variant/addon-group associations (MenuVariants/MenuAddon rows, written
+// by createMenu/editMenu) at all. The one existing endpoint that did
+// (offlineMenu) is AES-encrypted and Redis-cached for 48h, so this
+// mirrors its same include shape (model/index.js: Menu.belongsToMany(
+// Variants, {as:"variantData"}), Menu.belongsToMany(AddonDepartment,
+// {as:"addonDepartmentData"})) unencrypted and uncached instead. Each
+// variantData entry's real per-item price lives on the junction row
+// (hms_menu_variant_mst.variant_price), not on the Variants row itself -
+// confirmed live, since Variants master rows have no price field at all.
+export type RawMenuItemVariant = {
+  id: number;
+  variants_name: string;
+  hms_menu_variant_mst?: { variant_price: number };
+};
+export type RawMenuItemAddonGroup = { id: number };
+
 export type RawAddonOption = { id: number; addon_name: string; price: number; attributes: string };
 export type RawAddonGroup = {
   id: number;
@@ -281,6 +300,15 @@ type MenuItemPayload = {
   // optional-chaining, on both create and edit, so an omitted array throws
   // a 500 rather than being treated as "no addons".
   addons: number[];
+  // Both createMenu and editMenu accept this too (confirmed by reading
+  // both controllers and their Joi schemas, validate.js's menuSchema/
+  // editMenuSchema) - each `id` must be a real Variants master id, and
+  // `variant_price` is a REQUIRED per-item price override (Joi rejects
+  // <= 0). editMenu fully replaces the item's variant/addon links every
+  // save (MenuVariants.destroy + recreate, same for MenuAddon) rather
+  // than diffing, so this always needs the complete current list, not
+  // just newly-added entries.
+  variants: { id: number; variant_price: number }[];
 };
 
 type AddonGroupPayload = {
@@ -303,6 +331,13 @@ export const menuApi = {
   // that /catagories/%25 correctly returned.
   getCategories: () => apiGet<{ catagories: RawMenuCategory[] }>("/catagories/%25"),
   getItems: () => apiGet<{ menu: RawMenuItem[] }>("/menuShow/all"),
+  getItemsWithVariants: () =>
+    apiGet<{
+      menu: (RawMenuItem & {
+        variantData?: RawMenuItemVariant[];
+        addonDepartmentData?: RawMenuItemAddonGroup[];
+      })[];
+    }>("/menuShowWithVariants"),
   getVariants: () => apiGet<{ variants: RawVariant[] }>("/variant"),
   getAddonGroups: () => apiGet<{ addons: RawAddonGroup[] }>("/addon"),
 
@@ -455,9 +490,18 @@ export const orderApi = {
   // runs inline, before the response), unlike dine-in where it only
   // happens later in settleBills - so there's no separate settle step to
   // wire for pickup at all.
+  //
+  // order_id is optional: omitting it takes AdminOrder's OTHER branch
+  // (its "no order_id" `else`), which creates the Order fresh in this
+  // same call instead of updating an existing one - for dine-in this
+  // requires table_id and rejects with TABLE_RUNNING if that table
+  // already has a pending order; for pickup it's the same create path
+  // already used above. This is how a bill can be generated without ever
+  // sending a KOT first - kotOrder is not the only way to create an
+  // Order row.
   adminOrder: (payload: {
     order_type: "dinin" | "pickup";
-    order_id: number;
+    order_id?: number;
     table_id?: number;
     cash?: number;
     upi?: number;
@@ -540,6 +584,20 @@ export const orderApi = {
   // send (50 - 1).
   getEBillCredit: () => apiGet<{ credit: number }>("/getEbillCredit"),
 
+  // controller/order.js#getPickupOrder (GET /pickupOrder). Named for
+  // pickup but actually returns every currently active order regardless
+  // of type - `order_type IN (dinin, pickup)`, `status IN (in-progress,
+  // hold, success)`, `payment: pending`, `deleted: false` - confirmed
+  // live, including a real dine-in order. This is the authoritative list
+  // of every order this app should treat as "currently open" anywhere in
+  // the UI (table-grid, Orders list), independent of which table (if
+  // any) it's on - unlike GET /table's embedded orders, which only ever
+  // surfaces orders tied to a table and misses tableless pickup orders
+  // entirely. Doesn't include OrderDetails (line items), so
+  // reconstructing a full order still needs a getSingleOrder follow-up
+  // per id (orderHistoryApi.getDetail).
+  getActiveOrders: () => apiGet<{ order: RawOrderHeader[] }>("/pickupOrder"),
+
   // controller/kto.js#invoiceGeneratePdf (POST /generateInvoicePdf).
   // Renders the bill via Puppeteer and returns the PDF as a raw byte
   // array inside JSON (`{type:"Buffer", data:[...]}`), not a URL or
@@ -601,6 +659,34 @@ export const orderApi = {
       "/generateInvoicePdf",
       payload,
     ),
+
+  // controller/order.js#getTimeLineByOrderId (GET /getTimelineByOrderId).
+  // One row per real workflow event fired via addToTimeLine/
+  // addToFroRemoveTimeLine in controller/kto.js - `action` is one of the
+  // ACTION constants (constant/const.js): place_order, kot, hold, settle,
+  // update_order, update_order_item, decrease_kot_qty, free_table,
+  // delete_order ("remove_kot" exists in the enum but its one call site
+  // is commented out, so it never actually fires). Each row is a
+  // snapshot (order_status/grandAmount/items as of that moment), not an
+  // explicit before/after diff - there's no prior-value field to read
+  // back, only the state at each point.
+  getTimeline: (orderId: number) =>
+    apiGet<{ timesLines: RawTimelineEntry[] }>(`/getTimelineByOrderId?id=${orderId}`),
+};
+
+export type RawTimelineEntry = {
+  id: number;
+  order_type: string;
+  bill_no: string;
+  order_status: string;
+  created_Date: string;
+  from: string;
+  device_name: string;
+  action: string;
+  creator: string;
+  grandAmount: number;
+  hotelUserId: number | null;
+  hms_hotelUser_master?: { name?: string } | null;
 };
 
 export type RawOrderHeader = {
@@ -608,6 +694,10 @@ export type RawOrderHeader = {
   bill_no: string;
   order_type: "dinin" | "pickup" | "delivery";
   payment: string;
+  // "dispatch" (model default, never actually seen on a real row) |
+  // "in-progress" | "hold" | "success" - overloaded ORDER_TYPE workflow
+  // state, distinct from `payment`.
+  status: string;
   grandAmount: number;
   gst: number;
   totalDiscount: number;
@@ -621,6 +711,7 @@ export type RawOrderHeader = {
   createdAt: string;
   updatedAt: string;
   hotelUserId: number | null;
+  TableId: number | null;
   hms_table_mst?: { table_name: string } | null;
   hms_user_master?: { name?: string; number?: string } | null;
 };

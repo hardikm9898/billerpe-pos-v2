@@ -53,6 +53,8 @@ import {
   type RawTableCategory,
   type RawMenuCategory,
   type RawMenuItem,
+  type RawMenuItemVariant,
+  type RawMenuItemAddonGroup,
   type RawVariant,
   type RawAddonGroup,
   type RawHotelUser,
@@ -210,9 +212,24 @@ const initialState: State = {
   currentUserId: seed.CURRENT_USER_ID,
   tables: seed.tables,
   tableCategories: seed.tableCategories,
-  orders: [...seed.liveOrders, ...seed.historyOrders],
+  // Unlike tables/menu/etc., loadTablesFromServer never fully replaces
+  // `orders` (it only appends real live orders it reconstructs, to avoid
+  // ever clobbering an in-progress local edit) - so seed demo orders here
+  // would otherwise sit forever, mixed in with real data. Starting empty
+  // means every order in this list, once loaded, is real.
+  orders: [],
   orderHistory: [],
-  kots: seed.kots,
+  // Same seed-pollution issue as `orders` above: KDS was only ever wired
+  // for real-time ticket receipt (a new KOT fired this session, or a
+  // ticket pushed over the socket) - both paths only ever prepend onto
+  // `kots`, never replace it, so seed demo tickets would sit here
+  // forever too. There's also no bulk "load currently active KOT
+  // tickets" call at all yet, so a real ticket that was already in
+  // progress before this session started (including for orders now
+  // reconstructed into `orders` via loadTablesFromServer) won't show on
+  // KDS until it gets a new real-time event - a real remaining gap, not
+  // something starting empty here fixes.
+  kots: [],
   menuItems: seed.menuItems,
   menuCategories: seed.menuCategories,
   variantMasters: seed.variantMasters,
@@ -454,6 +471,7 @@ interface Ctx extends State {
   changeQty: (orderId: string, lineId: string, delta: number) => void;
   setLineQty: (orderId: string, lineId: string, qty: number) => void;
   setLineNote: (orderId: string, lineId: string, note: string) => void;
+  setLinePrice: (orderId: string, lineId: string, price: number) => void;
   removeLine: (orderId: string, lineId: string) => void;
 
   holdOrder: (orderId: string) => void;
@@ -671,7 +689,13 @@ function mapRawMenuCategory(c: RawMenuCategory, menuId: string): MenuCategory {
   };
 }
 
-function mapRawMenuItem(m: RawMenuItem, menuId: string): MenuItem {
+function mapRawMenuItem(
+  m: RawMenuItem & {
+    variantData?: RawMenuItemVariant[];
+    addonDepartmentData?: RawMenuItemAddonGroup[];
+  },
+  menuId: string,
+): MenuItem {
   const dietary = DIETARY_VALUES.includes(m.sub_categories as MenuDietary)
     ? (m.sub_categories as MenuDietary)
     : undefined;
@@ -690,6 +714,17 @@ function mapRawMenuItem(m: RawMenuItem, menuId: string): MenuItem {
     description: m.description || undefined,
     imageUrl: m.foodImage || undefined,
     menuId,
+    // Real per-item price lives on the junction row
+    // (hms_menu_variant_mst.variant_price), not on the Variants row -
+    // see RawMenuItemVariant's own comment. Only present when this
+    // mapping is fed getItemsWithVariants's response.
+    variants: m.variantData?.map((v) => ({
+      id: String(v.id),
+      name: v.variants_name,
+      price: v.hms_menu_variant_mst?.variant_price ?? 0,
+      menuId,
+    })),
+    addonGroupIds: m.addonDepartmentData?.map((g) => String(g.id)),
   } as MenuItem;
 }
 
@@ -1071,6 +1106,68 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
   };
 }
 
+// For a table that's genuinely occupied on the real backend (getTable's
+// own query already filters to status in-progress/success/hold,
+// payment:pending, deleted:false) but this session never created the
+// order itself - GET /table only tells us an order id exists on that
+// table, not its line items with real names, so this always follows up
+// with a real getSingleOrder call (same one orderHistory uses) rather
+// than trusting the sparser embedded row.
+function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: string): Order {
+  const [y, m, d] = detail.business_date.split("-");
+  const businessDate = `${d}/${m}/${y}`;
+  const lines: OrderLine[] = detail.hms_orderDetails.map((l) => {
+    let addons: { name: string; price: number }[] = [];
+    try {
+      const parsed: unknown = JSON.parse(l.addons || "[]");
+      if (Array.isArray(parsed)) addons = parsed as { name: string; price: number }[];
+    } catch {
+      addons = [];
+    }
+    return {
+      id: `ol-${l.id}`,
+      itemId: String(l.MenuId),
+      name: l.hms_menu_mst?.item_name ?? "Unknown item",
+      qty: l.qty,
+      price: l.price,
+      variant: l.variant_name ?? undefined,
+      addons: addons.length ? addons : undefined,
+      kotRound: 1,
+    };
+  });
+  const status: Order["status"] =
+    detail.status === "hold" ? "Held" : detail.status === "success" ? "Bill Generated" : "Running";
+  return {
+    id: `o-live-${detail.id}`,
+    orderNo: Number(detail.bill_no) || detail.id,
+    type: detail.order_type === "dinin" ? "Dine In" : "Pickup",
+    tableId,
+    tableLabel: detail.hms_table_mst?.table_name ?? "—",
+    // Not tracked anywhere on the backend Order model - see
+    // mapRawOrderHistoryEntry's own comment on the same gap.
+    guests: 0,
+    status,
+    lines,
+    kotRounds: 1,
+    customerName: detail.hms_user_master?.name || undefined,
+    customerPhone: detail.hms_user_master?.number || undefined,
+    discount:
+      detail.totalDiscount > 0
+        ? { label: detail.discount_reason || "Discount", amount: detail.totalDiscount }
+        : undefined,
+    businessDate,
+    createdAt: formatOrderTimestamp(detail.createdAt, businessDate),
+    createdBy: staffName,
+    itemised: lines.length > 0,
+    fallbackTotal: lines.length ? undefined : detail.grandAmount,
+    backendId: detail.id,
+    // No backendTotals here, deliberately - this order is still being
+    // built/settled, so orderTotals() recomputing live off the current
+    // tax/service-charge config is exactly what's wanted, unlike a
+    // frozen historical record.
+  };
+}
+
 function mapRawPromoCode(p: RawPromoCode): PromoCode {
   return {
     id: `promo-${p.id}`,
@@ -1286,22 +1383,37 @@ function placeholderPassword(pin: string) {
 
 const StoreContext = createContext<Ctx | null>(null);
 
-export function StoreProvider({ children }: { children: ReactNode }) {
-  const [s, set] = useState<State>(initialState);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+// Restoring the session inside a useEffect (as this used to) loses a race
+// on every page reload: AppShell's own "redirect to /login if not authed"
+// effect lives on a descendant of StoreProvider, and React fires child
+// effects before parent effects on mount - so that guard always saw the
+// fresh, unauthenticated initialState first and navigated to /login
+// before this provider's effect ever got to read localStorage and flip
+// authed back to true. login.tsx never redirects back once authed does
+// flip, so the user was stuck on the login screen despite having a valid
+// session - "reload logs me out" without any real auth failure involved.
+// Reading localStorage synchronously in the lazy useState initializer
+// instead means `authed` is already correct on the very first render,
+// before any effect (this provider's or any descendant's) runs at all.
+function loadInitialState(): State {
+  if (typeof window === "undefined") return initialState;
+  try {
     const saved = window.localStorage.getItem("billerpe.session");
-    if (saved) {
-      const parsed = JSON.parse(saved) as { userId: string; device: boolean };
-      set((p) => ({
-        ...p,
-        authed: true,
-        deviceRegistered: parsed.device,
-        currentUserId: parsed.userId,
-      }));
-    }
-  }, []);
+    if (!saved) return initialState;
+    const parsed = JSON.parse(saved) as { userId: string; device: boolean };
+    return {
+      ...initialState,
+      authed: true,
+      deviceRegistered: parsed.device,
+      currentUserId: parsed.userId,
+    };
+  } catch {
+    return initialState;
+  }
+}
+
+export function StoreProvider({ children }: { children: ReactNode }) {
+  const [s, set] = useState<State>(loadInitialState);
 
   const patch = useCallback((fn: (p: State) => State) => set(fn), []);
 
@@ -1763,6 +1875,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
+    // Purely local, same as setLineQty/setLineNote - only meant to be
+    // called for a line that hasn't been sent to KOT yet (kotRound >
+    // order.kotRounds), matching the UI's own editable gate. A line
+    // already sent has already been created as a real OrderDetails row
+    // server-side at its original price; this only ever changes what
+    // gets sent the next time this line is included in a KOT/bill call.
+    setLinePrice: (orderId, lineId, price) => {
+      const order = s.orders.find((o) => o.id === orderId);
+      const line = order?.lines.find((l) => l.id === lineId);
+      const next = Math.max(0, Math.round(price * 100) / 100);
+      patch((p) => ({
+        ...p,
+        orders: p.orders.map((o) =>
+          o.id === orderId
+            ? { ...o, lines: o.lines.map((l) => (l.id === lineId ? { ...l, price: next } : l)) }
+            : o,
+        ),
+      }));
+      if (order && line) {
+        log("Price Changed", `Order #${order.orderNo}`, `${line.name} ₹${line.price}`, `₹${next}`);
+      }
+    },
+
     setLineNote: (orderId, lineId, note) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
@@ -2106,19 +2241,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return;
 
-      if (!o.backendId) {
-        toast.error("Generate a KOT before billing", {
-          description: "The backend has no order to bill until the first KOT is sent.",
-        });
-        return;
-      }
-
       if (o.type !== "Dine In") {
         // Pickup has no backend-visible "bill generated" state -
         // AdminOrder's pickup branch requires payment info up front and
         // finalizes + settles in one call (confirmed live, see
         // settleOrder and adminOrder's comment in lib/api.ts), so this
-        // step stays purely local until the real settle call.
+        // step stays purely local until the real settle call - no
+        // backendId needed either way, so nothing to gate on here.
         patch((p) => ({
           ...p,
           orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Bill Generated" } : x)),
@@ -2160,9 +2289,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
       const run = async () => {
         try {
-          await orderApi.adminOrder({
+          // No KOT fired yet (no backendId) - controller/kto.js#AdminOrder's
+          // "no order_id" branch creates the Order fresh in this same call
+          // for dine-in (confirmed by reading it in full: requires
+          // table_id, rejects with TABLE_RUNNING if that table already has
+          // a pending order, and returns the new order's real id) -
+          // omitting order_id here triggers that path instead of
+          // AdminOrder's "update an existing order" branch. This is the
+          // whole mechanism behind billing without ever sending a KOT.
+          const res = await orderApi.adminOrder({
             order_type: "dinin",
-            order_id: o.backendId!,
+            ...(o.backendId ? { order_id: o.backendId } : {}),
             table_id: Number(table.id),
             cart: {
               items: [{ status: "H", menuItems: allMenuItems }],
@@ -2180,7 +2317,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           patch((p) => ({
             ...p,
             orders: p.orders.map((x) =>
-              x.id === orderId ? { ...x, status: "Bill Generated" } : x,
+              x.id === orderId
+                ? { ...x, status: "Bill Generated", backendId: x.backendId ?? res.orderId }
+                : x,
             ),
             tables: p.tables.map((t) =>
               t.id === o.tableId ? { ...t, status: "Bill Generated" } : t,
@@ -2863,7 +3002,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         const [{ catagories }, { menu }, { variants }, { addons }] = await Promise.all([
           menuApi.getCategories(),
-          menuApi.getItems(),
+          menuApi.getItemsWithVariants(),
           menuApi.getVariants(),
           menuApi.getAddonGroups(),
         ]);
@@ -2881,6 +3020,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     upsertMenuItem: (item) => {
       const isNew = !s.menuItems.some((m) => m.id === item.id);
       const seed = String(Date.now()).slice(-6);
+      // Variant rows carry the item-editor's own local draft id, not the
+      // real Variants master id - resolve each by name against
+      // variantMasters to get the id the backend actually wants. Joi
+      // rejects a variant_price <= 0 (validate.js's menuSchema/
+      // editMenuSchema both require it > 0), so a row left at 0 is
+      // dropped here rather than failing the whole save.
+      const variants = (item.variants ?? [])
+        .map((v) => {
+          const masterId = s.variantMasters.find((m) => m.name === v.name)?.id;
+          return masterId && v.price > 0 ? { id: Number(masterId), variant_price: v.price } : null;
+        })
+        .filter((v): v is { id: number; variant_price: number } => v !== null);
       const payload = {
         item_name: item.name,
         menu_categ_id: Number(item.categoryId),
@@ -2889,7 +3040,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         favorite: item.favourite,
         gst_type: "S" as const, // no UI field yet - defaults to the model's own default
         barcode_value: item.barcode ?? "",
-        addons: [] as number[], // per-item addon attachment has no UI yet
+        addons: (item.addonGroupIds ?? []).map(Number),
+        variants,
         ...(item.dietary ? { sub_categories: item.dietary } : {}),
         ...(item.description ? { description: item.description } : {}),
         ...(item.imageUrl ? { imageUrl: item.imageUrl } : {}),
@@ -3074,14 +3226,51 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     loadTablesFromServer: async () => {
       try {
-        const [{ tables }, { tableCatagories }] = await Promise.all([
+        const [{ tables }, { tableCatagories }, { order: activeOrders }] = await Promise.all([
           tableApi.getTables(),
           tableApi.getCategories(),
+          orderApi.getActiveOrders(),
         ]);
+        const mappedTables = tables.map(mapRawTable);
+        // Any currently-active order (dine-in or pickup, table or no
+        // table - see orderApi.getActiveOrders's own comment) this
+        // session has no matching local order for (opened on another
+        // device, left running from before this login, or this is a
+        // fresh page load) gets reconstructed here - otherwise opening
+        // an occupied table would silently start a brand-new empty order
+        // on top of the real one already in progress there (table-grid's
+        // openOrder only ever checks the local table.orderId field,
+        // never the backend, to decide that), and a live pickup order
+        // with no table at all would be invisible everywhere.
+        const knownBackendIds = new Set(
+          s.orders.map((o) => o.backendId).filter((id): id is number => id !== undefined),
+        );
+        const toResolve = activeOrders.filter((o) => !knownBackendIds.has(o.id));
+        const resolved = (
+          await Promise.all(
+            toResolve.map(async (raw) => {
+              try {
+                const { order: detail } = await orderHistoryApi.getDetail(raw.id);
+                const staffName = detail.hotelUserId
+                  ? (s.users.find((u) => u.id === String(detail.hotelUserId))?.name ?? "Staff")
+                  : "Staff";
+                const tableId = detail.TableId ? String(detail.TableId) : undefined;
+                return mapRawLiveOrder(detail, staffName, tableId);
+              } catch {
+                return null;
+              }
+            }),
+          )
+        ).filter((o): o is Order => o !== null);
+        const tablesWithOrders = mappedTables.map((t) => {
+          const match = resolved.find((o) => o.tableId === t.id);
+          return match ? { ...t, orderId: match.id } : t;
+        });
         patch((p) => ({
           ...p,
-          tables: tables.map(mapRawTable),
+          tables: tablesWithOrders,
           tableCategories: tableCatagories.map(mapRawCategory),
+          orders: [...p.orders, ...resolved],
         }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load tables from server");

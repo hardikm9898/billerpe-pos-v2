@@ -1006,8 +1006,33 @@ function CartGroup({
                   </span>
                 ) : null}
               </p>
-              <p className="num text-[11px] text-muted-foreground">
-                ₹{l.price}
+              <p className="num flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                {editable ? (
+                  <span className="inline-flex items-center gap-0.5">
+                    ₹
+                    <input
+                      defaultValue={l.price}
+                      key={`${l.id}-price-${l.price}`}
+                      inputMode="decimal"
+                      aria-label={`Price for ${l.name}`}
+                      onFocus={(e) => e.currentTarget.select()}
+                      onBlur={(e) => {
+                        const v = Number(e.currentTarget.value);
+                        if (Number.isFinite(v) && v !== l.price)
+                          store.setLinePrice(order.id, l.id, v);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      className={cn(
+                        "num h-5 w-14 rounded border border-border bg-surface px-1 text-[11px]",
+                        focusRing,
+                      )}
+                    />
+                  </span>
+                ) : (
+                  `₹${l.price}`
+                )}
                 {l.addons?.length ? ` · + ${l.addons.map((a) => a.name).join(", ")}` : ""}
                 {l.originTable ? ` · from ${l.originTable}` : ""}
               </p>
@@ -1484,7 +1509,7 @@ function MoveTableDialog({
   );
 }
 
-function NoteDialog({
+export function NoteDialog({
   line,
   order,
   onClose,

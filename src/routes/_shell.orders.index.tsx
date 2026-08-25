@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowRight, Clock, Printer, Receipt, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import {
   BulkActionsBar,
@@ -24,9 +25,43 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { ApiError, orderApi, type RawTimelineEntry } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { orderTotals, useStore } from "@/mock/store";
-import type { Order, OrderStatus } from "@/mock/types";
+import type { AuditLog, Order, OrderStatus } from "@/mock/types";
+
+// constant/const.js's ACTION enum (controller/kto.js) - real values this
+// backend actually writes to hms_timeline_mst.action. "remove_kot" is a
+// member of the enum but its one call site in kto.js is commented out,
+// so it never fires in practice - not included here since it would never
+// match.
+const ACTION_LABELS: Record<string, string> = {
+  place_order: "Order created",
+  kot: "KOT fired",
+  hold: "Order held",
+  settle: "Bill settled",
+  update_order: "Order updated",
+  update_order_item: "Item updated",
+  decrease_kot_qty: "Item quantity decreased",
+  free_table: "Table freed",
+  delete_order: "Order deleted",
+};
+
+function mapRawTimelineEntry(t: RawTimelineEntry): AuditLog {
+  const at = new Date(t.created_Date);
+  return {
+    id: `tl-${t.id}`,
+    userId: String(t.hotelUserId ?? ""),
+    userName: t.hms_hotelUser_master?.name || t.creator || "Staff",
+    action: ACTION_LABELS[t.action] ?? t.action,
+    entity: `Order #${t.bill_no}`,
+    before: "",
+    after: `${t.order_status} · ₹${t.grandAmount}`,
+    device: t.device_name || t.from || "",
+    ip: "",
+    at: Number.isNaN(at.getTime()) ? t.created_Date : at.toLocaleString("en-IN"),
+  };
+}
 
 // Historical orders (synced via loadOrderHistoryFromServer, id prefixed
 // "oh-") carry real backendTotals - preferring those over a fresh
@@ -119,9 +154,41 @@ function OrdersPage() {
   const toggleOne = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const timelineEntries = timelineOrder
-    ? store.auditLogs.filter((a) => a.entity === `Order #${timelineOrder.orderNo}`)
-    : [];
+  const [timelineEntries, setTimelineEntries] = useState<AuditLog[]>([]);
+  const [timelineLoading, setTimelineLoading] = useState(false);
+
+  useEffect(() => {
+    if (!timelineOrder) {
+      setTimelineEntries([]);
+      return;
+    }
+    if (!timelineOrder.backendId) {
+      setTimelineEntries([]);
+      return;
+    }
+    let cancelled = false;
+    setTimelineLoading(true);
+    const run = async () => {
+      try {
+        const { timesLines } = await orderApi.getTimeline(timelineOrder.backendId!);
+        const sorted = [...timesLines].sort(
+          (a, b) => new Date(b.created_Date).getTime() - new Date(a.created_Date).getTime(),
+        );
+        if (!cancelled) setTimelineEntries(sorted.map(mapRawTimelineEntry));
+      } catch (err) {
+        if (!cancelled) {
+          toast.error(err instanceof ApiError ? err.message : "Could not load the order timeline");
+          setTimelineEntries([]);
+        }
+      } finally {
+        if (!cancelled) setTimelineLoading(false);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [timelineOrder]);
 
   return (
     <Page>
@@ -349,7 +416,9 @@ function OrdersPage() {
               Every recorded change to this order, newest first.
             </DialogDescription>
           </DialogHeader>
-          {timelineEntries.length ? (
+          {timelineLoading ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">Loading timeline…</p>
+          ) : timelineEntries.length ? (
             <ul className="space-y-2">
               {timelineEntries.map((a) => (
                 <li key={a.id} className="rounded-xl border border-border p-3 text-sm">
@@ -368,6 +437,8 @@ function OrdersPage() {
                 </li>
               ))}
             </ul>
+          ) : timelineOrder && !timelineOrder.backendId ? (
+            <EmptyState compact icon={Clock} title="Not synced with the server yet" />
           ) : (
             <EmptyState compact icon={Clock} title="No recorded changes yet" />
           )}

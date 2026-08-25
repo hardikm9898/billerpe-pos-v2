@@ -14,6 +14,7 @@ import {
   Search,
   Send,
   Star,
+  StickyNote,
   Trash2,
   User,
   Wallet,
@@ -21,6 +22,7 @@ import {
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { NoteDialog } from "@/components/billing/keyboard-display";
 import { EmptyState, Money, StatusBadge } from "@/components/kit";
 import { PaymentSplitEditor } from "@/components/operations/payment-split-editor";
 import { Button } from "@/components/ui/button";
@@ -87,6 +89,7 @@ function OrderCartPage() {
   const [customItemOpen, setCustomItemOpen] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customPrice, setCustomPrice] = useState(0);
+  const [noteLineFor, setNoteLineFor] = useState<OrderLine | null>(null);
   const [customQty, setCustomQty] = useState(1);
   const [chargesOpen, setChargesOpen] = useState(false);
   const [deliveryOverride, setDeliveryOverride] = useState(0);
@@ -352,72 +355,112 @@ function OrderCartPage() {
             />
           ) : (
             <div className="space-y-4">
-              {kotGroups.map(([round, lines]) => (
-                <div key={round}>
-                  <p className="mb-1.5 inline-block rounded bg-surface-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                    {round > order.kotRounds ? "New — not sent" : `KOT ${round}`}
-                  </p>
-                  <ul className="space-y-2">
-                    {lines.map((l) => (
-                      <li key={l.id} className="rounded-xl border border-border p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-medium">{l.name}</p>
-                            <p className="text-xs text-muted-foreground">
-                              {l.variant ? `${l.variant} · ` : ""}
-                              <span className="num">₹{l.price}</span>
-                              {l.originTable ? ` · from ${l.originTable}` : ""}
-                            </p>
-                            {l.addons?.length ? (
-                              <p className="text-[11px] text-muted-foreground">
-                                + {l.addons.map((a) => a.name).join(", ")}
+              {kotGroups.map(([round, lines]) => {
+                // Only a line that hasn't been sent to KOT yet is safe to
+                // reprice or drop a kitchen note onto here - once sent,
+                // that item already exists as a real OrderDetails row at
+                // its original price server-side.
+                const editable = round > order.kotRounds && !settled;
+                return (
+                  <div key={round}>
+                    <p className="mb-1.5 inline-block rounded bg-surface-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                      {round > order.kotRounds ? "New — not sent" : `KOT ${round}`}
+                    </p>
+                    <ul className="space-y-2">
+                      {lines.map((l) => (
+                        <li key={l.id} className="rounded-xl border border-border p-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium">{l.name}</p>
+                              <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                                {l.variant ? `${l.variant} · ` : ""}
+                                {editable ? (
+                                  <span className="num inline-flex items-center gap-0.5">
+                                    ₹
+                                    <input
+                                      defaultValue={l.price}
+                                      key={`${l.id}-price-${l.price}`}
+                                      inputMode="decimal"
+                                      aria-label={`Price for ${l.name}`}
+                                      onFocus={(e) => e.currentTarget.select()}
+                                      onBlur={(e) => {
+                                        const v = Number(e.currentTarget.value);
+                                        if (Number.isFinite(v) && v !== l.price)
+                                          store.setLinePrice(order.id, l.id, v);
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") e.currentTarget.blur();
+                                      }}
+                                      className="num h-5 w-14 rounded border border-border bg-surface px-1 text-xs"
+                                    />
+                                  </span>
+                                ) : (
+                                  <span className="num">₹{l.price}</span>
+                                )}
+                                {l.originTable ? ` · from ${l.originTable}` : ""}
                               </p>
-                            ) : null}
-                            {l.note ? (
-                              <p className="mt-1 text-[11px] italic text-warning">“{l.note}”</p>
-                            ) : null}
-                          </div>
-                          <div className="flex flex-col items-end gap-2">
-                            <Money value={lineTotal(l)} className="text-sm font-semibold" />
-                            <div className="flex items-center gap-1">
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                className="size-7"
-                                disabled={settled}
-                                onClick={() => store.changeQty(order.id, l.id, -1)}
-                              >
-                                <Minus className="size-3.5" />
-                              </Button>
-                              <span className="num w-6 text-center text-sm font-semibold">
-                                {l.qty}
-                              </span>
-                              <Button
-                                size="icon"
-                                variant="outline"
-                                className="size-7"
-                                disabled={settled}
-                                onClick={() => store.changeQty(order.id, l.id, 1)}
-                              >
-                                <Plus className="size-3.5" />
-                              </Button>
-                              <Button
-                                size="icon"
-                                variant="ghost"
-                                className="size-7 text-primary"
-                                disabled={settled}
-                                onClick={() => store.removeLine(order.id, l.id)}
-                              >
-                                <Trash2 className="size-3.5" />
-                              </Button>
+                              {l.addons?.length ? (
+                                <p className="text-[11px] text-muted-foreground">
+                                  + {l.addons.map((a) => a.name).join(", ")}
+                                </p>
+                              ) : null}
+                              {l.note ? (
+                                <p className="mt-1 text-[11px] italic text-warning">“{l.note}”</p>
+                              ) : null}
+                            </div>
+                            <div className="flex flex-col items-end gap-2">
+                              <Money value={lineTotal(l)} className="text-sm font-semibold" />
+                              <div className="flex items-center gap-1">
+                                <Button
+                                  size="icon"
+                                  variant="outline"
+                                  className="size-7"
+                                  disabled={settled}
+                                  onClick={() => store.changeQty(order.id, l.id, -1)}
+                                >
+                                  <Minus className="size-3.5" />
+                                </Button>
+                                <span className="num w-6 text-center text-sm font-semibold">
+                                  {l.qty}
+                                </span>
+                                <Button
+                                  size="icon"
+                                  variant="outline"
+                                  className="size-7"
+                                  disabled={settled}
+                                  onClick={() => store.changeQty(order.id, l.id, 1)}
+                                >
+                                  <Plus className="size-3.5" />
+                                </Button>
+                                {editable ? (
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="size-7"
+                                    onClick={() => setNoteLineFor(l)}
+                                    aria-label="Add note"
+                                  >
+                                    <StickyNote className="size-3.5" />
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="size-7 text-primary"
+                                  disabled={settled}
+                                  onClick={() => store.removeLine(order.id, l.id)}
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </Button>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -912,6 +955,8 @@ function OrderCartPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <NoteDialog line={noteLineFor} order={order} onClose={() => setNoteLineFor(null)} />
     </div>
   );
 }
