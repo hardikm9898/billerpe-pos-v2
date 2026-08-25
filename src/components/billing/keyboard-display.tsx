@@ -9,6 +9,7 @@ import {
   CornerDownLeft,
   Keyboard as KeyboardIcon,
   LayoutList,
+  Minus,
   Pause,
   Plus,
   PlusSquare,
@@ -21,6 +22,7 @@ import {
   Send,
   ShoppingBag,
   StickyNote,
+  Tags,
   Timer,
   Trash2,
   User,
@@ -47,7 +49,7 @@ import { cn } from "@/lib/utils";
 import { RESTAURANT } from "@/mock/data";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
 import { lineTotal, orderTotals, useStore } from "@/mock/store";
-import type { MenuItem, Order, OrderLine, PaymentSplit } from "@/mock/types";
+import type { AddonGroup, MenuItem, Order, OrderLine, PaymentSplit } from "@/mock/types";
 
 /* ------------------------------------------------------------------ */
 /* primitives                                                          */
@@ -140,6 +142,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const [customerOpen, setCustomerOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const [noteLine, setNoteLine] = useState<OrderLine | null>(null);
+  const [addonLine, setAddonLine] = useState<OrderLine | null>(null);
   const [newOrderOpen, setNewOrderOpen] = useState(false);
   const [settleOpen, setSettleOpen] = useState(false);
   const [customItemOpen, setCustomItemOpen] = useState(false);
@@ -159,7 +162,8 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
     newOrderOpen ||
     variantOpen ||
     customItemOpen ||
-    !!noteLine;
+    !!noteLine ||
+    !!addonLine;
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -283,14 +287,21 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
     store.holdOrder(order.id);
     moveToNewOrder();
   };
+  const doSave = () => {
+    if (!order || settled) return;
+    if (!order.lines.length) {
+      toast.error("Cart is empty");
+      return;
+    }
+    void store.generateBill(order.id).then(() => moveToNewOrder());
+  };
   const doBillPrint = () => {
     if (!order || settled) return;
     if (!order.lines.length) {
       toast.error("Cart is empty");
       return;
     }
-    store.generateBill(order.id);
-    moveToNewOrder();
+    void store.generateBill(order.id, { print: true }).then(() => moveToNewOrder());
   };
   const doReprint = () => {
     if (!order) return;
@@ -729,6 +740,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                     lines={grouped[state]}
                     order={order}
                     onNote={setNoteLine}
+                    onAddon={setAddonLine}
                   />
                 ) : null,
               )
@@ -796,8 +808,8 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
         <Button
           variant="outline"
           className="h-10"
-          disabled={settled}
-          onClick={() => store.saveOrder(order.id)}
+          disabled={settled || !order.lines.length}
+          onClick={doSave}
         >
           <Save className="size-4" /> Save
         </Button>
@@ -856,6 +868,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
       <CustomerDialog open={customerOpen} onOpenChange={setCustomerOpen} order={order} />
       <MoveTableDialog open={moveOpen} onOpenChange={setMoveOpen} order={order} />
       <NoteDialog line={noteLine} order={order} onClose={() => setNoteLine(null)} />
+      <AddonDialog line={addonLine} order={order} onClose={() => setAddonLine(null)} />
       <NewOrderDialog open={newOrderOpen} onOpenChange={setNewOrderOpen} />
       <CustomItemDialog
         open={customItemOpen}
@@ -938,11 +951,13 @@ function CartGroup({
   lines,
   order,
   onNote,
+  onAddon,
 }: {
   state: LineState;
   lines: OrderLine[];
   order: Order;
   onNote: (l: OrderLine) => void;
+  onAddon: (l: OrderLine) => void;
 }) {
   const store = useStore();
   const meta = stateMeta[state];
@@ -1080,6 +1095,17 @@ function CartGroup({
 
               {editable ? (
                 <div className="flex items-center gap-1">
+                  {store.menuItems.find((m) => m.id === l.itemId)?.addonGroupIds?.length ? (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="size-8"
+                      onClick={() => onAddon(l)}
+                      aria-label="Edit addons"
+                    >
+                      <Tags className="size-3.5" />
+                    </Button>
+                  ) : null}
                   <Button
                     size="icon"
                     variant="ghost"
@@ -1549,6 +1575,153 @@ export function NoteDialog({
             }}
           >
             Save note <Keycap tone="invert">Enter</Keycap>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export type SelectedAddon = NonNullable<OrderLine["addons"]>[number];
+
+// Shared addon-selection UI for both "add a new item" (variant/addon config
+// dialogs) and "edit an existing cart line's addons" (AddonDialog below) -
+// lets each selected option carry its own qty (matching the old BillerPe
+// app, which let you pick e.g. 2x Extra Cheese on one line) rather than a
+// plain on/off toggle.
+export function AddonPicker({
+  groups,
+  value,
+  onChange,
+}: {
+  groups: AddonGroup[];
+  value: SelectedAddon[];
+  onChange: (next: SelectedAddon[]) => void;
+}) {
+  return (
+    <>
+      {groups.map((group) => (
+        <div key={group.id}>
+          <Label>
+            {group.name}{" "}
+            <span className="text-xs font-normal text-muted-foreground">
+              ({group.selection}, max {group.max})
+            </span>
+          </Label>
+          <div className="mt-1.5 space-y-1.5">
+            {group.options.map((o) => {
+              const selected = value.find((a) => a.groupId === group.id && a.addonId === o.id);
+              return (
+                <div
+                  key={o.id}
+                  className={cn(
+                    "flex items-center justify-between gap-2 rounded-lg border px-3 py-1.5 text-sm",
+                    selected ? "border-primary bg-primary-soft" : "border-border",
+                  )}
+                >
+                  <button
+                    type="button"
+                    className="flex-1 text-left"
+                    onClick={() => {
+                      if (selected) {
+                        onChange(value.filter((a) => a !== selected));
+                        return;
+                      }
+                      const next: SelectedAddon = {
+                        name: o.name,
+                        price: o.price,
+                        qty: 1,
+                        groupId: group.id,
+                        addonId: o.id,
+                      };
+                      onChange(
+                        group.selection === "Single"
+                          ? [...value.filter((a) => a.groupId !== group.id), next]
+                          : [...value, next],
+                      );
+                    }}
+                  >
+                    {o.name}
+                    {o.price ? <span className="num"> +₹{o.price}</span> : null}
+                  </button>
+                  {selected ? (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        aria-label={`Fewer ${o.name}`}
+                        className="grid size-6 place-items-center rounded border border-border"
+                        onClick={() =>
+                          onChange(
+                            selected.qty <= 1
+                              ? value.filter((a) => a !== selected)
+                              : value.map((a) => (a === selected ? { ...a, qty: a.qty - 1 } : a)),
+                          )
+                        }
+                      >
+                        <Minus className="size-3" />
+                      </button>
+                      <span className="num w-4 text-center">{selected.qty}</span>
+                      <button
+                        type="button"
+                        aria-label={`More ${o.name}`}
+                        className="grid size-6 place-items-center rounded border border-border"
+                        onClick={() =>
+                          onChange(
+                            value.map((a) => (a === selected ? { ...a, qty: a.qty + 1 } : a)),
+                          )
+                        }
+                      >
+                        <Plus className="size-3" />
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+export function AddonDialog({
+  line,
+  order,
+  onClose,
+}: {
+  line: OrderLine | null;
+  order: Order;
+  onClose: () => void;
+}) {
+  const store = useStore();
+  const [addons, setAddons] = useState<SelectedAddon[]>([]);
+  useEffect(() => setAddons(line?.addons ?? []), [line]);
+  const item = line ? store.menuItems.find((m) => m.id === line.itemId) : undefined;
+  const groups = (item?.addonGroupIds ?? [])
+    .map((gid) => store.addonGroups.find((g) => g.id === gid))
+    .filter((g): g is AddonGroup => !!g);
+
+  return (
+    <Dialog open={!!line} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Addons</DialogTitle>
+          <DialogDescription>{line?.name}</DialogDescription>
+        </DialogHeader>
+        {groups.length ? (
+          <AddonPicker groups={groups} value={addons} onChange={setAddons} />
+        ) : (
+          <p className="text-sm text-muted-foreground">This item has no addon options.</p>
+        )}
+        <DialogFooter>
+          <Button
+            onClick={() => {
+              if (line) store.setLineAddons(order.id, line.id, addons);
+              onClose();
+            }}
+          >
+            Save addons
           </Button>
         </DialogFooter>
       </DialogContent>

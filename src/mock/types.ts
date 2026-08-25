@@ -187,7 +187,7 @@ export interface OrderLine {
   qty: number;
   price: number;
   variant?: string;
-  addons?: { name: string; price: number }[];
+  addons?: { name: string; price: number; qty: number; groupId?: string; addonId?: string }[];
   kotRound: number;
   originTable?: string;
   note?: string;

@@ -744,7 +744,10 @@ export const liveOrders: Order[] = [
       line("l13", "m30", 2, 1),
       line("l14", "m28", 1, 1),
       line("l15", "m7", 6, 2),
-      line("l16", "m21", 2, 3, { variant: "Full", addons: [{ name: "Chocklate", price: 20 }] }),
+      line("l16", "m21", 2, 3, {
+        variant: "Full",
+        addons: [{ name: "Chocklate", price: 20, qty: 1 }],
+      }),
     ],
     customerName: "Karan Desai",
     customerPhone: "9845098234",

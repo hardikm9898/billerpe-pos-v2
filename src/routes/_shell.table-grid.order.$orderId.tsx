@@ -15,6 +15,7 @@ import {
   Send,
   Star,
   StickyNote,
+  Tags,
   Trash2,
   User,
   Wallet,
@@ -22,7 +23,12 @@ import {
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { NoteDialog } from "@/components/billing/keyboard-display";
+import {
+  AddonDialog,
+  AddonPicker,
+  NoteDialog,
+  type SelectedAddon,
+} from "@/components/billing/keyboard-display";
 import { EmptyState, Money, StatusBadge } from "@/components/kit";
 import { PaymentSplitEditor } from "@/components/operations/payment-split-editor";
 import { Button } from "@/components/ui/button";
@@ -76,7 +82,7 @@ function OrderCartPage() {
   const [query, setQuery] = useState("");
   const [configItem, setConfigItem] = useState<MenuItem | null>(null);
   const [variant, setVariant] = useState<string>("");
-  const [addons, setAddons] = useState<{ name: string; price: number }[]>([]);
+  const [addons, setAddons] = useState<SelectedAddon[]>([]);
   const [note, setNote] = useState("");
   const [discountOpen, setDiscountOpen] = useState(false);
   const [discountType, setDiscountType] = useState<"percent" | "flat">("percent");
@@ -90,6 +96,7 @@ function OrderCartPage() {
   const [customName, setCustomName] = useState("");
   const [customPrice, setCustomPrice] = useState(0);
   const [noteLineFor, setNoteLineFor] = useState<OrderLine | null>(null);
+  const [addonLineFor, setAddonLineFor] = useState<OrderLine | null>(null);
   const [customQty, setCustomQty] = useState(1);
   const [chargesOpen, setChargesOpen] = useState(false);
   const [deliveryOverride, setDeliveryOverride] = useState(0);
@@ -432,6 +439,19 @@ function OrderCartPage() {
                                 >
                                   <Plus className="size-3.5" />
                                 </Button>
+                                {editable &&
+                                store.menuItems.find((m) => m.id === l.itemId)?.addonGroupIds
+                                  ?.length ? (
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="size-7"
+                                    onClick={() => setAddonLineFor(l)}
+                                    aria-label="Edit addons"
+                                  >
+                                    <Tags className="size-3.5" />
+                                  </Button>
+                                ) : null}
                                 {editable ? (
                                   <Button
                                     size="icon"
@@ -519,7 +539,13 @@ function OrderCartPage() {
             >
               <Pause className="size-4" /> Hold
             </Button>
-            <Button variant="outline" disabled={settled} onClick={() => store.saveOrder(order.id)}>
+            <Button
+              variant="outline"
+              disabled={settled || !order.lines.length}
+              onClick={() => {
+                void store.generateBill(order.id).then(() => navigate({ to: "/table-grid" }));
+              }}
+            >
               <Save className="size-4" /> Save
             </Button>
             <Button variant="outline" disabled={settled} onClick={() => setDiscountOpen(true)}>
@@ -550,11 +576,12 @@ function OrderCartPage() {
               variant="secondary"
               disabled={settled || !order.lines.length}
               onClick={() => {
-                store.generateBill(order.id);
-                navigate({ to: "/table-grid" });
+                void store
+                  .generateBill(order.id, { print: true })
+                  .then(() => navigate({ to: "/table-grid" }));
               }}
             >
-              <Printer className="size-4" /> Bill
+              <Printer className="size-4" /> Bill Print
             </Button>
             <Button
               className="col-span-2"
@@ -709,52 +736,15 @@ function OrderCartPage() {
             </div>
           ) : null}
 
-          {configItem?.addonGroupIds?.map((gid) => {
-            const group = store.addonGroups.find((g) => g.id === gid);
-            if (!group) return null;
-            return (
-              <div key={gid}>
-                <Label>
-                  {group.name}{" "}
-                  <span className="text-xs font-normal text-muted-foreground">
-                    ({group.selection}, max {group.max})
-                  </span>
-                </Label>
-                <div className="mt-1.5 flex flex-wrap gap-2">
-                  {group.options.map((o) => {
-                    const on = addons.some((a) => a.name === o.name);
-                    const optionPrice = o.price;
-                    return (
-                      <button
-                        key={o.id}
-                        onClick={() =>
-                          setAddons((prev) =>
-                            on
-                              ? prev.filter((a) => a.name !== o.name)
-                              : group.selection === "Single"
-                                ? [
-                                    ...prev.filter(
-                                      (a) => !group.options.some((x) => x.name === a.name),
-                                    ),
-                                    { name: o.name, price: optionPrice },
-                                  ]
-                                : [...prev, { name: o.name, price: optionPrice }],
-                          )
-                        }
-                        className={cn(
-                          "rounded-lg border px-3 py-1.5 text-sm",
-                          on ? "border-primary bg-primary-soft" : "border-border",
-                        )}
-                      >
-                        {o.name}
-                        {optionPrice ? <span className="num"> +₹{optionPrice}</span> : null}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
+          {configItem?.addonGroupIds?.length ? (
+            <AddonPicker
+              groups={configItem.addonGroupIds
+                .map((gid) => store.addonGroups.find((g) => g.id === gid))
+                .filter((g): g is (typeof store.addonGroups)[number] => !!g)}
+              value={addons}
+              onChange={setAddons}
+            />
+          ) : null}
 
           <div>
             <Label htmlFor="note">Kitchen note</Label>
@@ -957,6 +947,7 @@ function OrderCartPage() {
       </Dialog>
 
       <NoteDialog line={noteLineFor} order={order} onClose={() => setNoteLineFor(null)} />
+      <AddonDialog line={addonLineFor} order={order} onClose={() => setAddonLineFor(null)} />
     </div>
   );
 }

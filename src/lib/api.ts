@@ -420,10 +420,15 @@ export type KotCartItem = {
   qty: number;
   price: number;
   discount: number;
-  addons: { name: string; price: number }[];
+  // Department-grouped, with a per-addon qty - see controller/kto.js's
+  // matchDepartmentsAndAddonsById and its KOT/invoice print templates,
+  // which are what actually read this back (confirmed live).
+  addons: { id: number; department_name: string; hms_addon_msts: KotCartAddon[] }[];
   comment: string;
   menu_categ_id: number;
 };
+
+export type KotCartAddon = { id: number; addon_name: string; price: number; qty: number };
 
 type KotPayload = {
   order_type: "dinin" | "pickup";

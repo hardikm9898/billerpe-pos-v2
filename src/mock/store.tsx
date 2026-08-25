@@ -130,7 +130,7 @@ export interface AddLineInput {
   itemId: string;
   qty?: number;
   variant?: string;
-  addons?: { name: string; price: number }[];
+  addons?: { name: string; price: number; qty: number; groupId?: string; addonId?: string }[];
   note?: string;
 }
 
@@ -282,8 +282,8 @@ const initialState: State = {
 };
 
 export function lineTotal(l: OrderLine) {
-  const addons = (l.addons ?? []).reduce((s, a) => s + a.price, 0);
-  return (l.price + addons) * l.qty;
+  const addons = (l.addons ?? []).reduce((s, a) => s + a.price * a.qty, 0);
+  return l.price * l.qty + addons;
 }
 
 export interface BillTotals {
@@ -472,6 +472,11 @@ interface Ctx extends State {
   setLineQty: (orderId: string, lineId: string, qty: number) => void;
   setLineNote: (orderId: string, lineId: string, note: string) => void;
   setLinePrice: (orderId: string, lineId: string, price: number) => void;
+  setLineAddons: (
+    orderId: string,
+    lineId: string,
+    addons: NonNullable<OrderLine["addons"]>,
+  ) => void;
   removeLine: (orderId: string, lineId: string) => void;
 
   holdOrder: (orderId: string) => void;
@@ -484,7 +489,7 @@ interface Ctx extends State {
   applyDiscount: (orderId: string, label: string, amount: number) => void;
   setCustomer: (orderId: string, name: string, phone: string) => void;
   setCharges: (orderId: string, delivery: number, packaging: number) => void;
-  generateBill: (orderId: string) => void;
+  generateBill: (orderId: string, options?: { print?: boolean }) => Promise<void>;
   settleOrder: (orderId: string, payments: PaymentSplit[]) => void;
   mergeTables: (sourceTableId: string, destTableId: string) => void;
   transferTable: (orderId: string, destTableId: string) => void;
@@ -1041,17 +1046,55 @@ function formatOrderTimestamp(iso: string, businessDateDMY: string): string {
   return `${businessDateDMY} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
 }
 
+// hms_orderDetails.addons is a free-form JSON column - the real backend
+// (kto.js's own KOT/invoice print templates and matchDepartmentsAndAddonsById)
+// reads/writes it as a department-grouped shape with a per-addon qty
+// ([{id, department_name, hms_addon_msts: [{id, addon_name, price, qty}]}]),
+// which is what the old BillerPe app that supported multi-qty addons wrote.
+// Also tolerates the flat {name, price} shape this app itself used to send
+// (qty defaults to 1) so previously-created rows still read back correctly.
+function parseOrderAddons(raw: string | null | undefined): NonNullable<OrderLine["addons"]> {
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: NonNullable<OrderLine["addons"]> = [];
+  for (const entry of parsed as unknown[]) {
+    if (!entry || typeof entry !== "object") continue;
+    const rec = entry as Record<string, unknown>;
+    if (Array.isArray(rec["hms_addon_msts"])) {
+      const groupId = rec["id"] !== undefined ? String(rec["id"]) : undefined;
+      for (const rawAddon of rec["hms_addon_msts"] as unknown[]) {
+        if (!rawAddon || typeof rawAddon !== "object") continue;
+        const a = rawAddon as Record<string, unknown>;
+        out.push({
+          name: typeof a["addon_name"] === "string" ? a["addon_name"] : "",
+          price: Number(a["price"]) || 0,
+          qty: Number(a["qty"]) || 1,
+          groupId,
+          addonId: a["id"] !== undefined ? String(a["id"]) : undefined,
+        });
+      }
+    } else if (typeof rec["name"] === "string") {
+      out.push({
+        name: rec["name"],
+        price: Number(rec["price"]) || 0,
+        qty: Number(rec["qty"]) || 1,
+      });
+    }
+  }
+  return out;
+}
+
 function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Order {
   const [y, m, d] = detail.business_date.split("-");
   const businessDate = `${d}/${m}/${y}`;
   const lines: OrderLine[] = detail.hms_orderDetails.map((l) => {
-    let addons: { name: string; price: number }[] = [];
-    try {
-      const parsed: unknown = JSON.parse(l.addons || "[]");
-      if (Array.isArray(parsed)) addons = parsed as { name: string; price: number }[];
-    } catch {
-      addons = [];
-    }
+    const addons = parseOrderAddons(l.addons);
     return {
       id: `ol-${l.id}`,
       itemId: String(l.MenuId),
@@ -1117,13 +1160,7 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
   const [y, m, d] = detail.business_date.split("-");
   const businessDate = `${d}/${m}/${y}`;
   const lines: OrderLine[] = detail.hms_orderDetails.map((l) => {
-    let addons: { name: string; price: number }[] = [];
-    try {
-      const parsed: unknown = JSON.parse(l.addons || "[]");
-      if (Array.isArray(parsed)) addons = parsed as { name: string; price: number }[];
-    } catch {
-      addons = [];
-    }
+    const addons = parseOrderAddons(l.addons);
     return {
       id: `ol-${l.id}`,
       itemId: String(l.MenuId),
@@ -1576,6 +1613,113 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     by,
   });
 
+  // Converts this app's flat per-line addon selections back into the
+  // department-grouped shape the backend actually reads/writes (see
+  // parseOrderAddons's comment - same shape, reverse direction) for every
+  // KOT/bill payload that carries addons.
+  const buildAddonsPayload = (addons?: OrderLine["addons"]) => {
+    if (!addons?.length) return [];
+    const byGroup = new Map<
+      string,
+      {
+        id: number;
+        department_name: string;
+        hms_addon_msts: { id: number; addon_name: string; price: number; qty: number }[];
+      }
+    >();
+    addons.forEach((a, i) => {
+      const key = a.groupId ?? `_ungrouped_${a.name}_${i}`;
+      if (!byGroup.has(key)) {
+        const group = a.groupId ? s.addonGroups.find((g) => g.id === a.groupId) : undefined;
+        byGroup.set(key, {
+          id: Number(a.groupId) || 0,
+          department_name: group?.name ?? "",
+          hms_addon_msts: [],
+        });
+      }
+      byGroup.get(key)!.hms_addon_msts.push({
+        id: Number(a.addonId) || 0,
+        addon_name: a.name,
+        price: a.price,
+        qty: a.qty,
+      });
+    });
+    return [...byGroup.values()];
+  };
+
+  // Shared by printBill and generateBill's print option - takes backendId
+  // as an explicit argument rather than re-deriving it from `s`, since `s`
+  // is this render's immutable snapshot and won't reflect a patch() that
+  // just happened moments earlier in the same async flow.
+  const doPrintBill = async (o: Order, backendId: number) => {
+    try {
+      // Real hotel_name/address/gst_no/fssai_no/invoiceFormate*Text -
+      // this app's own local invoiceFormat.header/footer are never
+      // synced from the server (see hotelApi.getSettings's comment), so
+      // they're mock text only and unusable for an actual printed bill.
+      const hotel = await hotelApi.getSettings();
+      const t = o.backendTotals
+        ? {
+            ...orderTotals(o, s),
+            grand: o.backendTotals.grand,
+            discount: o.backendTotals.discount,
+            service: o.backendTotals.serviceCharge,
+          }
+        : orderTotals(o, s);
+      const headerText = [
+        `<p class="hotel-name">${hotel.hotel_name}</p>`,
+        ...([hotel.address1, hotel.address2].filter(Boolean).length
+          ? [
+              `<p class="hotel-address">${[hotel.address1, hotel.address2].filter(Boolean).join(", ")}</p>`,
+            ]
+          : []),
+        ...(hotel.gst_no ? [`<p>GSTIN: ${hotel.gst_no}</p>`] : []),
+        ...(hotel.fssai_no ? [`<p>FSSAI: ${hotel.fssai_no}</p>`] : []),
+        ...(hotel.invoiceFormateHeaderText ? [`<p>${hotel.invoiceFormateHeaderText}</p>`] : []),
+      ];
+      const footerText = hotel.invoiceFormateBottomText
+        ? [`<p>${hotel.invoiceFormateBottomText}</p>`]
+        : [];
+      // Addon detail is dropped here (see orderApi.generateInvoicePdf's
+      // own comment on the department-grouped shape it actually wants).
+      const { pdf } = await orderApi.generateInvoicePdf({
+        orderId: backendId,
+        printerSize: hotel.printerSize ?? "1",
+        tableAndUserInfo: o.tableLabel,
+        dateAndTime: o.createdAt,
+        type: o.type === "Dine In" ? "dinin" : "pickup",
+        token: 0,
+        customerName: o.customerName,
+        customerNumber: o.customerPhone,
+        items: o.lines.map((l) => ({
+          item_name: l.name,
+          qty: l.qty,
+          price: l.price,
+          totalAmount: lineTotal(l),
+          variantData: l.variant ? { variants_name: l.variant } : null,
+        })),
+        totalQty: o.lines.reduce((sum, l) => sum + l.qty, 0),
+        subtotal: t.subtotal,
+        totalDiscount: t.discount,
+        service_charge: t.service,
+        orderTax: t.taxLines.map((tx) => ({
+          hms_tax_type_mst: { tax_name: tx.name },
+          amount: 0,
+          tax_type: "fix" as const,
+          tax_value: tx.amount,
+        })),
+        totalBill: t.grand,
+        headerText,
+        footerText,
+      });
+      const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
+      window.open(URL.createObjectURL(blob), "_blank");
+      toast.success("Bill ready to print");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
+    }
+  };
+
   const value: Ctx = {
     ...s,
     currentUser,
@@ -1666,7 +1810,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         tables: p.tables.map((t) =>
           t.id === tableId
-            ? { ...t, status: "Running", guests, orderId: id, occupiedSince: nowStamp() }
+            ? { ...t, status: "Held", guests, orderId: id, occupiedSince: nowStamp() }
             : t,
         ),
         orders: [
@@ -1677,7 +1821,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             tableId,
             tableLabel: label,
             guests,
-            status: "Running",
+            // Opening a table shouldn't read as "Running" with zero real
+            // activity yet - "Held" is the only existing status that's both
+            // non-misleading and already treated as "has an active order"
+            // by orderForTable's filter, and by startDefaultOrder's own
+            // Free-table lookup below (which must NOT pick this table again
+            // while a draft is sitting on it).
+            status: "Held",
             kotRounds: 0,
             lines: [],
             menuId,
@@ -1704,7 +1854,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             type: "Pickup",
             tableLabel: "Take Away",
             guests: 1,
-            status: "Running",
+            status: "Held",
             kotRounds: 0,
             lines: [],
             menuId,
@@ -1846,6 +1996,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `${line.name} ×${line.qty}`,
           newQty > 0 ? `×${newQty}` : "Removed",
         );
+        // Nothing left on this table/pickup order - don't leave it sitting
+        // Held/Running with zero items blocking the table for everyone else.
+        if (newQty <= 0 && order.lines.length === 1) value.cancelOrder(orderId);
       }
     },
 
@@ -1865,13 +2018,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : o,
         ),
       }));
+      const newQty = Math.max(0, Math.round(qty));
       if (order && line) {
         log(
           "Qty Changed",
           `Order #${order.orderNo}`,
           `${line.name} ×${line.qty}`,
-          Math.max(0, Math.round(qty)) > 0 ? `×${Math.max(0, Math.round(qty))}` : "Removed",
+          newQty > 0 ? `×${newQty}` : "Removed",
         );
+        // Nothing left on this table/pickup order - don't leave it sitting
+        // Held/Running with zero items blocking the table for everyone else.
+        if (newQty <= 0 && order.lines.length === 1) value.cancelOrder(orderId);
       }
     },
 
@@ -1895,6 +2052,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
       if (order && line) {
         log("Price Changed", `Order #${order.orderNo}`, `${line.name} ₹${line.price}`, `₹${next}`);
+      }
+    },
+
+    setLineAddons: (orderId, lineId, addons) => {
+      const order = s.orders.find((o) => o.id === orderId);
+      const line = order?.lines.find((l) => l.id === lineId);
+      patch((p) => ({
+        ...p,
+        orders: p.orders.map((o) =>
+          o.id === orderId
+            ? {
+                ...o,
+                lines: o.lines.map((l) =>
+                  l.id === lineId ? { ...l, addons: addons.length ? addons : undefined } : l,
+                ),
+              }
+            : o,
+        ),
+      }));
+      if (order && line) {
+        log(
+          "Addons Changed",
+          `Order #${order.orderNo}`,
+          line.addons?.map((a) => a.name).join(", ") || "—",
+          addons.map((a) => a.name).join(", ") || "—",
+        );
       }
     },
 
@@ -1925,6 +2108,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
       if (order && line) {
         log("Item Removed", `Order #${order.orderNo}`, `${line.name} ×${line.qty}`, "Removed");
+        // Nothing left on this table/pickup order - don't leave it sitting
+        // Held/Running with zero items blocking the table for everyone else.
+        if (order.lines.length === 1) value.cancelOrder(orderId);
       }
     },
 
@@ -2076,7 +2262,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           qty: l.qty,
           price: l.price,
           discount: 0,
-          addons: l.addons ?? [],
+          addons: buildAddonsPayload(l.addons),
           comment: l.note ?? "",
           menu_categ_id: mi ? Number(mi.categoryId) : 0,
         };
@@ -2236,7 +2422,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Charges updated");
     },
 
-    generateBill: (orderId) => {
+    generateBill: async (orderId, options) => {
       if (guardBlocked()) return;
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return;
@@ -2254,6 +2440,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }));
         log("Bill Generated", `Order #${o.orderNo}`, o.status, "Bill Generated");
         toast.success(`Bill generated for #${o.orderNo}`);
+        if (options?.print) {
+          if (o.backendId) {
+            await doPrintBill(o, o.backendId);
+          } else {
+            toast.error("Send a KOT first to print a pickup bill without settling");
+          }
+        }
         return;
       }
 
@@ -2281,7 +2474,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           qty: l.qty,
           price: l.price,
           discount: 0,
-          addons: l.addons ?? [],
+          addons: buildAddonsPayload(l.addons),
           comment: l.note ?? "",
           menu_categ_id: mi ? Number(mi.categoryId) : 0,
         };
@@ -2314,12 +2507,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               taxes: [],
             },
           });
+          const backendId = o.backendId ?? res.orderId;
           patch((p) => ({
             ...p,
             orders: p.orders.map((x) =>
-              x.id === orderId
-                ? { ...x, status: "Bill Generated", backendId: x.backendId ?? res.orderId }
-                : x,
+              x.id === orderId ? { ...x, status: "Bill Generated", backendId } : x,
             ),
             tables: p.tables.map((t) =>
               t.id === o.tableId ? { ...t, status: "Bill Generated" } : t,
@@ -2327,11 +2519,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }));
           log("Bill Generated", `Order #${o.orderNo}`, o.status, "Bill Generated");
           toast.success(`Bill generated for #${o.orderNo}`);
+          if (options?.print && backendId) {
+            await doPrintBill(o, backendId);
+          }
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not generate bill");
         }
       };
-      void run();
+      await run();
     },
 
     settleOrder: (orderId, payments) => {
@@ -2411,7 +2606,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 qty: l.qty,
                 price: l.price,
                 discount: 0,
-                addons: l.addons ?? [],
+                addons: buildAddonsPayload(l.addons),
                 comment: l.note ?? "",
                 menu_categ_id: mi ? Number(mi.categoryId) : 0,
               };
@@ -5535,72 +5730,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Order isn't synced with the server yet");
         return;
       }
-      try {
-        // Real hotel_name/address/gst_no/fssai_no/invoiceFormate*Text -
-        // this app's own local invoiceFormat.header/footer are never
-        // synced from the server (see hotelApi.getSettings's comment), so
-        // they're mock text only and unusable for an actual printed bill.
-        const hotel = await hotelApi.getSettings();
-        const t = o.backendTotals
-          ? {
-              ...orderTotals(o, s),
-              grand: o.backendTotals.grand,
-              discount: o.backendTotals.discount,
-              service: o.backendTotals.serviceCharge,
-            }
-          : orderTotals(o, s);
-        const headerText = [
-          `<p class="hotel-name">${hotel.hotel_name}</p>`,
-          ...([hotel.address1, hotel.address2].filter(Boolean).length
-            ? [
-                `<p class="hotel-address">${[hotel.address1, hotel.address2].filter(Boolean).join(", ")}</p>`,
-              ]
-            : []),
-          ...(hotel.gst_no ? [`<p>GSTIN: ${hotel.gst_no}</p>`] : []),
-          ...(hotel.fssai_no ? [`<p>FSSAI: ${hotel.fssai_no}</p>`] : []),
-          ...(hotel.invoiceFormateHeaderText ? [`<p>${hotel.invoiceFormateHeaderText}</p>`] : []),
-        ];
-        const footerText = hotel.invoiceFormateBottomText
-          ? [`<p>${hotel.invoiceFormateBottomText}</p>`]
-          : [];
-        // Addon detail is dropped here (see orderApi.generateInvoicePdf's
-        // own comment on the department-grouped shape it actually wants).
-        const { pdf } = await orderApi.generateInvoicePdf({
-          orderId: o.backendId,
-          printerSize: hotel.printerSize ?? "1",
-          tableAndUserInfo: o.tableLabel,
-          dateAndTime: o.createdAt,
-          type: o.type === "Dine In" ? "dinin" : "pickup",
-          token: 0,
-          customerName: o.customerName,
-          customerNumber: o.customerPhone,
-          items: o.lines.map((l) => ({
-            item_name: l.name,
-            qty: l.qty,
-            price: l.price,
-            totalAmount: lineTotal(l),
-            variantData: l.variant ? { variants_name: l.variant } : null,
-          })),
-          totalQty: o.lines.reduce((sum, l) => sum + l.qty, 0),
-          subtotal: t.subtotal,
-          totalDiscount: t.discount,
-          service_charge: t.service,
-          orderTax: t.taxLines.map((tx) => ({
-            hms_tax_type_mst: { tax_name: tx.name },
-            amount: 0,
-            tax_type: "fix" as const,
-            tax_value: tx.amount,
-          })),
-          totalBill: t.grand,
-          headerText,
-          footerText,
-        });
-        const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
-        window.open(URL.createObjectURL(blob), "_blank");
-        toast.success("Bill ready to print");
-      } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
-      }
+      await doPrintBill(o, o.backendId);
     },
   };
 
