@@ -40,6 +40,7 @@ what's real, what's a confirmed dead end, and what's left.
 | Orders — live reconstruction | Any currently-active order (dine-in or pickup, on a table or not) not already known locally is fetched and rebuilt on load, via `GET /pickupOrder` + `GET /order/:id` — fixes the "table shows occupied but biller opens empty" bug |
 | Orders — settled history | Last 90 days, capped at 300, separate from live `orders` array |
 | Orders — actions | Cancel, delete (single + bulk), e-bill send, reprint bill (real PDF), timeline |
+| Table merge / transfer | Real `POST /moveTable` for any order already synced to the backend (has a `backendId` and, for transfer, a current table) — the backend itself decides merge-vs-plain-transfer based on whether the destination table already has an order. A draft never sent to KOT has nothing on the backend to move yet, so that case stays the original local-only reassignment |
 | KDS | Real ticket flow |
 | UPI | Real |
 | Due Bills | Real load + settle |
@@ -76,6 +77,7 @@ No further work planned unless the user explicitly authorizes new backend capabi
 | Requisitions | Closest backend match (Franchise Orders) is a different business domain — franchise-outlet-to-merchant-hub ordering, requires a `merchant_id` this app has no UI to select |
 | Reopen a settled order | No endpoint anywhere resets `payment` back to `pending`; `settleBills` only ever operates on `payment:"pending"` rows |
 | Reports — 4 of 13 (cash-session, table-performance, staff-performance, kot-report) | No dedicated backend report endpoint for any of these |
+| Notification settings (`toggleNotificationSetting`) | No per-hotel, per-trigger, per-channel config exists anywhere. WhatsApp sends are hardcoded at fixed call sites in `smsService.js` with no on/off flag; SMS sending itself is dead/commented-out code; the only adjacent "config" (`autoReplyConfig` in the WhatsApp agent controller) is a global, in-memory, superadmin-only chat auto-reply toggle, unrelated to the 6 seeded triggers (Order settled, KOT ready, Low stock, Sync failure, Cash variance, Reservation reminder). `RestaurantSetting` has no channel-toggle columns either |
 
 ---
 
@@ -83,19 +85,7 @@ No further work planned unless the user explicitly authorizes new backend capabi
 
 Ordered roughly by value vs. effort. Pick up top-down unless you want something specific.
 
-### 1. 🔍 Notification settings (`toggleNotificationSetting`)
-WhatsApp/SMS/in-app trigger config, currently local-only. Backend has `smsService.js` and
-a WhatsApp agent controller — real capability plausible but unconfirmed.
-**Next step:** read those controllers, find the actual trigger-config endpoint (if any),
-verify live.
-
-### 2. 🔍 Table merge / transfer (`mergeTables`, `transferTable`)
-Currently local-only. No merge/transfer endpoint found in `controller/table.js` on a first
-pass, but not exhaustively checked.
-**Next step:** re-read `controller/table.js` in full for anything resembling this; if
-nothing exists, this becomes a dead end (would need new backend work).
-
-### 3. 🔲 Online Orders (Zomato/Swiggy aggregator)
+### 1. 🔲 Online Orders (Zomato/Swiggy aggregator)
 Real backend feature (`routes/zomato.js`, `controller/zomotoSwiggy.js` — webhook intake,
 KOT/bill generation, order status sync) but **no frontend screen exists for it at all**.
 Not a "wire the mock" task — this is a net-new feature: an aggregator-order queue/KDS
@@ -103,13 +93,13 @@ integration screen.
 **Next step:** scope as its own project if wanted — this is bigger than everything else
 in this plan combined. Don't fold into a single slice.
 
-### 4. 🔲 Reports — remaining polish
+### 2. 🔲 Reports — remaining polish
 The 9 "wired" report types were built against a fixed 90-day-style window with no picker.
 Consider whether Dashboard-style range controls belong on the Reports hub too, and whether
 the 4 dead-end report types (cash-session, table-performance, staff-performance, kot-report)
 should be quietly removed from the hub's list rather than left pointing at local-only data.
 
-### 5. ✅ Real backend fixes (done 2026-08-25, backend commit `0e29291`)
+### 3. ✅ Real backend fixes (done 2026-08-25, backend commit `0e29291`)
 - Fixed: `getSingleOrderForAdminCart`/`editOrderClick` missing `hotel_id` filter (real
   cross-tenant order read/edit leak), `editExpenseHead` missing `hotel_id` on both its
   lookup and update (real cross-tenant write bug, worse than first documented) plus its

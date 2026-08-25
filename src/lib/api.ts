@@ -229,6 +229,15 @@ export const tableApi = {
 
   removeCategories: (allId: number[]) =>
     apiPost<{ message?: string }>("/removeTableCatagories", { allId }),
+
+  // Dual-purpose, exactly matching this app's own mergeTables/transferTable
+  // split - the backend decides which one happens: if table2 already has an
+  // active order, it folds table1's order into it (merge) and soft-deletes
+  // the source order; otherwise it's a plain reassignment of Order/
+  // OrderDetails.TableId from table1 to table2 (transfer). Confirmed live by
+  // reading controller/table.js#moveTable in full.
+  moveTable: (params: { tableId1: number; tableId2: number; orderId: number }) =>
+    apiPost<{ message?: string; orderId: number }>("/moveTable", params),
 };
 
 export type RawMenuCategory = {

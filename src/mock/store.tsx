@@ -2759,6 +2759,33 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
+
+      // POST /moveTable (controller/table.js) does exactly this merge -
+      // folds table1's order into whatever's already on table2 - but it
+      // only operates on a real Order row. A draft never sent to KOT has
+      // nothing on the backend to move yet, so that case stays local-only
+      // (same as it's always been) rather than failing an ORDER_NOT_FOUND.
+      if (srcOrder.backendId) {
+        const run = async () => {
+          try {
+            await tableApi.moveTable({
+              tableId1: Number(sourceTableId),
+              tableId2: Number(destTableId),
+              orderId: srcOrder.backendId!,
+            });
+            await value.loadTablesFromServer();
+            log("Table Merged", `${sourceLabel} → ${destLabel}`, "2 orders", "1 combined order");
+            toast.success(`Merged ${sourceLabel} into ${destLabel}`, {
+              description: "Items grouped by origin · one combined bill. Merge cannot be undone.",
+            });
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : "Could not merge tables");
+          }
+        };
+        void run();
+        return;
+      }
+
       const guests = (src?.guests ?? srcOrder.guests) + (dst?.guests ?? dstOrder?.guests ?? 0);
       const movedLines = srcOrder.lines.map((l) => ({
         ...l,
@@ -2848,6 +2875,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Transfer blocked", { description: "The destination table is Reserved." });
         return;
       }
+
+      // See mergeTables' comment - POST /moveTable decides merge-vs-transfer
+      // itself based on whether table2 already has an order, so a synced
+      // order that's currently on a table can always go straight to it (an
+      // order not yet on any table - a pickup order never assigned one -
+      // has no TableId for the backend to move from, so that stays local).
+      if (o.backendId && o.tableId) {
+        const sourceLabel = o.tableLabel;
+        const sourceTableId = o.tableId;
+        const destLabel = tableLabel(destTableId);
+        const run = async () => {
+          try {
+            await tableApi.moveTable({
+              tableId1: Number(sourceTableId),
+              tableId2: Number(destTableId),
+              orderId: o.backendId!,
+            });
+            await value.loadTablesFromServer();
+            log("Table Transferred", `${sourceLabel} → ${destLabel}`, sourceLabel, destLabel);
+            toast.success(`Order moved to ${destLabel}`, {
+              description: "Transfers cannot be reversed.",
+            });
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : "Could not transfer the order");
+          }
+        };
+        void run();
+        return;
+      }
+
       const destOccupied = ["Running", "Bill Generated", "Held"].includes(dst.status);
       if (destOccupied && o.tableId) {
         value.mergeTables(o.tableId, destTableId);
