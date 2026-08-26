@@ -15,7 +15,10 @@ export function Page({ children, className }: { children: ReactNode; className?:
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className={cn("mx-auto w-full max-w-[1600px] px-4 py-5 sm:px-6 lg:px-8", className)}
+      className={cn(
+        "mx-auto flex w-full max-w-[1600px] flex-col gap-5 px-4 py-5 sm:px-6 lg:px-8",
+        className,
+      )}
     >
       {children}
     </motion.div>
@@ -36,7 +39,7 @@ export function PageHeader({
   tabs?: ReactNode;
 }) {
   return (
-    <div className="mb-5">
+    <div>
       <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 sm:flex sm:flex-wrap sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-start gap-3">
           {Icon ? (
