@@ -134,7 +134,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   useEffect(() => {
     return () => {
       const o = store.orderById(orderId);
-      if (o && o.lines.length === 0) store.cancelOrder(o.id);
+      if (o && o.lines.length === 0) store.freeIfEmpty(o.id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);

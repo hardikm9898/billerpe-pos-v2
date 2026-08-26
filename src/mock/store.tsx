@@ -491,6 +491,9 @@ interface Ctx extends State {
   holdOrder: (orderId: string) => void;
   saveOrder: (orderId: string) => void;
   cancelOrder: (orderId: string) => void;
+  /** Silently frees the table/drops the draft if it's still empty - see
+   * freeEmptyDraft's own comment on why this stays quiet unlike cancelOrder. */
+  freeIfEmpty: (orderId: string) => void;
   removeOrder: (id: string) => void;
   removeOrders: (ids: string[]) => void;
   remakeOrderSequence: (startFrom: number) => void;
@@ -1776,6 +1779,34 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // A table/pickup order that never had a real action taken on it (no
+  // items ever added, or every item removed again before Hold/KOT/Save)
+  // never reached the backend - there's nothing a "cancelled" toast would
+  // meaningfully be announcing, since nothing was ever really created from
+  // the user's point of view. Falls back to the full cancelOrder (toast +
+  // backend cleanup) only when a real backend order exists to clean up.
+  const freeEmptyDraft = (o: Order) => {
+    if (o.backendId) {
+      value.cancelOrder(o.id);
+      return;
+    }
+    patch((p) => ({
+      ...p,
+      orders: p.orders.filter((x) => x.id !== o.id),
+      tables: p.tables.map((t) =>
+        t.id === o.tableId
+          ? {
+              ...t,
+              status: "Free",
+              guests: undefined,
+              orderId: undefined,
+              occupiedSince: undefined,
+            }
+          : t,
+      ),
+    }));
+  };
+
   const value: Ctx = {
     ...s,
     currentUser,
@@ -2066,7 +2097,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
         // Nothing left on this table/pickup order - don't leave it sitting
         // Held/Running with zero items blocking the table for everyone else.
-        if (newQty <= 0 && order.lines.length === 1) value.cancelOrder(orderId);
+        if (newQty <= 0 && order.lines.length === 1) freeEmptyDraft(order);
       }
     },
 
@@ -2105,7 +2136,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
         // Nothing left on this table/pickup order - don't leave it sitting
         // Held/Running with zero items blocking the table for everyone else.
-        if (newQty <= 0 && order.lines.length === 1) value.cancelOrder(orderId);
+        if (newQty <= 0 && order.lines.length === 1) freeEmptyDraft(order);
       }
     },
 
@@ -2195,7 +2226,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         log("Item Removed", `Order #${order.orderNo}`, `${line.name} ×${line.qty}`, "Removed");
         // Nothing left on this table/pickup order - don't leave it sitting
         // Held/Running with zero items blocking the table for everyone else.
-        if (order.lines.length === 1) value.cancelOrder(orderId);
+        if (order.lines.length === 1) freeEmptyDraft(order);
       }
     },
 
@@ -2250,6 +2281,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
       };
       void run();
+    },
+    freeIfEmpty: (orderId) => {
+      const o = s.orders.find((x) => x.id === orderId);
+      if (!o || o.lines.length > 0) return;
+      freeEmptyDraft(o);
     },
     removeOrder: (id) => {
       const o = s.orders.find((x) => x.id === id) ?? s.orderHistory.find((x) => x.id === id);
