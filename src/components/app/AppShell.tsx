@@ -1,6 +1,7 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
 import billerpeLogo from "@/assets/billerpe-logo.svg";
+import billerpeMark from "@/assets/billerpe-mark.jpeg";
 import {
   AlertOctagon,
   AlertTriangle,
@@ -375,9 +376,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           {railExpanded ? (
             <img src={billerpeLogo} alt="BillerPe" className="h-5 w-auto" />
           ) : (
-            <span className="grid shrink-0 size-7 place-items-center text-sm font-bold tracking-tight text-primary">
-              BP
-            </span>
+            <img
+              src={billerpeMark}
+              alt="BillerPe"
+              className="size-7 shrink-0 rounded-md object-cover"
+            />
           )}
         </Link>
         <nav
