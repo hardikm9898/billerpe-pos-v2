@@ -22,8 +22,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -61,7 +59,6 @@ function SystemPage() {
   const orderNos = store.orders.map((o) => o.orderNo);
   const lowestOrderNo = orderNos.length ? Math.min(...orderNos) : 1;
   const highestOrderNo = orderNos.length ? Math.max(...orderNos) : 1;
-  const [startFrom, setStartFrom] = useState(lowestOrderNo);
 
   return (
     <Page>
@@ -239,13 +236,7 @@ function SystemPage() {
               through <span className="num font-medium text-foreground">#{highestOrderNo}</span> ·{" "}
               {store.orders.length} order(s)
             </p>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setStartFrom(lowestOrderNo);
-                setSequenceOpen(true);
-              }}
-            >
+            <Button variant="outline" onClick={() => setSequenceOpen(true)}>
               <ListOrdered className="size-4" /> Renumber sequence
             </Button>
           </div>
@@ -257,26 +248,17 @@ function SystemPage() {
           <DialogHeader>
             <DialogTitle>Renumber order sequence</DialogTitle>
             <DialogDescription>
-              All {store.orders.length} orders will be renumbered in their current order, starting
-              from the number below. This cannot be undone.
+              Every order closes back into one continuous run starting at #1 (or from the start of
+              the financial year, if bill reset is set to yearly). This cannot be undone.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-1.5">
-            <Label>Start from</Label>
-            <Input
-              type="number"
-              className="num"
-              value={startFrom}
-              onChange={(e) => setStartFrom(Number(e.target.value) || 1)}
-            />
-          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setSequenceOpen(false)}>
               Cancel
             </Button>
             <Button
               onClick={() => {
-                store.remakeOrderSequence(startFrom);
+                store.remakeOrderSequence();
                 setSequenceOpen(false);
               }}
             >

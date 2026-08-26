@@ -747,6 +747,14 @@ export const orderApi = {
   // back, only the state at each point.
   getTimeline: (orderId: number) =>
     apiGet<{ timesLines: RawTimelineEntry[] }>(`/getTimelineByOrderId?id=${orderId}`),
+
+  // controller/order.js#makeSequenceBillNoOptimized (GET /makeSequenceBillNo)
+  // - closes gaps in the bill_no sequence (e.g. left behind by deleted
+  // orders), renumbering every non-deleted order back to a continuous run
+  // starting at 1 (or from the start of the financial year, if the hotel's
+  // RestaurantSetting.bill_reset_type is "financial_year"). Always starts
+  // at 1 - there's no arbitrary start-number parameter on this endpoint.
+  remakeSequence: () => apiGet<{ message?: string; updated_count: number }>("/makeSequenceBillNo"),
 };
 
 export type RawTimelineEntry = {

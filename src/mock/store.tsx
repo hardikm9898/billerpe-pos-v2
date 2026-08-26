@@ -502,7 +502,7 @@ interface Ctx extends State {
   freeIfEmpty: (orderId: string) => void;
   removeOrder: (id: string) => void;
   removeOrders: (ids: string[]) => void;
-  remakeOrderSequence: (startFrom: number) => void;
+  remakeOrderSequence: () => void;
   generateKot: (orderId: string) => void;
   applyDiscount: (orderId: string, label: string, amount: number) => void;
   setCustomer: (orderId: string, name: string, phone: string) => void;
@@ -2397,23 +2397,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
 
-    remakeOrderSequence: (startFrom) => {
+    remakeOrderSequence: () => {
       if (guardForbiddenSpecial("system.remakeOrderSequence")) return;
-      const ordered = [...s.orders].sort((a, b) => a.orderNo - b.orderNo);
-      const renumbered = new Map(ordered.map((o, i) => [o.id, startFrom + i]));
-      patch((p) => ({
-        ...p,
-        orders: p.orders.map((o) => ({ ...o, orderNo: renumbered.get(o.id) ?? o.orderNo })),
-      }));
-      log(
-        "Order Sequence Renumbered",
-        "All orders",
-        `#${ordered[0]?.orderNo ?? "—"}–#${ordered[ordered.length - 1]?.orderNo ?? "—"}`,
-        `#${startFrom}–#${startFrom + ordered.length - 1}`,
-      );
-      toast.success(`${ordered.length} order(s) renumbered`, {
-        description: `Now #${startFrom} through #${startFrom + ordered.length - 1}`,
-      });
+      const run = async () => {
+        try {
+          const { updated_count } = await orderApi.remakeSequence();
+          await value.loadOrderHistoryFromServer();
+          log(
+            "Order Sequence Renumbered",
+            "All orders",
+            "",
+            `${updated_count} bill number(s) closed back into sequence`,
+          );
+          toast.success(
+            updated_count > 0
+              ? `${updated_count} order(s) renumbered`
+              : "Sequence already has no gaps",
+          );
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not renumber the order sequence",
+          );
+        }
+      };
+      void run();
     },
 
     generateKot: (orderId) => {
