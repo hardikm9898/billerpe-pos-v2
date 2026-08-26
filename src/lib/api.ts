@@ -440,7 +440,9 @@ type UserPayload = {
   email: string;
   role: string;
   number: string;
-  password: string;
+  // Required on create (createUser hashes it unconditionally); optional on
+  // update (updateUser only applies it when present - see editUser below).
+  password?: string;
   pin?: string;
   access_name: {
     access: string;
@@ -466,9 +468,6 @@ export const userApi = {
   getCurrentUserAccess: () => apiGet<{ access: RawHotelUser }>("/getUserAccess"),
 
   createUser: (params: UserPayload) => apiPost<{ message?: string }>("/user", params),
-  // userSchemaUpdate requires `password` unconditionally (unlike create,
-  // where it's optional in the schema but the controller hashes it
-  // unconditionally anyway - effectively required either way).
   editUser: (params: UserPayload & { id: number }) =>
     apiPost<{ message?: string }>("/userUpdate", params),
 };

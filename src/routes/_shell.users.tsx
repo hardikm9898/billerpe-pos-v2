@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -192,10 +193,12 @@ function SpecialPermissionsList({
 function UsersPage() {
   const store = useStore();
   const [draft, setDraft] = useState<User | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
   const [showOverrides, setShowOverrides] = useState(false);
   const [viewRole, setViewRole] = useState<Role>("Manager");
 
   const canEditPermissions = store.can("permissions", "edit");
+  const canEditUsers = store.can("users", "edit");
   const isOwnerRow = viewRole === "Owner";
   const roleGrants = store.rolePermissions[viewRole];
   const roleSpecial = store.roleSpecialPermissions[viewRole];
@@ -261,7 +264,12 @@ function UsersPage() {
         title="Manage Users"
         description="Every staff account maps to exactly one role. Permissions follow the role, with optional per-user overrides."
         actions={
-          <Button onClick={() => setDraft(newUser())}>
+          <Button
+            onClick={() => {
+              setDraft(newUser());
+              setResetPassword("");
+            }}
+          >
             <Plus className="size-4" /> Add user
           </Button>
         }
@@ -273,6 +281,7 @@ function UsersPage() {
           keyFn={(u) => u.id}
           onRowClick={(u) => {
             setDraft({ ...u });
+            setResetPassword("");
             setShowOverrides(!!u.permissionOverrides);
           }}
           columns={[
@@ -397,14 +406,46 @@ function UsersPage() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Login PIN</Label>
-                  <Input
+                  <Label>{draft.id ? "Reset PIN" : "Login PIN"}</Label>
+                  <PasswordInput
                     value={draft.pin}
-                    maxLength={4}
-                    onChange={(e) => setDraft({ ...draft, pin: e.target.value })}
+                    maxLength={6}
+                    disabled={!canEditUsers}
+                    placeholder={draft.id ? "Leave blank to keep current" : undefined}
+                    onChange={(e) => setDraft({ ...draft, pin: e.target.value.replace(/\D/g, "") })}
                   />
                 </div>
               </div>
+              {draft.id ? (
+                <div className="space-y-1.5">
+                  <Label>Reset password</Label>
+                  <PasswordInput
+                    value={resetPassword}
+                    disabled={!canEditUsers}
+                    placeholder="Leave blank to keep current"
+                    onChange={(e) => setResetPassword(e.target.value)}
+                  />
+                  {!canEditUsers ? (
+                    <p className="text-xs text-muted-foreground">
+                      You don't have permission to reset staff credentials.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Existing passwords and PINs are stored securely and can't be viewed - only
+                      reset to a new value.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label>Password</Label>
+                  <PasswordInput
+                    value={resetPassword}
+                    onChange={(e) => setResetPassword(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">At least 6 characters.</p>
+                </div>
+              )}
               <div className="space-y-1.5">
                 <Label>Email</Label>
                 <Input
@@ -518,10 +559,14 @@ function UsersPage() {
               Cancel
             </Button>
             <Button
-              disabled={!draft?.name.trim()}
+              disabled={
+                !draft?.name.trim() ||
+                (!draft.id && resetPassword.trim().length < 6) ||
+                (!!resetPassword && resetPassword.trim().length < 6)
+              }
               onClick={() => {
                 if (!draft) return;
-                store.upsertUser(draft);
+                store.upsertUser(draft, resetPassword.trim() || undefined);
                 setDraft(null);
               }}
             >

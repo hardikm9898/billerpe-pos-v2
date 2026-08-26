@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
@@ -194,9 +195,8 @@ function LoginPage() {
                 </div>
                 <div>
                   <Label htmlFor="pw">Password</Label>
-                  <Input
+                  <PasswordInput
                     id="pw"
-                    type="password"
                     className="mt-1.5"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -247,7 +247,7 @@ function LoginPage() {
                 </div>
                 <div>
                   <Label htmlFor="pin">Quick login PIN</Label>
-                  <Input
+                  <PasswordInput
                     id="pin"
                     className="mt-1.5 num text-center text-lg tracking-[0.6em]"
                     value={pin}

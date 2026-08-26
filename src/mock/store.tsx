@@ -558,7 +558,7 @@ interface Ctx extends State {
   upsertTableCategory: (c: TableCategory) => void;
   removeTableCategory: (id: string) => void;
   loadTablesFromServer: () => Promise<void>;
-  upsertUser: (u: User) => void;
+  upsertUser: (u: User, newPassword?: string) => void;
   loadUsersFromServer: () => Promise<void>;
   loadInvoiceFormatFromServer: () => Promise<void>;
   loadDueBillsFromServer: () => Promise<void>;
@@ -1425,11 +1425,12 @@ function buildAccessNameFromRole(role: Role, rolePermissions: Record<Role, RoleP
   return BACKEND_ACCESS_AREAS.map((access) => ({ access, permissions: grantFor(access) }));
 }
 
-// The new design's staff accounts authenticate via PIN (login.tsx's PIN
-// tab), not a password - there's no password field on the User type at
-// all. The backend requires one regardless (userSchema/userSchemaUpdate),
-// so this derives a placeholder that satisfies its min-length-6 rule.
-// It's never shown or used as a real credential anywhere in the UI.
+// Password isn't a field on the User type (it's never round-tripped from
+// the backend - only entered transiently via the Users dialog's "Reset
+// password" input, see _shell.users.tsx). createUser hashes `password`
+// unconditionally, so a brand-new user still needs *something* here even
+// if the Owner left that field blank; this derives a placeholder from the
+// PIN that satisfies the backend's min-length-6 rule as a fallback only.
 function placeholderPassword(pin: string) {
   return `Pin${pin || "0000"}`;
 }
@@ -4240,7 +4241,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
-    upsertUser: (u) => {
+    upsertUser: (u, newPassword) => {
       const isNew = !s.users.some((x) => x.id === u.id);
       const payload = {
         active: u.status === "Active",
@@ -4248,7 +4249,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         email: u.email,
         role: u.role,
         number: u.mobile,
-        password: placeholderPassword(u.pin),
+        // The backend requires a password on create (createUser hashes it
+        // unconditionally) but only applies it on update when present
+        // (updateUser's `if (password)` guard) - so on create, fall back to
+        // a placeholder derived from the PIN only if the Owner didn't set a
+        // real one; on update, omit the field entirely unless they typed a
+        // new one, so saving an unrelated change (e.g. toggling Active)
+        // doesn't silently reset the account's real login password.
+        ...(isNew
+          ? { password: newPassword || placeholderPassword(u.pin) }
+          : newPassword
+            ? { password: newPassword }
+            : {}),
         ...(u.pin ? { pin: u.pin } : {}),
         // Best-effort role-default permissions, not a live sync of the
         // permission editor - see buildAccessNameFromRole's own comment.
