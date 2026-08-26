@@ -93,11 +93,14 @@ integration screen.
 **Next step:** scope as its own project if wanted — this is bigger than everything else
 in this plan combined. Don't fold into a single slice.
 
-### 2. 🔲 Reports — remaining polish
-The 9 "wired" report types were built against a fixed 90-day-style window with no picker.
-Consider whether Dashboard-style range controls belong on the Reports hub too, and whether
-the 4 dead-end report types (cash-session, table-performance, staff-performance, kot-report)
-should be quietly removed from the hub's list rather than left pointing at local-only data.
+### 2. ✅ Reports — date-range picker (done 2026-08-26, frontend commit `d46b420`)
+Added Dashboard's Today/Yesterday/7d/30d/Custom range control (extracted to `mock/format.ts`
+so both screens share it) to the Reports hub, wired into the 6 remote report types plus
+expense-report (the one local report with real date-bearing data). closing-stock (point-in-
+time, no history) and purchase-report (`PurchaseOrder.date` isn't real backend data) stay
+unfiltered by design. Decided **not** to remove the 4 dead-end report types from the hub -
+matches this whole migration's existing precedent (Reservations, Cash Sessions, etc. are
+still in nav too; "dead end" means no further wiring, not removal from the UI).
 
 ### 3. ✅ Real backend fixes (done 2026-08-25, backend commit `0e29291`)
 - Fixed: `getSingleOrderForAdminCart`/`editOrderClick` missing `hotel_id` filter (real
