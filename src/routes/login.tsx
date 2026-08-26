@@ -1,9 +1,10 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import { Fingerprint, KeyRound, LogIn, ShieldCheck, UtensilsCrossed } from "lucide-react";
+import { Fingerprint, KeyRound, LogIn, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
+import billerpeLogo from "@/assets/billerpe-logo.svg";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -87,13 +88,12 @@ function LoginPage() {
     <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
       <div className="relative hidden flex-col justify-between bg-sidebar p-10 text-sidebar-foreground lg:flex">
         <div className="flex items-center gap-3">
-          <span className="grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground">
-            <UtensilsCrossed className="size-5" />
+          <span className="flex h-11 items-center rounded-xl bg-white px-3 shadow-card">
+            <img src={billerpeLogo} alt="BillerPe" className="h-4 w-auto" />
           </span>
-          <div>
-            <p className="text-sm font-semibold text-sidebar-accent-foreground">BillerPe</p>
-            <p className="text-xs opacity-70">Restaurant Point of Sale</p>
-          </div>
+          <p className="text-xs text-sidebar-accent-foreground opacity-70">
+            Restaurant Point of Sale
+          </p>
         </div>
         <div className="max-w-md">
           <h1 className="text-3xl font-semibold leading-tight text-sidebar-accent-foreground">
@@ -127,11 +127,8 @@ function LoginPage() {
           animate={{ opacity: 1, y: 0 }}
           className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-raised sm:p-8"
         >
-          <div className="mb-6 flex items-center gap-3 lg:hidden">
-            <span className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground">
-              <UtensilsCrossed className="size-5" />
-            </span>
-            <p className="font-semibold">BillerPe</p>
+          <div className="mb-6 flex items-center lg:hidden">
+            <img src={billerpeLogo} alt="BillerPe" className="h-6 w-auto" />
           </div>
 
           <h2 className="text-xl font-semibold tracking-tight">Sign in</h2>

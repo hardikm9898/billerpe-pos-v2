@@ -1,5 +1,6 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
+import billerpeLogo from "@/assets/billerpe-logo.svg";
 import {
   AlertOctagon,
   AlertTriangle,
@@ -367,16 +368,17 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Link
           to="/dashboard"
           className={cn(
-            "mb-2 flex h-11 items-center overflow-hidden rounded-xl bg-primary px-2 text-primary-foreground transition-all",
-            railExpanded ? "w-[196px] justify-start gap-2" : "w-[60px] justify-center gap-0",
+            "mb-2 flex h-11 items-center overflow-hidden rounded-xl bg-white px-2 shadow-card transition-all",
+            railExpanded ? "w-[196px] justify-start" : "w-[60px] justify-center",
           )}
         >
-          <span className="grid shrink-0 size-7 place-items-center text-sm font-bold tracking-tight">
-            BP
-          </span>
           {railExpanded ? (
-            <span className="truncate text-sm font-bold tracking-tight">BillerPe</span>
-          ) : null}
+            <img src={billerpeLogo} alt="BillerPe" className="h-5 w-auto" />
+          ) : (
+            <span className="grid shrink-0 size-7 place-items-center text-sm font-bold tracking-tight text-primary">
+              BP
+            </span>
+          )}
         </Link>
         <nav
           className={cn(
@@ -473,7 +475,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </SheetTrigger>
                 <SheetContent side="left" className="w-[280px] p-0">
                   <SheetHeader className="border-b border-border px-4 py-3">
-                    <SheetTitle>BillerPe</SheetTitle>
+                    <SheetTitle>
+                      <img src={billerpeLogo} alt="BillerPe" className="h-5 w-auto" />
+                    </SheetTitle>
                   </SheetHeader>
                   <nav className="max-h-[calc(100vh-64px)] overflow-y-auto p-2">
                     {navItems.map((item) =>
