@@ -71,3 +71,64 @@ export function inRange(dateLabel: string, from: string, to: string): boolean {
   const t = parseDMY(dateLabel).getTime();
   return t >= parseDMY(from).getTime() && t <= parseDMY(to).getTime();
 }
+
+// Shared Today/Yesterday/7d/30d/Custom range picker - originally built for
+// Dashboard, now also used by the Reports hub's detail page. Synced data
+// (order history, etc.) carries real business dates, not this app's frozen
+// mock `todayLabel` (pinned to 18/08/2026 for local-only seed/demo data),
+// so both need a range anchored to the real current date or synced rows
+// would never fall inside "Today"/"Yesterday"/etc.
+export type RangeKey = "today" | "yesterday" | "7d" | "30d" | "custom";
+
+export const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
+  { key: "today", label: "Today" },
+  { key: "yesterday", label: "Yesterday" },
+  { key: "7d", label: "Last 7 Days" },
+  { key: "30d", label: "Last 30 Days" },
+  { key: "custom", label: "Custom" },
+];
+
+export function isoToDMY(iso: string) {
+  const [y, m, d] = iso.split("-");
+  return y && m && d ? `${d}/${m}/${y}` : "";
+}
+
+export function dmyToIso(dmy: string) {
+  const [d, m, y] = dmy.split("/");
+  return `${y}-${m}-${d}`;
+}
+
+export function realToday(): string {
+  const d = new Date();
+  const dd = `${d.getDate()}`.padStart(2, "0");
+  const mm = `${d.getMonth() + 1}`.padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+
+/** Resolves a RangeKey (+ custom bounds) to concrete from/to "DD/MM/YYYY" labels. */
+export function resolveRange(
+  rangeKey: RangeKey,
+  customFrom: string,
+  customTo: string,
+): { from: string; to: string; rangeLabel: string } {
+  const today = realToday();
+  switch (rangeKey) {
+    case "today":
+      return { from: today, to: today, rangeLabel: "today" };
+    case "yesterday": {
+      const d = addDays(today, -1);
+      return { from: d, to: d, rangeLabel: "yesterday" };
+    }
+    case "30d":
+      return { from: addDays(today, -29), to: today, rangeLabel: "the last 30 days" };
+    case "custom":
+      return {
+        from: isoToDMY(customFrom) || today,
+        to: isoToDMY(customTo) || today,
+        rangeLabel: "the selected range",
+      };
+    case "7d":
+    default:
+      return { from: addDays(today, -6), to: today, rangeLabel: "the last 7 days" };
+  }
+}

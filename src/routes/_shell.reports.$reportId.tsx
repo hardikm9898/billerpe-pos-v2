@@ -17,7 +17,17 @@ import {
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { ApiError, reportApi } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { REPORT_TYPES } from "@/mock/data";
+import {
+  RANGE_OPTIONS,
+  addDays,
+  dmyToIso,
+  inRange,
+  type RangeKey,
+  realToday,
+  resolveRange,
+} from "@/mock/format";
 import { orderTotals, useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/reports/$reportId")({
@@ -61,18 +71,21 @@ const REMOTE_REPORT_IDS = new Set([
   "discount-report",
 ]);
 
-// This screen has never had a date-range picker - it always showed
-// all-time data computed client-side from the local store. These
-// endpoints require a real range, so a fixed wide one preserves that same
-// "show everything" behaviour instead of adding new UI.
-const WIDE_START = "2000-01-01";
-const WIDE_END = "2100-01-01";
-
 function ReportDetailPage() {
   const { reportId } = useParams({ from: "/_shell/reports/$reportId" });
   const meta = REPORT_TYPES.find((r) => r.id === reportId);
   const store = useStore();
   const isRemote = REMOTE_REPORT_IDS.has(reportId);
+
+  const [rangeKey, setRangeKey] = useState<RangeKey>("30d");
+  const [customFrom, setCustomFrom] = useState(dmyToIso(addDays(realToday(), -6)));
+  const [customTo, setCustomTo] = useState(dmyToIso(realToday()));
+  const { from, to } = useMemo(
+    () => resolveRange(rangeKey, customFrom, customTo),
+    [rangeKey, customFrom, customTo],
+  );
+  const isoFrom = dmyToIso(from);
+  const isoTo = dmyToIso(to);
 
   const [remote, setRemote] = useState<{ headers: string[]; rows: Row[]; total: number } | null>(
     null,
@@ -89,7 +102,7 @@ function ReportDetailPage() {
         let result: { headers: string[]; rows: Row[]; total: number };
         switch (reportId) {
           case "day-wise-sales": {
-            const { periodData } = await reportApi.dayWiseSales(WIDE_START, WIDE_END);
+            const { periodData } = await reportApi.dayWiseSales(isoFrom, isoTo);
             const days = periodData.filter((p) => p.period !== "Total");
             const totalRow = periodData.find((p) => p.period === "Total");
             result = {
@@ -106,7 +119,7 @@ function ReportDetailPage() {
             break;
           }
           case "item-wise-sales": {
-            const { itemWise } = await reportApi.itemAndCategoryWiseSales(WIDE_START, WIDE_END);
+            const { itemWise } = await reportApi.itemAndCategoryWiseSales(isoFrom, isoTo);
             const r = itemWise
               .map((i) => ({
                 label: i.variant_name ? `${i.item_name} (${i.variant_name})` : i.item_name,
@@ -122,7 +135,7 @@ function ReportDetailPage() {
             break;
           }
           case "category-wise-sales": {
-            const { categoryWise } = await reportApi.itemAndCategoryWiseSales(WIDE_START, WIDE_END);
+            const { categoryWise } = await reportApi.itemAndCategoryWiseSales(isoFrom, isoTo);
             const r = categoryWise.map((c) => ({
               label: c.categoryName,
               a: c.totalQty,
@@ -136,7 +149,7 @@ function ReportDetailPage() {
             break;
           }
           case "payment-mode": {
-            const { posCollections: pc } = await reportApi.posCollection(WIDE_START, WIDE_END);
+            const { posCollections: pc } = await reportApi.posCollection(isoFrom, isoTo);
             // No per-mode transaction count comes back from this endpoint
             // (only totals) - unlike the old client-side version, which
             // counted payments directly off each order.
@@ -154,7 +167,7 @@ function ReportDetailPage() {
             break;
           }
           case "tax-report": {
-            const { posCollections: pc } = await reportApi.posCollection(WIDE_START, WIDE_END);
+            const { posCollections: pc } = await reportApi.posCollection(isoFrom, isoTo);
             const r = [
               { label: "GST", a: pc.totalBills, value: Math.round(Number(pc.totalGst)) },
               ...pc.taxBreakdown.map((t) => ({
@@ -171,7 +184,7 @@ function ReportDetailPage() {
             break;
           }
           case "discount-report": {
-            const orders = await reportApi.getAllDiscountedOrders(WIDE_START, WIDE_END);
+            const orders = await reportApi.getAllDiscountedOrders(isoFrom, isoTo);
             const r = orders.map((o) => ({
               label: `Bill #${o.bill_no}`,
               a: o.order_type,
@@ -201,21 +214,22 @@ function ReportDetailPage() {
     return () => {
       cancelled = true;
     };
-  }, [reportId, isRemote]);
+  }, [reportId, isRemote, isoFrom, isoTo]);
 
   const settled = useMemo(() => store.orders.filter((o) => o.status === "Settled"), [store.orders]);
 
   const local = useMemo(() => {
     switch (reportId) {
       case "expense-report": {
+        const inWindow = store.expenses.filter((e) => inRange(e.date, from, to));
         const map = new Map<string, number>();
-        store.expenses.forEach((e) => {
+        inWindow.forEach((e) => {
           const head = store.expenseHeads.find((h) => h.id === e.headId)?.name ?? "Other";
           map.set(head, (map.get(head) ?? 0) + e.amount);
         });
         const r = [...map.entries()].map(([label, value]) => ({
           label,
-          a: store.expenses.filter(
+          a: inWindow.filter(
             (e) => store.expenseHeads.find((h) => h.id === e.headId)?.name === label,
           ).length,
           value,
@@ -290,6 +304,11 @@ function ReportDetailPage() {
         };
       }
       case "purchase-report": {
+        // Not range-filtered: PurchaseOrder.date isn't real backend data -
+        // the create endpoint has no date column to sync (mapRawPurchaseOrder
+        // falls back to the frozen mock todayLabel) - so filtering by a real
+        // date range would just make genuinely-existing POs vanish from
+        // "Today"/"Yesterday"/"7d" rather than reflect anything real.
         const r = store.purchaseOrders.map((p) => ({
           label: p.poNo,
           a: store.suppliers.find((s) => s.id === p.supplierId)?.name ?? "—",
@@ -303,6 +322,8 @@ function ReportDetailPage() {
         };
       }
       case "closing-stock": {
+        // Not range-filtered by design - this is current on-hand stock, a
+        // point-in-time snapshot with no "as of a past date" concept.
         const r = store.rawMaterials.map((m) => ({
           label: m.name,
           a: `${m.stock} ${m.unit}`,
@@ -318,12 +339,54 @@ function ReportDetailPage() {
       default:
         return { headers: [], rows: [] as Row[], total: 0 };
     }
-  }, [reportId, settled, store]);
+  }, [reportId, settled, store, from, to]);
 
   const { headers, rows, total } = isRemote
     ? (remote ?? { headers: [], rows: [], total: 0 })
     : local;
   const paged = usePagedRows(rows, 10);
+
+  // Only the 6 remote reports and expense-report actually respond to the
+  // range - the rest are either point-in-time (closing-stock), have no real
+  // date to filter by (purchase-report - see its own comment), or are dead
+  // ends already reading whatever's in local state. No point showing a
+  // control that visibly does nothing.
+  const rangeApplies = isRemote || reportId === "expense-report";
+  const rangeControl = rangeApplies ? (
+    <div className="flex flex-wrap items-center gap-2">
+      {RANGE_OPTIONS.map((r) => (
+        <button
+          key={r.key}
+          onClick={() => setRangeKey(r.key)}
+          className={cn(
+            "rounded-full border px-3 py-1.5 text-xs font-medium transition-colors",
+            rangeKey === r.key
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-surface text-muted-foreground hover:border-primary/40",
+          )}
+        >
+          {r.label}
+        </button>
+      ))}
+      {rangeKey === "custom" ? (
+        <span className="flex items-center gap-2">
+          <input
+            type="date"
+            value={customFrom}
+            onChange={(e) => setCustomFrom(e.target.value)}
+            className="rounded-lg border border-border bg-surface px-2 py-1 text-xs"
+          />
+          <span className="text-xs text-muted-foreground">to</span>
+          <input
+            type="date"
+            value={customTo}
+            onChange={(e) => setCustomTo(e.target.value)}
+            className="rounded-lg border border-border bg-surface px-2 py-1 text-xs"
+          />
+        </span>
+      ) : null}
+    </div>
+  ) : null;
 
   if (!meta) {
     return (
@@ -356,6 +419,7 @@ function ReportDetailPage() {
               </Link>
             </Button>
           }
+          tabs={rangeControl}
         />
         <SectionCard title="Report data" bodyClassName="p-3 sm:p-4">
           <p className="py-8 text-center text-sm text-muted-foreground">Loading report…</p>
@@ -384,6 +448,7 @@ function ReportDetailPage() {
             </Button>
           </div>
         }
+        tabs={rangeControl}
       />
 
       <div className="grid gap-3 sm:grid-cols-3">

@@ -27,7 +27,17 @@ import {
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { addDays, inRange, parseDMY, todayLabel } from "@/mock/format";
+import {
+  RANGE_OPTIONS,
+  addDays,
+  dmyToIso,
+  inRange,
+  parseDMY,
+  type RangeKey,
+  realToday,
+  resolveRange,
+  todayLabel,
+} from "@/mock/format";
 import { lineTotal, orderTotals, useStore } from "@/mock/store";
 import type { TableStatus } from "@/mock/types";
 
@@ -50,42 +60,7 @@ export const Route = createFileRoute("/_shell/dashboard")({
   component: DashboardPage,
 });
 
-type RangeKey = "today" | "yesterday" | "7d" | "30d" | "custom";
-
-const RANGE_OPTIONS: { key: RangeKey; label: string }[] = [
-  { key: "today", label: "Today" },
-  { key: "yesterday", label: "Yesterday" },
-  { key: "7d", label: "Last 7 Days" },
-  { key: "30d", label: "Last 30 Days" },
-  { key: "custom", label: "Custom" },
-];
-
-function isoToDMY(iso: string) {
-  const [y, m, d] = iso.split("-");
-  return y && m && d ? `${d}/${m}/${y}` : "";
-}
-
-function dmyToIso(dmy: string) {
-  const [d, m, y] = dmy.split("/");
-  return `${y}-${m}-${d}`;
-}
-
 const tableStatuses: TableStatus[] = ["Running", "Held", "Bill Generated", "Reserved", "Free"];
-
-// Synced order history (store.orderHistory) carries real business dates
-// (e.g. 2026-08-24), not this app's frozen mock "today" (`todayLabel`,
-// pinned to 18/08/2026 for all local-only seed/demo data - see
-// mock/format.ts). Every stat on this page derived from order history
-// needs a range anchored to the real current date instead, or synced data
-// would never fall inside "Today"/"Yesterday"/etc. This is scoped to just
-// this file - the rest of the app's frozen-date seed/demo system is
-// untouched.
-function realToday(): string {
-  const d = new Date();
-  const dd = `${d.getDate()}`.padStart(2, "0");
-  const mm = `${d.getMonth() + 1}`.padStart(2, "0");
-  return `${dd}/${mm}/${d.getFullYear()}`;
-}
 const REAL_TODAY = realToday();
 
 /** Smoothly tweens the displayed number to `value` whenever it changes. */
@@ -121,27 +96,10 @@ function DashboardPage() {
   const [customFrom, setCustomFrom] = useState(dmyToIso(addDays(REAL_TODAY, -6)));
   const [customTo, setCustomTo] = useState(dmyToIso(REAL_TODAY));
 
-  const { from, to, rangeLabel } = useMemo(() => {
-    switch (rangeKey) {
-      case "today":
-        return { from: REAL_TODAY, to: REAL_TODAY, rangeLabel: "today" };
-      case "yesterday": {
-        const d = addDays(REAL_TODAY, -1);
-        return { from: d, to: d, rangeLabel: "yesterday" };
-      }
-      case "30d":
-        return { from: addDays(REAL_TODAY, -29), to: REAL_TODAY, rangeLabel: "the last 30 days" };
-      case "custom":
-        return {
-          from: isoToDMY(customFrom) || REAL_TODAY,
-          to: isoToDMY(customTo) || REAL_TODAY,
-          rangeLabel: "the selected range",
-        };
-      case "7d":
-      default:
-        return { from: addDays(REAL_TODAY, -6), to: REAL_TODAY, rangeLabel: "the last 7 days" };
-    }
-  }, [rangeKey, customFrom, customTo]);
+  const { from, to, rangeLabel } = useMemo(
+    () => resolveRange(rangeKey, customFrom, customTo),
+    [rangeKey, customFrom, customTo],
+  );
 
   const spanDays = Math.round((parseDMY(to).getTime() - parseDMY(from).getTime()) / 86400000) + 1;
   const prevTo = addDays(from, -1);
