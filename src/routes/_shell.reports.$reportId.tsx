@@ -57,12 +57,10 @@ interface Row {
 // orderRelated.js's dayWiseGrowthReport/posCollectionReport/
 // DiscountedOrdersReport/kotReport and itemRelated.js's itemTextReports
 // (which covers both item-wise and category-wise sales in one call). The
-// rest either have no backend endpoint at all (cash-session - the whole
-// feature is still local-only, same treatment as Reservations found
-// earlier this migration) or need no new wiring because they already read
-// fully backend-synced store slices with no report-specific endpoint
-// required (table-performance, staff-performance, expense-report,
-// purchase-report, closing-stock).
+// rest need no report-specific endpoint of their own - they already read
+// fully backend-synced store slices (table-performance, staff-performance,
+// expense-report, purchase-report, closing-stock, and now cash-session too
+// via loadCashSessionsFromServer/controller/cashSession.js).
 const REMOTE_REPORT_IDS = new Set([
   "day-wise-sales",
   "item-wise-sales",

@@ -28,9 +28,12 @@ import {
   recipeApi,
   expenseHeadApi,
   expenseApi,
+  cashSessionApi,
   orderHistoryApi,
   promoCodeApi,
   type RawOrderDetail,
+  type RawCashSession,
+  type RawCashMovement,
   type RawPromoCode,
   type RawUnit,
   type RawRawMaterial,
@@ -81,6 +84,7 @@ import type {
   StockUnit,
   ApprovalRule,
   AuditLog,
+  CashMovement,
   CashSession,
   ConnectionState,
   Customer,
@@ -258,7 +262,11 @@ const initialState: State = {
   stockAdjustments: stockSeed.stockAdjustments,
   productionRuns: stockSeed.productionRuns,
   requisitions: stockSeed.requisitions,
-  cashSessions: seed.pastCashSessions,
+  // Same seed-pollution issue as orders/orderHistory (see their own
+  // comment) - loadCashSessionsFromServer fully replaces this from the
+  // real backend now that one exists, so starting empty means every
+  // session shown, once loaded, is real.
+  cashSessions: [],
   devices: seed.devices,
   printers: seed.printers,
   syncItems: seed.syncItems,
@@ -528,6 +536,7 @@ interface Ctx extends State {
   closeSession: (counted: number, reason: string) => void;
   sessionBalance: () => number;
   openSessionRecord: () => CashSession | undefined;
+  loadCashSessionsFromServer: () => Promise<void>;
   /* generic crud */
   upsertMenuItem: (item: MenuItem) => void;
   removeMenuItem: (id: string) => void;
@@ -1162,6 +1171,39 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       discount: detail.totalDiscount,
       serviceCharge: detail.service_charge,
     },
+  };
+}
+
+function formatRealTimestamp(iso: string): string {
+  return new Date(iso).toLocaleString("en-IN");
+}
+
+function mapRawCashMovement(m: RawCashMovement): CashMovement {
+  return {
+    id: String(m.id),
+    type: m.type,
+    amount: m.amount,
+    reason: m.reason ?? "",
+    at: formatRealTimestamp(m.at),
+    by: m.hms_hotelUser_master?.name ?? "Staff",
+  };
+}
+
+function mapRawCashSession(s: RawCashSession): CashSession {
+  return {
+    id: String(s.id),
+    openedAt: formatRealTimestamp(s.opened_at),
+    openedBy: s.hms_hotelUser_master?.name ?? "Staff",
+    openingFloat: s.opening_float,
+    status: s.status,
+    movements: (s.hms_cashMovement_msts ?? [])
+      .slice()
+      .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+      .map(mapRawCashMovement),
+    ...(s.closed_at ? { closedAt: formatRealTimestamp(s.closed_at) } : {}),
+    ...(s.counted_cash != null ? { countedCash: s.counted_cash } : {}),
+    ...(s.variance != null ? { variance: s.variance } : {}),
+    ...(s.variance_reason ? { varianceReason: s.variance_reason } : {}),
   };
 }
 
@@ -3260,53 +3302,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       })),
 
     openSession: (float) => {
-      const session: CashSession = {
-        id: uid("cs"),
-        openedAt: nowStamp(),
-        openedBy: currentUser?.name ?? "Taj",
-        openingFloat: float,
-        status: "Open",
-        movements: [
-          {
-            id: uid("cm"),
-            type: "Opening",
-            amount: float,
-            reason: "Opening float",
-            at: nowStamp(),
-            by: currentUser?.name ?? "Taj",
-          },
-        ],
+      const run = async () => {
+        try {
+          await cashSessionApi.open(float);
+          await value.loadCashSessionsFromServer();
+          toast.success("Cash session opened", { description: `Opening float ₹${float}` });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not open cash session");
+        }
       };
-      patch((p) => ({ ...p, cashSessions: [session, ...p.cashSessions] }));
-      toast.success("Cash session opened", { description: `Opening float ₹${float}` });
+      void run();
     },
 
     addCash: (amount, reason) => {
-      patch((p) => ({
-        ...p,
-        cashSessions: p.cashSessions.map((cs) =>
-          cs.status === "Open"
-            ? {
-                ...cs,
-                movements: [
-                  ...cs.movements,
-                  {
-                    id: uid("cm"),
-                    type: "Add" as const,
-                    amount,
-                    reason,
-                    at: nowStamp(),
-                    by: currentUser?.name ?? "Taj",
-                  },
-                ],
-              }
-            : cs,
-        ),
-      }));
-      toast.success(`₹${amount} added to drawer`, { description: reason });
+      const run = async () => {
+        try {
+          await cashSessionApi.addMovement({ type: "Add", amount, reason });
+          await value.loadCashSessionsFromServer();
+          toast.success(`₹${amount} added to drawer`, { description: reason });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not add cash");
+        }
+      };
+      void run();
     },
 
     withdrawCash: (amount, reason) => {
+      // Same balance check the backend itself enforces - done here too so
+      // the dialog gets an instant answer instead of waiting on a
+      // round-trip; the server call below is still the authoritative one.
       const open = s.cashSessions.find((c) => c.status === "Open");
       const balance = open ? open.movements.reduce((sum, m) => sum + m.amount, 0) : 0;
       if (amount > balance) {
@@ -3315,92 +3339,49 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return false;
       }
-      patch((p) => ({
-        ...p,
-        cashSessions: p.cashSessions.map((cs) =>
-          cs.status === "Open"
-            ? {
-                ...cs,
-                movements: [
-                  ...cs.movements,
-                  {
-                    id: uid("cm"),
-                    type: "Withdraw" as const,
-                    amount: -amount,
-                    reason,
-                    at: nowStamp(),
-                    by: currentUser?.name ?? "Taj",
-                  },
-                ],
-              }
-            : cs,
-        ),
-      }));
-      log("Cash Withdrawn", "Cash Session", `₹${balance}`, `₹${balance - amount}`, reason);
-      toast.success(`₹${amount} withdrawn`, { description: reason });
+      const run = async () => {
+        try {
+          await cashSessionApi.addMovement({ type: "Withdraw", amount, reason });
+          await value.loadCashSessionsFromServer();
+          log("Cash Withdrawn", "Cash Session", `₹${balance}`, `₹${balance - amount}`, reason);
+          toast.success(`₹${amount} withdrawn`, { description: reason });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not withdraw cash");
+        }
+      };
+      void run();
       return true;
     },
 
     attachExpense: (headId, amount, note) => {
       const head = s.expenseHeads.find((h) => h.id === headId);
-      patch((p) => ({
-        ...p,
-        expenses: [
-          {
-            id: uid("e"),
-            headId,
-            amount,
-            date: todayLabel,
-            mode: "Cash",
-            note,
-            createdBy: currentUser?.name ?? "Taj",
-          },
-          ...p.expenses,
-        ],
-        cashSessions: p.cashSessions.map((cs) =>
-          cs.status === "Open"
-            ? {
-                ...cs,
-                movements: [
-                  ...cs.movements,
-                  {
-                    id: uid("cm"),
-                    type: "Expense" as const,
-                    amount: -amount,
-                    reason: `${head?.name ?? "Expense"} — ${note}`,
-                    at: nowStamp(),
-                    by: currentUser?.name ?? "Taj",
-                  },
-                ],
-              }
-            : cs,
-        ),
-      }));
-      toast.success("Expense attached to session", { description: `${head?.name} · ₹${amount}` });
-
-      // Cash Sessions have no backend representation at all (confirmed
-      // earlier this session - no hotel_id/status/cashier on the model,
-      // no controller code touches it) - the movement above stays purely
-      // local. The expense entry itself is real though, so it's synced.
       const headBackendId = headId.startsWith("eh-")
         ? Number(headId.replace("eh-", ""))
         : undefined;
-      if (!headBackendId) return;
       const run = async () => {
         try {
-          await expenseApi.create({
-            expense_head_id: headBackendId,
+          if (headBackendId) {
+            await expenseApi.create({
+              expense_head_id: headBackendId,
+              amount,
+              paymentMode: "Cash",
+              reason: note,
+              addExpense: true,
+            });
+            await value.loadExpensesFromServer();
+          }
+          await cashSessionApi.addMovement({
+            type: "Expense",
             amount,
-            paymentMode: "Cash",
-            reason: note,
-            addExpense: true,
+            reason: `${head?.name ?? "Expense"} — ${note}`,
           });
-          await value.loadExpensesFromServer();
+          await value.loadCashSessionsFromServer();
+          toast.success("Expense attached to session", {
+            description: `${head?.name} · ₹${amount}`,
+          });
         } catch (err) {
           toast.error(
-            err instanceof ApiError
-              ? err.message
-              : "Attached to the cash session locally but the backend sync failed",
+            err instanceof ApiError ? err.message : "Could not attach expense to cash session",
           );
         }
       };
@@ -3411,28 +3392,31 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const open = s.cashSessions.find((c) => c.status === "Open");
       if (!open) return;
       const expected = open.movements.reduce((sum, m) => sum + m.amount, 0);
-      patch((p) => ({
-        ...p,
-        cashSessions: p.cashSessions.map((cs) =>
-          cs.id === open.id
-            ? {
-                ...cs,
-                status: "Closed",
-                closedAt: nowStamp(),
-                countedCash: counted,
-                variance: counted - expected,
-                ...(reason ? { varianceReason: reason } : {}),
-              }
-            : cs,
-        ),
-      }));
-      log("Cash Session Closed", open.id, `Expected ₹${expected}`, `Counted ₹${counted}`, reason);
-      toast.success("Cash session closed", {
-        description:
-          counted === expected
-            ? "No variance recorded."
-            : `Variance ₹${counted - expected} recorded with explanation.`,
-      });
+      const run = async () => {
+        try {
+          await cashSessionApi.close({
+            counted_cash: counted,
+            variance_reason: reason || undefined,
+          });
+          await value.loadCashSessionsFromServer();
+          log(
+            "Cash Session Closed",
+            open.id,
+            `Expected ₹${expected}`,
+            `Counted ₹${counted}`,
+            reason,
+          );
+          toast.success("Cash session closed", {
+            description:
+              counted === expected
+                ? "No variance recorded."
+                : `Variance ₹${counted - expected} recorded with explanation.`,
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not close cash session");
+        }
+      };
+      void run();
     },
 
     sessionBalance: () => {
@@ -3440,6 +3424,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return open ? open.movements.reduce((sum, m) => sum + m.amount, 0) : 0;
     },
     openSessionRecord: () => s.cashSessions.find((c) => c.status === "Open"),
+
+    loadCashSessionsFromServer: async () => {
+      try {
+        const { sessions } = await cashSessionApi.getSessions();
+        patch((p) => ({ ...p, cashSessions: sessions.map(mapRawCashSession) }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load cash sessions from server",
+        );
+      }
+    },
 
     loadMenuFromServer: async () => {
       const menuId = s.menus.find((m) => m.isDefault)?.id ?? s.menus[0]?.id ?? "menu-default";

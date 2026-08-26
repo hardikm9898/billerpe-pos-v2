@@ -1581,6 +1581,47 @@ export const expenseApi = {
   remove: (id: number) => apiDelete<{ message?: string }>("/expense/deleteExpense", { id }),
 };
 
+export type RawCashMovement = {
+  id: number;
+  type: "Opening" | "Add" | "Withdraw" | "Expense" | "Settlement";
+  amount: number;
+  reason: string | null;
+  at: string;
+  hotelUserId: number | null;
+  hms_hotelUser_master?: { id: number; name: string } | null;
+};
+
+export type RawCashSession = {
+  id: number;
+  opening_float: number;
+  status: "Open" | "Closed";
+  opened_at: string;
+  closed_at: string | null;
+  counted_cash: number | null;
+  variance: number | null;
+  variance_reason: string | null;
+  hotelUserId: number | null;
+  hms_hotelUser_master?: { id: number; name: string } | null;
+  hms_cashMovement_msts?: RawCashMovement[];
+};
+
+// controller/cashSession.js. One open drawer per hotel at a time (server
+// rejects a second /open while one is already Open) - amount is always
+// positive in the request; the server flips the sign for Withdraw/Expense
+// before storing it, matching the frontend's own sign convention.
+export const cashSessionApi = {
+  getSessions: () => apiGet<{ sessions: RawCashSession[] }>("/cashSession"),
+  open: (opening_float: number) =>
+    apiPost<{ session: RawCashSession }>("/cashSession/open", { opening_float }),
+  addMovement: (params: {
+    type: "Add" | "Withdraw" | "Expense" | "Settlement";
+    amount: number;
+    reason: string;
+  }) => apiPost<{ movement: RawCashMovement }>("/cashSession/movement", params),
+  close: (params: { counted_cash: number; variance_reason?: string }) =>
+    apiPost<{ session: RawCashSession; expected: number }>("/cashSession/close", params),
+};
+
 export type RawDayWisePeriod = {
   period: string;
   totalAmount: number;

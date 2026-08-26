@@ -326,6 +326,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [store.authed]);
 
   useEffect(() => {
+    if (store.authed) void store.loadCashSessionsFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.authed]);
+
+  useEffect(() => {
     if (store.authed) void store.loadPromoCodesFromServer();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.authed]);
