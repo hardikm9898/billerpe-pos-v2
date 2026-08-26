@@ -83,16 +83,17 @@ function OrderCartPage() {
   // Opening a table starts it "Held" with zero items (see startOrder's own
   // comment). removeLine/changeQty already free the table the moment the
   // LAST item is removed, but a table that never had any item added at all
-  // never fires that path - it just sits Held forever. This catches that
-  // case on the way out, however the user leaves (back button, another nav
-  // click, closing the tab mid-navigation), not just one specific button.
-  useEffect(() => {
-    return () => {
-      const o = store.orderById(orderId);
-      if (o && o.lines.length === 0) store.freeIfEmpty(o.id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderId]);
+  // never fires that path - it just sits Held forever. Fixed at every
+  // explicit "leave this screen" action below (goToTables) rather than an
+  // unmount effect - an unmount can fire from framework-internal remounts
+  // (e.g. a route re-render) with no real user action behind it, which
+  // free'd tables that were still genuinely being opened for the first
+  // time (confirmed live - this showed up as an immediate "Order not
+  // found" right after clicking a table).
+  const goToTables = () => {
+    if (order && order.lines.length === 0) store.freeIfEmpty(order.id);
+    navigate({ to: "/table-grid" });
+  };
 
   // Barcode wedge - a scanner types fast (<60ms between keystrokes) and
   // ends with Enter, a human doesn't. Matches keyboard-display.tsx's
@@ -250,7 +251,7 @@ function OrderCartPage() {
       {/* menu side */}
       <div className="flex min-h-0 flex-col border-b border-border lg:border-b-0 lg:border-r">
         <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-          <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/table-grid" })}>
+          <Button variant="ghost" size="sm" onClick={goToTables}>
             <ArrowLeft className="size-4" /> Tables
           </Button>
           {store.menus.length > 1 ? (
@@ -624,7 +625,7 @@ function OrderCartPage() {
               disabled={settled}
               onClick={() => {
                 store.holdOrder(order.id);
-                navigate({ to: "/table-grid" });
+                goToTables();
               }}
             >
               <Pause className="size-4" /> Hold
@@ -633,7 +634,7 @@ function OrderCartPage() {
               variant="outline"
               disabled={settled || !order.lines.length}
               onClick={() => {
-                void store.generateBill(order.id).then(() => navigate({ to: "/table-grid" }));
+                void store.generateBill(order.id).then(() => goToTables());
               }}
             >
               <Save className="size-4" /> Save
@@ -646,7 +647,7 @@ function OrderCartPage() {
               disabled={settled}
               onClick={() => {
                 store.generateKot(order.id);
-                navigate({ to: "/table-grid" });
+                goToTables();
               }}
               className={cn(pendingRound && "border-primary text-primary")}
             >
@@ -657,7 +658,7 @@ function OrderCartPage() {
               disabled={!order.customerPhone}
               onClick={() => {
                 void store.sendEBill(order.id);
-                navigate({ to: "/table-grid" });
+                goToTables();
               }}
             >
               <Send className="size-4" /> E-Bill
@@ -666,9 +667,7 @@ function OrderCartPage() {
               variant="secondary"
               disabled={settled || !order.lines.length}
               onClick={() => {
-                void store
-                  .generateBill(order.id, { print: true })
-                  .then(() => navigate({ to: "/table-grid" }));
+                void store.generateBill(order.id, { print: true }).then(() => goToTables());
               }}
             >
               <Printer className="size-4" /> Bill Print
@@ -1053,7 +1052,7 @@ function OrderCartPage() {
                 }
                 store.settleOrder(order.id, splits);
                 setSettleOpen(false);
-                navigate({ to: "/table-grid" });
+                goToTables();
               }}
             >
               <Wallet className="size-4" /> {isRefund ? "Confirm refund" : "Confirm settlement"}

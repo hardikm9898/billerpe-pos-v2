@@ -128,17 +128,6 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const order = store.orderById(orderId);
   const totals = useBillTotals(order);
 
-  // See _shell.table-grid.order.$orderId.tsx's identical effect - opening a
-  // table/pickup order starts it "Held" with zero items, and nothing frees
-  // it again if the user never adds anything and just navigates away.
-  useEffect(() => {
-    return () => {
-      const o = store.orderById(orderId);
-      if (o && o.lines.length === 0) store.freeIfEmpty(o.id);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderId]);
-
   /* search + entry */
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
@@ -281,7 +270,17 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const newLines = order?.lines.filter((l) => l.kotRound > (order?.kotRounds ?? 0)) ?? [];
   const settled = order?.status === "Settled" || order?.status === "Cancelled";
 
+  // Opening a table/pickup order starts it "Held" with zero items (see
+  // startOrder's own comment). removeLine/changeQty already free it the
+  // moment the LAST item is removed, but a draft that never had anything
+  // added never fires that path. Fixed here (the one place every "leave
+  // this order" action funnels through) rather than an unmount effect - an
+  // unmount can fire from framework-internal remounts with no real user
+  // action behind it, which free'd tables that were still genuinely being
+  // opened for the first time (confirmed live as an immediate "Order not
+  // found" right after clicking a table).
   const moveToNewOrder = () => {
+    if (order && order.lines.length === 0) store.freeIfEmpty(order.id);
     const nextId = store.startDefaultOrder();
     navigate({ to: "/keyboard-billing/$orderId", params: { orderId: nextId }, replace: true });
   };
@@ -480,6 +479,9 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
               <li key={o.id}>
                 <button
                   onClick={() => {
+                    if (order && order.id !== o.id && order.lines.length === 0) {
+                      store.freeIfEmpty(order.id);
+                    }
                     if (o.status === "Held") store.saveOrder(o.id);
                     navigate({
                       to: "/keyboard-billing/$orderId",
@@ -883,7 +885,11 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
       <MoveKotDialog round={moveKotRound} order={order} onClose={() => setMoveKotRound(null)} />
       <NoteDialog line={noteLine} order={order} onClose={() => setNoteLine(null)} />
       <AddonDialog line={addonLine} order={order} onClose={() => setAddonLine(null)} />
-      <NewOrderDialog open={newOrderOpen} onOpenChange={setNewOrderOpen} />
+      <NewOrderDialog
+        open={newOrderOpen}
+        onOpenChange={setNewOrderOpen}
+        currentOrderId={order?.id}
+      />
       <CustomItemDialog
         open={customItemOpen}
         onOpenChange={setCustomItemOpen}
@@ -1831,9 +1837,11 @@ export function AddonDialog({
 function NewOrderDialog({
   open,
   onOpenChange,
+  currentOrderId,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
+  currentOrderId?: string;
 }) {
   const store = useStore();
   const navigate = useNavigate();
@@ -1845,6 +1853,10 @@ function NewOrderDialog({
   }, [open]);
 
   const openOrder = (id: string) => {
+    if (currentOrderId && currentOrderId !== id) {
+      const current = store.orderById(currentOrderId);
+      if (current && current.lines.length === 0) store.freeIfEmpty(current.id);
+    }
     onOpenChange(false);
     navigate({ to: "/keyboard-billing/$orderId", params: { orderId: id } });
   };
