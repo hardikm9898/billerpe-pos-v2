@@ -53,16 +53,16 @@ interface Row {
   value: number;
 }
 
-// controller/reports/*.js has real backend endpoints for these six -
+// controller/reports/*.js has real backend endpoints for these seven -
 // orderRelated.js's dayWiseGrowthReport/posCollectionReport/
-// DiscountedOrdersReport and itemRelated.js's itemTextReports (which
-// covers both item-wise and category-wise sales in one call). The rest
-// either have no backend endpoint at all (cash-session, table-performance,
-// staff-performance, kot-report - dead ends, same treatment as
-// Reservations/Cash Sessions found earlier this migration) or need no new
-// wiring because they already read fully backend-synced store slices with
-// no report-specific endpoint required (expense-report, purchase-report,
-// closing-stock).
+// DiscountedOrdersReport/kotReport and itemRelated.js's itemTextReports
+// (which covers both item-wise and category-wise sales in one call). The
+// rest either have no backend endpoint at all (cash-session - the whole
+// feature is still local-only, same treatment as Reservations found
+// earlier this migration) or need no new wiring because they already read
+// fully backend-synced store slices with no report-specific endpoint
+// required (table-performance, staff-performance, expense-report,
+// purchase-report, closing-stock).
 const REMOTE_REPORT_IDS = new Set([
   "day-wise-sales",
   "item-wise-sales",
@@ -70,6 +70,7 @@ const REMOTE_REPORT_IDS = new Set([
   "payment-mode",
   "tax-report",
   "discount-report",
+  "kot-report",
 ]);
 
 function ReportDetailPage() {
@@ -198,6 +199,20 @@ function ReportDetailPage() {
             };
             break;
           }
+          case "kot-report": {
+            const { periodData } = await reportApi.kotReport(isoFrom, isoTo);
+            const r = periodData.map((p) => ({
+              label: p.period,
+              a: p.totalOrders,
+              value: p.totalTickets,
+            }));
+            result = {
+              headers: ["Business date", "Orders", "KOT tickets"],
+              rows: r,
+              total: r.reduce((s, x) => s + x.value, 0),
+            };
+            break;
+          }
           default:
             result = { headers: [], rows: [], total: 0 };
         }
@@ -308,16 +323,6 @@ function ReportDetailPage() {
           headers: ["Staff", "Orders", "Revenue"],
           rows: r as Row[],
           total: r.reduce((s, x) => s + x.value, 0),
-        };
-      }
-      case "kot-report": {
-        const map = new Map<string, number>();
-        store.kots.forEach((k) => map.set(k.status, (map.get(k.status) ?? 0) + 1));
-        const r = [...map.entries()].map(([label, value]) => ({ label, value }));
-        return {
-          headers: ["KOT status", "Tickets"],
-          rows: r as Row[],
-          total: store.kots.length,
         };
       }
       case "purchase-report": {

@@ -1594,6 +1594,12 @@ export type RawDayWisePeriod = {
   totalOrders: number;
 };
 
+export type RawKotReportPeriod = {
+  period: string;
+  totalTickets: number;
+  totalOrders: number;
+};
+
 export type RawItemWiseRow = {
   item_name: string;
   variant_name: string;
@@ -1667,6 +1673,13 @@ export const reportApi = {
   posCollection: (startDate: string, endDate: string) =>
     apiGet<{ posCollections: RawPosCollection }>(
       `/report/posCollection?startDate=${startDate}&endDate=${endDate}`,
+    ),
+  // controller/reports/orderRelated.js#kotReport (GET /report/kotReport) -
+  // day-wise count of real KOT tickets fired, from hms_timeline_mst rows
+  // with action "kot" (a true event log, not derived/guessed).
+  kotReport: (startDate: string, endDate: string) =>
+    apiGet<{ periodData: RawKotReportPeriod[]; totalTickets: number }>(
+      `/report/kotReport?startDate=${startDate}&endDate=${endDate}`,
     ),
   discountedOrdersPage: (startDate: string, endDate: string, page: number) =>
     apiGet<{
