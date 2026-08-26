@@ -1,6 +1,6 @@
 import { Link, createFileRoute, useParams } from "@tanstack/react-router";
 import { ArrowLeft, BarChart3, Download } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -29,6 +29,7 @@ import {
   resolveRange,
 } from "@/mock/format";
 import { orderTotals, useStore } from "@/mock/store";
+import type { Order } from "@/mock/types";
 
 export const Route = createFileRoute("/_shell/reports/$reportId")({
   head: () => ({
@@ -216,7 +217,23 @@ function ReportDetailPage() {
     };
   }, [reportId, isRemote, isoFrom, isoTo]);
 
-  const settled = useMemo(() => store.orders.filter((o) => o.status === "Settled"), [store.orders]);
+  // Settled orders live in orderHistory, not orders (loadTablesFromServer's
+  // active-orders sync explicitly excludes anything already paid) - reading
+  // store.orders here meant table-performance/staff-performance always saw
+  // zero real settled orders. allOrders() merges both, deduped by backendId.
+  const settled = useMemo(
+    () => store.allOrders().filter((o) => o.status === "Settled"),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [store.orders, store.orderHistory],
+  );
+  // Historical rows carry real backendTotals from the moment they were
+  // settled - preferring those over a fresh orderTotals() recompute avoids
+  // drift from today's tax/service-charge config (same reasoning as
+  // _shell.orders.index.tsx's own totalsOf).
+  const grandTotalOf = useCallback(
+    (o: Order) => o.backendTotals?.grand ?? orderTotals(o, store).grand,
+    [store],
+  );
 
   const local = useMemo(() => {
     switch (reportId) {
@@ -259,7 +276,7 @@ function ReportDetailPage() {
           const cur = map.get(o.tableLabel) ?? { covers: 0, turns: 0, value: 0 };
           cur.covers += o.guests;
           cur.turns += 1;
-          cur.value += orderTotals(o, store).grand;
+          cur.value += grandTotalOf(o);
           map.set(o.tableLabel, cur);
         });
         const r = [...map.entries()].map(([label, v]) => ({
@@ -279,7 +296,7 @@ function ReportDetailPage() {
         settled.forEach((o) => {
           const cur = map.get(o.createdBy) ?? { orders: 0, value: 0 };
           cur.orders += 1;
-          cur.value += orderTotals(o, store).grand;
+          cur.value += grandTotalOf(o);
           map.set(o.createdBy, cur);
         });
         const r = [...map.entries()].map(([label, v]) => ({
@@ -339,7 +356,7 @@ function ReportDetailPage() {
       default:
         return { headers: [], rows: [] as Row[], total: 0 };
     }
-  }, [reportId, settled, store, from, to]);
+  }, [reportId, settled, store, from, to, grandTotalOf]);
 
   const { headers, rows, total } = isRemote
     ? (remote ?? { headers: [], rows: [], total: 0 })
