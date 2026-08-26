@@ -121,7 +121,7 @@ function TableGridPage() {
     navigate({ to: "/table-grid/order/$orderId", params: { orderId } });
   };
 
-  const openOrder = (table: RestaurantTable) => {
+  const openOrder = async (table: RestaurantTable) => {
     if (store.transactionsBlocked) {
       toast.error("Transactions blocked", {
         description: "Reconnect to the local server or resolve the offline limit first.",
@@ -130,6 +130,23 @@ function TableGridPage() {
     }
     if (table.orderId) {
       openBiller(table.orderId);
+      return;
+    }
+    if (table.status !== "Free") {
+      // The table's own status can come back "occupied" from the server
+      // a beat before the order that occupies it shows up in the active-
+      // orders sync (e.g. a KOT just fired on another terminal) - resync
+      // once and retry before giving up, rather than silently starting a
+      // brand-new empty order on top of whatever's really running there.
+      await store.loadTablesFromServer();
+      const refreshed = store.tableById(table.id);
+      if (refreshed?.orderId) {
+        openBiller(refreshed.orderId);
+      } else {
+        toast.error("Could not open this table's order", {
+          description: "It shows occupied but its order couldn't be found — try again shortly.",
+        });
+      }
       return;
     }
     openBiller(store.startOrder(table.id));
@@ -154,7 +171,7 @@ function TableGridPage() {
         key={t.id}
         whileHover={{ y: -2 }}
         whileTap={{ scale: 0.98 }}
-        onClick={() => openOrder(t)}
+        onClick={() => void openOrder(t)}
         className={cn(
           "flex min-h-[5.5rem] flex-col justify-between rounded-xl border p-2 text-left shadow-card transition-colors",
           statusStyles[t.status],
