@@ -3,7 +3,7 @@ import { Truck } from "lucide-react";
 import { useState } from "react";
 
 import { Page, PageHeader, SectionCard, StatCard } from "@/components/kit";
-import { ChipSelect } from "@/components/operations/shared";
+import { ChipSelect, OpsNav } from "@/components/operations/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -51,6 +51,7 @@ function DeliveryChargePage() {
         title="Delivery & Packaging Charge"
         description="Same rule engine as Service Charge — active toggle, type, auto-apply order types and tax treatment. Billers can still override the computed amount per order."
       />
+      <OpsNav active="delivery-charge" />
 
       <div className="grid gap-3 sm:grid-cols-2">
         <StatCard
