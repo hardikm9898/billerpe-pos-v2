@@ -25,12 +25,26 @@ import { useStore } from "@/mock/store";
 import { cn } from "@/lib/utils";
 import { authApi, ApiError } from "@/lib/api";
 
+// crypto.randomUUID() only exists in secure contexts (HTTPS, or the page's
+// own localhost) - undefined (throws "not a function") on a plain-HTTP LAN
+// address like http://192.168.1.33:8080, which this POS is routinely
+// accessed at on a restaurant's own local network. Falls back to a manual
+// RFC4122 v4 generator there instead of failing every login on that origin.
+function randomUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 function getDeviceId() {
   if (typeof window === "undefined") return "server";
   const key = "billerpe.deviceId";
   let id = window.localStorage.getItem(key);
   if (!id) {
-    id = crypto.randomUUID();
+    id = randomUUID();
     window.localStorage.setItem(key, id);
   }
   return id;
