@@ -195,7 +195,11 @@ export const ROLE_PERMISSION_DEFAULTS: Record<Role, RolePermissions> = {
     menu: FULL,
     tables: FULL,
     reservations: FULL,
-    users: EDIT,
+    // Owner-only by default (matches the request: nobody but Owner starts
+    // with Users access, or the ability to grant it - Owner can hand
+    // `users` access to Manager or any other role from the Users screen's
+    // own permission editor if they choose to).
+    users: NONE,
     permissions: NONE,
     reports: VIEW,
     expense: EDIT,
