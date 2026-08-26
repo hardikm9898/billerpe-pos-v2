@@ -655,6 +655,18 @@ export function InvoiceFormatSection() {
                   onCheckedChange={(v) => update({ multiLanguage: v })}
                 />
               </div>
+              <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-3">
+                <div>
+                  <p className="text-sm font-medium">Show QR on UPI settle</p>
+                  <p className="text-xs text-muted-foreground">
+                    Auto-open a scannable UPI QR when UPI is selected while settling a bill.
+                  </p>
+                </div>
+                <Switch
+                  checked={store.qrOnSettle}
+                  onCheckedChange={(v) => store.setQrOnSettle(v)}
+                />
+              </div>
             </div>
           </SectionCard>
 

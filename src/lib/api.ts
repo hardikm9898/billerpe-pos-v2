@@ -165,9 +165,16 @@ export const hotelApi = {
       invoiceFormateBottomText: string | null;
       printerSize: string | null;
       hms_serviceCharge_mst: RawServiceCharge | null;
+      hms_res_setting: { qr_code_open_on_settle: boolean } | null;
     }>("/singleHotel"),
   updateUpiId: (upiId: string) =>
     apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: { upiId } }),
+
+  // POST /updateRestaurantSetting (controller/hotel.js) - the only
+  // writable field on RestaurantSetting right now (see its own comment on
+  // why it's scoped this narrowly).
+  updateQrOnSettle: (qr_code_open_on_settle: boolean) =>
+    apiPost<{ message?: string }>("/updateRestaurantSetting", { qr_code_open_on_settle }),
 
   // One row per hotel - addEditServiceCharge upserts based on whether a
   // row already exists (its own findOne check), but its update branch's
@@ -263,6 +270,14 @@ export const tableApi = {
   // reading controller/table.js#moveTable in full.
   moveTable: (params: { tableId1: number; tableId2: number; orderId: number }) =>
     apiPost<{ message?: string; orderId: number }>("/moveTable", params),
+
+  // controller/table.js#moveKot (POST /moveKot) - moves just one KOT round
+  // (not the whole order) to another table. Same merge-if-occupied /
+  // plain-move-otherwise split as moveTable, at the round level: folds into
+  // table2's existing order (as a new round there) if one exists, else
+  // creates a fresh order on table2 seeded from just this round.
+  moveKot: (params: { orderId: number; kotNumber: number; tableId1: number; tableId2: number }) =>
+    apiPost<{ message?: string; orderId: number }>("/moveKot", params),
 };
 
 export type RawMenuCategory = {
@@ -641,27 +656,15 @@ export const orderApi = {
   // Renders the bill via Puppeteer and returns the PDF as a raw byte
   // array inside JSON (`{type:"Buffer", data:[...]}`), not a URL or
   // base64 - reconstruct with `new Uint8Array(pdf.data)`. Item addons are
-  // expected in a `{department_name, hms_addon_msts:[{addon_name,qty,
-  // price}]}[]` shape this app's own OrderLine.addons (flat
-  // {name,price}[]) doesn't carry - omitted from the printed bill rather
-  // than sent in a fabricated shape.
+  // now sent in the real `{department_name, hms_addon_msts:[{addon_name,
+  // qty, price}]}[]` shape (see buildAddonsPayload in mock/store.tsx).
   //
-  // Puppeteer's browser-launch path is keyed off `data.origin ===
-  // "http://localhost:3000"` exactly (an unrelated hardcoded dev port,
-  // confirmed by reading generateInvoicePDF) - any other origin, which is
-  // every origin this app will ever actually run on, falls through to a
-  // `/usr/bin/google-chrome-stable` path that doesn't exist on this
-  // Windows dev backend (confirmed live: the sibling generateKotPdf 500s
-  // outright, this endpoint instead silently returns `pdf:{}`, an empty
-  // object, with no error). The endpoint does produce a real PDF - this
-  // was confirmed by resending the exact same request with an Origin
-  // header spoofed to that hardcoded value and getting back real PDF
-  // bytes - but that's not something a real browser's fetch can do (the
-  // browser controls the Origin header, not app code). In a real Linux
-  // production deployment with Chrome installed at that path, real
-  // traffic would take the same branch that already works here, since
-  // production origins won't be "localhost:3000" either - there's just
-  // no way to verify that end-to-end from this dev environment.
+  // Puppeteer's browser-launch path used to be keyed off `data.origin ===
+  // "http://localhost:3000"` exactly, falling through to a hardcoded
+  // `/usr/bin/google-chrome-stable` path for every other origin (i.e.
+  // every real deployment) - fixed backend-side to use `CHROME_PATH` env
+  // var instead (falls back to Puppeteer's bundled Chromium), so this
+  // works from any origin now.
   generateInvoicePdf: (payload: {
     orderId: number;
     printerSize: string;
@@ -679,6 +682,7 @@ export const orderApi = {
       price: number;
       totalAmount: number;
       variantData?: { variants_name: string } | null;
+      addons?: KotCartItem["addons"];
     }[];
     totalQty: number;
     subtotal: number;
@@ -698,6 +702,30 @@ export const orderApi = {
       "/generateInvoicePdf",
       payload,
     ),
+
+  // controller/kto.js#kotGeneratePdf (POST /generateKotPdf). Renders a
+  // single KOT round's ticket (item/qty/note/addons only, no pricing) -
+  // used for the Reprint KOT action, since there's no separate "already
+  // sent" record to look up server-side, the caller re-supplies the same
+  // round's item list it already has locally. Same raw-byte-array PDF
+  // response shape as generateInvoicePdf.
+  printKot: (payload: {
+    order_type: "dinin" | "pickup";
+    order_id: string;
+    restaurantName: string;
+    userOrTableNo: string;
+    timeAndDate: string;
+    printerSize: string;
+    kotNumber: number;
+    token: number;
+    items: {
+      item_name: string;
+      qty: number;
+      comment?: string;
+      variantData?: { variants_name: string } | null;
+      addons?: KotCartItem["addons"];
+    }[];
+  }) => apiPost<{ pdf: { type: "Buffer"; data: number[] } }>("/generateKotPdf", payload),
 
   // controller/order.js#getTimeLineByOrderId (GET /getTimelineByOrderId).
   // One row per real workflow event fired via addToTimeLine/

@@ -14,7 +14,6 @@ import {
   Plus,
   PlusSquare,
   Printer,
-  QrCode,
   Receipt,
   Save,
   ScanLine,
@@ -34,6 +33,7 @@ import {
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/kit";
+import { UpiQrPanel } from "@/components/operations/payment-split-editor";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -128,6 +128,17 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const order = store.orderById(orderId);
   const totals = useBillTotals(order);
 
+  // See _shell.table-grid.order.$orderId.tsx's identical effect - opening a
+  // table/pickup order starts it "Held" with zero items, and nothing frees
+  // it again if the user never adds anything and just navigates away.
+  useEffect(() => {
+    return () => {
+      const o = store.orderById(orderId);
+      if (o && o.lines.length === 0) store.cancelOrder(o.id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId]);
+
   /* search + entry */
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
@@ -141,6 +152,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const [discountOpen, setDiscountOpen] = useState(false);
   const [customerOpen, setCustomerOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
+  const [moveKotRound, setMoveKotRound] = useState<number | null>(null);
   const [noteLine, setNoteLine] = useState<OrderLine | null>(null);
   const [addonLine, setAddonLine] = useState<OrderLine | null>(null);
   const [newOrderOpen, setNewOrderOpen] = useState(false);
@@ -741,6 +753,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                     order={order}
                     onNote={setNoteLine}
                     onAddon={setAddonLine}
+                    onMoveKot={setMoveKotRound}
                   />
                 ) : null,
               )
@@ -867,6 +880,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
       />
       <CustomerDialog open={customerOpen} onOpenChange={setCustomerOpen} order={order} />
       <MoveTableDialog open={moveOpen} onOpenChange={setMoveOpen} order={order} />
+      <MoveKotDialog round={moveKotRound} order={order} onClose={() => setMoveKotRound(null)} />
       <NoteDialog line={noteLine} order={order} onClose={() => setNoteLine(null)} />
       <AddonDialog line={addonLine} order={order} onClose={() => setAddonLine(null)} />
       <NewOrderDialog open={newOrderOpen} onOpenChange={setNewOrderOpen} />
@@ -952,23 +966,30 @@ function CartGroup({
   order,
   onNote,
   onAddon,
+  onMoveKot,
 }: {
   state: LineState;
   lines: OrderLine[];
   order: Order;
   onNote: (l: OrderLine) => void;
   onAddon: (l: OrderLine) => void;
+  onMoveKot: (round: number) => void;
 }) {
   const store = useStore();
   const meta = stateMeta[state];
   const editable = state === "H";
 
-  const oldestKot =
+  const kotsInGroup =
     state === "K"
       ? store.kots
           .filter((k) => k.orderId === order.id && lines.some((l) => l.kotRound === k.round))
-          .sort((a, b) => elapsedMinutes(b.createdAt) - elapsedMinutes(a.createdAt))[0]
-      : undefined;
+          .sort((a, b) => elapsedMinutes(b.createdAt) - elapsedMinutes(a.createdAt))
+      : [];
+  const oldestKot = kotsInGroup[0];
+  // One row can span multiple KOT rounds (round 1 sent, then more items
+  // added and sent as round 2, both still "K" until served) - reprint/move
+  // are per-round, so list each round actually present, newest first.
+  const roundsInGroup = [...new Set(kotsInGroup.map((k) => k.round))].sort((a, b) => b - a);
 
   return (
     <div>
@@ -1002,6 +1023,37 @@ function CartGroup({
           {lines.length} item(s)
         </span>
       </div>
+
+      {roundsInGroup.length ? (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface px-3 py-1.5">
+          {roundsInGroup.map((round) => (
+            <span
+              key={round}
+              className="flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground"
+            >
+              Round {round}
+              <button
+                type="button"
+                className="ml-1 rounded p-0.5 hover:bg-surface-muted hover:text-foreground"
+                onClick={() => void store.printKot(order.id, round)}
+                aria-label={`Reprint KOT round ${round}`}
+              >
+                <Printer className="size-3" />
+              </button>
+              {order.type === "Dine In" ? (
+                <button
+                  type="button"
+                  className="rounded p-0.5 hover:bg-surface-muted hover:text-foreground"
+                  onClick={() => onMoveKot(round)}
+                  aria-label={`Move KOT round ${round}`}
+                >
+                  <ArrowLeftRight className="size-3" />
+                </button>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       <ul className="divide-y divide-border">
         {lines.map((l, i) => (
@@ -1065,13 +1117,15 @@ function CartGroup({
                   onFocus={(e) => e.currentTarget.select()}
                   onBlur={(e) => {
                     const v = Number(e.currentTarget.value);
-                    if (Number.isFinite(v) && v !== l.qty) store.setLineQty(order.id, l.id, v);
+                    if (Number.isFinite(v) && v !== l.qty)
+                      store.setLineQty(order.id, l.id, v, "keyboard-billing");
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === "ArrowDown" || e.key === "ArrowUp") {
                       e.preventDefault();
                       const v = Number(e.currentTarget.value);
-                      if (Number.isFinite(v) && v !== l.qty) store.setLineQty(order.id, l.id, v);
+                      if (Number.isFinite(v) && v !== l.qty)
+                        store.setLineQty(order.id, l.id, v, "keyboard-billing");
                       const next = e.key === "ArrowUp" ? i - 1 : i + 1;
                       const el = document.querySelector<HTMLInputElement>(
                         `[data-qty-row="${next}"]`,
@@ -1119,7 +1173,7 @@ function CartGroup({
                     size="icon"
                     variant="ghost"
                     className="size-8 text-destructive"
-                    onClick={() => store.removeLine(order.id, l.id)}
+                    onClick={() => store.removeLine(order.id, l.id, "keyboard-billing")}
                     aria-label="Remove line"
                   >
                     <Trash2 className="size-3.5" />
@@ -1520,6 +1574,51 @@ function MoveTableDialog({
               onClick={() => {
                 store.transferTable(order.id, t.id);
                 onOpenChange(false);
+              }}
+            >
+              <span className="num text-sm font-semibold">{t.name}</span>
+              <span className="text-[10px] text-muted-foreground">{t.seats} seats</span>
+            </Button>
+          ))}
+          {free.length === 0 ? (
+            <p className="col-span-3 text-sm text-muted-foreground">No free tables right now.</p>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export function MoveKotDialog({
+  round,
+  order,
+  onClose,
+}: {
+  round: number | null;
+  order: Order;
+  onClose: () => void;
+}) {
+  const store = useStore();
+  const free = store.tables.filter((t) => t.status === "Free" && t.id !== order.tableId);
+  return (
+    <Dialog open={round !== null} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Move KOT round {round}</DialogTitle>
+          <DialogDescription>
+            Pick a free table to move round {round}&apos;s items to. The rest of order #
+            {order.orderNo} stays on {order.tableLabel}.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid max-h-72 grid-cols-3 gap-2 overflow-y-auto scrollbar-slim">
+          {free.map((t) => (
+            <Button
+              key={t.id}
+              variant="outline"
+              className="h-14 flex-col"
+              onClick={() => {
+                if (round !== null) void store.moveKot(order.id, round, t.id);
+                onClose();
               }}
             >
               <span className="num text-sm font-semibold">{t.name}</span>
@@ -1958,6 +2057,7 @@ function SettleDialog({
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
   const paid = splits.reduce((s, p) => s + p.amount, 0);
   const due = Math.round((grand - paid) * 100) / 100;
+  const upiAmount = splits.filter((p) => p.mode === "UPI").reduce((s, p) => s + p.amount, 0);
 
   useEffect(() => {
     if (open) setSplits([]);
@@ -1992,16 +2092,9 @@ function SettleDialog({
                 </Button>
               ))}
           </div>
-          <div className="flex w-28 shrink-0 flex-col items-center justify-center gap-1.5 rounded-xl border border-border bg-surface-muted/60 p-2">
-            <span className="grid aspect-square w-full place-items-center rounded-lg border border-border bg-surface">
-              <QrCode className="size-14 text-foreground" />
-            </span>
-            <p className="text-center text-[10px] leading-tight text-muted-foreground">
-              Scan to pay
-              <br />
-              <span className="num">{RESTAURANT.name.toLowerCase().replace(/\s+/g, "")}@upi</span>
-            </p>
-          </div>
+          {store.qrOnSettle && store.invoiceFormat.upiId && upiAmount > 0 ? (
+            <UpiQrPanel upiId={store.invoiceFormat.upiId} amount={upiAmount} />
+          ) : null}
         </div>
 
         <ul className="space-y-2">

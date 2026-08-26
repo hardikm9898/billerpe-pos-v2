@@ -1,14 +1,55 @@
 import { Plus, X } from "lucide-react";
+import QRCode from "qrcode";
+import { useEffect, useState } from "react";
 
 import { Money } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
 import type { PaymentSplit } from "@/mock/types";
 
 export function splitPaid(splits: PaymentSplit[]) {
   return splits.reduce((s, p) => s + p.amount, 0);
+}
+
+// Mirrors uat-backend's own QR construction (controller/kto.js's
+// getHearderAndFooterData: pa left unencoded, pn/tn encoded, cu fixed to
+// INR) and InvoiceFormatSection's settings-preview QR - generated
+// client-side since it's a pure function of (upiId, amount), gated by the
+// RestaurantSetting.qr_code_open_on_settle toggle (store.qrOnSettle).
+export function UpiQrPanel({ upiId, amount }: { upiId: string; amount: number }) {
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!upiId || amount <= 0) {
+      setDataUrl(null);
+      return;
+    }
+    const merchantName = encodeURIComponent(RESTAURANT.name);
+    const transactionNote = encodeURIComponent(`Bill Payment - ${amount}`);
+    const upiUrl = `upi://pay?pa=${upiId}&pn=${merchantName}&tn=${transactionNote}&am=${amount}&cu=INR`;
+    let cancelled = false;
+    QRCode.toDataURL(upiUrl, { width: 160, margin: 2 })
+      .then((url) => {
+        if (!cancelled) setDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [upiId, amount]);
+
+  if (!dataUrl) return null;
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-xl border border-border p-3">
+      <img src={dataUrl} alt="UPI payment QR code" className="size-40" />
+      <p className="num text-xs text-muted-foreground">Scan to pay ₹{amount} via UPI</p>
+    </div>
+  );
 }
 
 /** Multi-row payment split editor — one or more modes that must add up to `total`. */
@@ -25,9 +66,13 @@ export function PaymentSplitEditor({
   const activeModes = store.paymentModes.filter((m) => m.active);
   const paid = splitPaid(splits);
   const due = Math.round((total - paid) * 100) / 100;
+  const upiAmount = splits.filter((p) => p.mode === "UPI").reduce((s, p) => s + p.amount, 0);
 
   return (
     <div className="space-y-2">
+      {store.qrOnSettle && store.invoiceFormat.upiId && upiAmount > 0 ? (
+        <UpiQrPanel upiId={store.invoiceFormat.upiId} amount={upiAmount} />
+      ) : null}
       <div className="rounded-xl bg-surface-muted p-3">
         <div className="flex items-center justify-between text-sm">
           <span>Total</span>

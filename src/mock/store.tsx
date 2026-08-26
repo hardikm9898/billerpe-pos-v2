@@ -126,6 +126,11 @@ import type {
 let seq = 1000;
 const uid = (p: string) => `${p}-${++seq}`;
 
+/** The two billing screens each carry their own permission grant - callers
+ * that mutate a cart line pass which one they're on so the right module's
+ * delete permission gets checked once a line was already sent to KOT. */
+export type BillingModule = Extract<PermissionModule, "biller" | "keyboard-billing">;
+
 export interface AddLineInput {
   itemId: string;
   qty?: number;
@@ -191,6 +196,9 @@ interface State {
   packagingChargeRule: BillChargeRule;
   taxRules: TaxRule[];
   invoiceFormat: InvoiceFormat;
+  /** RestaurantSetting.qr_code_open_on_settle - auto-shows a scannable UPI
+   * QR in the settle dialog when UPI is selected. */
+  qrOnSettle: boolean;
   promoCodes: PromoCode[];
   paymentModes: PaymentModeConfig[];
   kitchens: Kitchen[];
@@ -266,6 +274,7 @@ const initialState: State = {
   packagingChargeRule: opsSeed.packagingChargeRule,
   taxRules: opsSeed.taxRules,
   invoiceFormat: opsSeed.invoiceFormat,
+  qrOnSettle: false,
   promoCodes: opsSeed.promoCodes,
   paymentModes: opsSeed.paymentModes,
   kitchens: opsSeed.kitchens,
@@ -468,8 +477,8 @@ interface Ctx extends State {
   startDefaultOrder: () => string;
   setOrderType: (orderId: string, type: OrderType) => void;
   addLine: (orderId: string, input: AddLineInput) => void;
-  changeQty: (orderId: string, lineId: string, delta: number) => void;
-  setLineQty: (orderId: string, lineId: string, qty: number) => void;
+  changeQty: (orderId: string, lineId: string, delta: number, module: BillingModule) => void;
+  setLineQty: (orderId: string, lineId: string, qty: number, module: BillingModule) => void;
   setLineNote: (orderId: string, lineId: string, note: string) => void;
   setLinePrice: (orderId: string, lineId: string, price: number) => void;
   setLineAddons: (
@@ -477,7 +486,7 @@ interface Ctx extends State {
     lineId: string,
     addons: NonNullable<OrderLine["addons"]>,
   ) => void;
-  removeLine: (orderId: string, lineId: string) => void;
+  removeLine: (orderId: string, lineId: string, module: BillingModule) => void;
 
   holdOrder: (orderId: string) => void;
   saveOrder: (orderId: string) => void;
@@ -492,6 +501,7 @@ interface Ctx extends State {
   generateBill: (orderId: string, options?: { print?: boolean }) => Promise<void>;
   settleOrder: (orderId: string, payments: PaymentSplit[]) => void;
   mergeTables: (sourceTableId: string, destTableId: string) => void;
+  moveKot: (orderId: string, round: number, destTableId: string) => Promise<void>;
   transferTable: (orderId: string, destTableId: string) => void;
   /* kds */
   setKotStatus: (kotId: string, status: Kot["status"]) => void;
@@ -620,6 +630,7 @@ interface Ctx extends State {
   removeTaxRule: (id: string) => void;
   toggleTaxRule: (id: string) => void;
   setInvoiceFormat: (fmt: InvoiceFormat) => void;
+  setQrOnSettle: (on: boolean) => void;
   setGstCalculation: (on: boolean) => void;
   upsertPromo: (promo: PromoCode) => void;
   togglePromo: (id: string) => void;
@@ -650,6 +661,7 @@ interface Ctx extends State {
   setMaxOfflineDays: (days: number) => void;
   sendEBill: (orderId: string) => Promise<boolean>;
   printBill: (orderId: string) => Promise<void>;
+  printKot: (orderId: string, round: number) => Promise<void>;
 }
 
 // uat-backend/model/table.js: table_status is R/F/P/H/B, not the mock's
@@ -1680,8 +1692,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const footerText = hotel.invoiceFormateBottomText
         ? [`<p>${hotel.invoiceFormateBottomText}</p>`]
         : [];
-      // Addon detail is dropped here (see orderApi.generateInvoicePdf's
-      // own comment on the department-grouped shape it actually wants).
       const { pdf } = await orderApi.generateInvoicePdf({
         orderId: backendId,
         printerSize: hotel.printerSize ?? "1",
@@ -1697,6 +1707,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           price: l.price,
           totalAmount: lineTotal(l),
           variantData: l.variant ? { variants_name: l.variant } : null,
+          addons: buildAddonsPayload(l.addons),
         })),
         totalQty: o.lines.reduce((sum, l) => sum + l.qty, 0),
         subtotal: t.subtotal,
@@ -1717,6 +1728,51 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Bill ready to print");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
+    }
+  };
+
+  // Reprint KOT - renders just one already-sent round's ticket (items/qty/
+  // note/addons only, no pricing), matching controller/kto.js#reprintkot's
+  // real KOT template. There's no "fetch this round back" endpoint, so this
+  // re-supplies the round's item list from local state, same as every other
+  // print helper here.
+  const doPrintKot = async (o: Order, round: number) => {
+    try {
+      const lines = o.lines.filter((l) => l.kotRound === round);
+      if (!lines.length) {
+        toast.error("No items found for this KOT round");
+        return;
+      }
+      const hotel = await hotelApi.getSettings();
+      const kot = s.kots.find((k) => k.orderId === o.id && k.round === round);
+      const userOrTableNo =
+        o.type === "Dine In"
+          ? o.tableLabel
+          : o.customerName
+            ? `Customer: ${o.customerName}`
+            : "Pickup";
+      const { pdf } = await orderApi.printKot({
+        order_type: o.type === "Dine In" ? "dinin" : "pickup",
+        order_id: String(o.orderNo),
+        restaurantName: hotel.hotel_name,
+        userOrTableNo,
+        timeAndDate: kot?.createdAt ?? o.createdAt,
+        printerSize: hotel.printerSize ?? "1",
+        kotNumber: round,
+        token: 0,
+        items: lines.map((l) => ({
+          item_name: l.name,
+          qty: l.qty,
+          comment: l.note ?? "",
+          variantData: l.variant ? { variants_name: l.variant } : null,
+          addons: buildAddonsPayload(l.addons),
+        })),
+      });
+      const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
+      window.open(URL.createObjectURL(blob), "_blank");
+      toast.success("KOT ready to print");
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not generate the KOT PDF");
     }
   };
 
@@ -1972,9 +2028,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
-    changeQty: (orderId, lineId, delta) => {
+    changeQty: (orderId, lineId, delta, module) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
+      // Dropping an already-sent line's qty to zero removes it just like
+      // removeLine does - same delete permission applies, or a Cashier-role
+      // user could bypass the Trash-button block just by using the stepper.
+      if (
+        line &&
+        order &&
+        line.qty + delta <= 0 &&
+        line.kotRound <= order.kotRounds &&
+        guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
+      ) {
+        return;
+      }
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
@@ -2002,9 +2070,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
-    setLineQty: (orderId, lineId, qty) => {
+    setLineQty: (orderId, lineId, qty, module) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
+      if (
+        line &&
+        order &&
+        Math.max(0, Math.round(qty)) <= 0 &&
+        line.kotRound <= order.kotRounds &&
+        guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
+      ) {
+        return;
+      }
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
@@ -2097,9 +2174,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
-    removeLine: (orderId, lineId) => {
+    removeLine: (orderId, lineId, module) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
+      if (
+        line &&
+        order &&
+        line.kotRound <= order.kotRounds &&
+        guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
+      ) {
+        return;
+      }
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
@@ -3667,8 +3752,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // this app's InvoiceFormat stays local-only.
     loadInvoiceFormatFromServer: async () => {
       try {
-        const { upiId } = await hotelApi.getSettings();
-        patch((p) => ({ ...p, invoiceFormat: { ...p.invoiceFormat, upiId: upiId ?? "" } }));
+        const { upiId, hms_res_setting } = await hotelApi.getSettings();
+        patch((p) => ({
+          ...p,
+          invoiceFormat: { ...p.invoiceFormat, upiId: upiId ?? "" },
+          qrOnSettle: hms_res_setting?.qr_code_open_on_settle ?? false,
+        }));
       } catch (err) {
         toast.error(
           err instanceof ApiError ? err.message : "Could not load billing settings from server",
@@ -5281,6 +5370,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
       toast.success("Invoice format saved");
     },
+    setQrOnSettle: (on) => {
+      patch((p) => ({ ...p, qrOnSettle: on }));
+      const run = async () => {
+        try {
+          await hotelApi.updateQrOnSettle(on);
+          toast.success(on ? "UPI QR will auto-open at settle" : "UPI QR auto-open disabled");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Saved locally, but this didn't sync",
+          );
+        }
+      };
+      void run();
+    },
     setGstCalculation: (on) => {
       patch((p) => ({ ...p, invoiceFormat: { ...p.invoiceFormat, gstCalculation: on } }));
       toast[on ? "success" : "warning"](
@@ -5788,6 +5891,34 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return;
       }
       await doPrintBill(o, o.backendId);
+    },
+    printKot: async (orderId, round) => {
+      const o =
+        s.orders.find((x) => x.id === orderId) ?? s.orderHistory.find((x) => x.id === orderId);
+      if (!o) return;
+      await doPrintKot(o, round);
+    },
+    moveKot: async (orderId, round, destTableId) => {
+      const o = s.orders.find((x) => x.id === orderId);
+      if (!o) return;
+      if (!o.backendId || !o.tableId) {
+        toast.error("This KOT round hasn't been sent to the kitchen yet");
+        return;
+      }
+      const destLabel = tableLabel(destTableId);
+      try {
+        await tableApi.moveKot({
+          orderId: o.backendId,
+          kotNumber: round,
+          tableId1: Number(o.tableId),
+          tableId2: Number(destTableId),
+        });
+        await value.loadTablesFromServer();
+        log("KOT Moved", `Round ${round} · ${o.tableLabel}`, o.tableLabel, destLabel);
+        toast.success(`KOT round ${round} moved to ${destLabel}`);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not move this KOT round");
+      }
     },
   };
 

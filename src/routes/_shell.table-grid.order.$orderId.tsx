@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import {
   ArrowLeft,
+  ArrowLeftRight,
   BadgePercent,
   ChefHat,
   Minus,
@@ -20,12 +21,13 @@ import {
   User,
   Wallet,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
   AddonDialog,
   AddonPicker,
+  MoveKotDialog,
   NoteDialog,
   type SelectedAddon,
 } from "@/components/billing/keyboard-display";
@@ -78,6 +80,67 @@ function OrderCartPage() {
   const navigate = useNavigate();
   const order = store.orderById(orderId);
 
+  // Opening a table starts it "Held" with zero items (see startOrder's own
+  // comment). removeLine/changeQty already free the table the moment the
+  // LAST item is removed, but a table that never had any item added at all
+  // never fires that path - it just sits Held forever. This catches that
+  // case on the way out, however the user leaves (back button, another nav
+  // click, closing the tab mid-navigation), not just one specific button.
+  useEffect(() => {
+    return () => {
+      const o = store.orderById(orderId);
+      if (o && o.lines.length === 0) store.cancelOrder(o.id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId]);
+
+  // Barcode wedge - a scanner types fast (<60ms between keystrokes) and
+  // ends with Enter, a human doesn't. Matches keyboard-display.tsx's
+  // identical listener (that screen had it, this one didn't).
+  useEffect(() => {
+    let buffer = "";
+    let last = 0;
+    let fast = 0;
+    const onKey = (e: KeyboardEvent) => {
+      const now = performance.now();
+      const gap = now - last;
+      last = now;
+      if (e.key.length === 1) {
+        if (gap > 60) {
+          buffer = e.key;
+          fast = 0;
+        } else {
+          buffer += e.key;
+          fast += 1;
+        }
+        return;
+      }
+      if (e.key === "Enter") {
+        const isScan = buffer.length >= 4 && fast >= 3 && gap < 120;
+        const code = buffer;
+        buffer = "";
+        fast = 0;
+        if (!isScan || !order) return;
+        const item = store.menuItems.find(
+          (i) =>
+            i.active &&
+            (i.id.toLowerCase() === code.toLowerCase() ||
+              i.name.toLowerCase() === code.toLowerCase()),
+        );
+        e.preventDefault();
+        e.stopPropagation();
+        if (!item) {
+          toast.error("Barcode not recognised", { description: code });
+          return;
+        }
+        store.addLine(order.id, { itemId: item.id, qty: 1 });
+        toast.success(`Scanned · ${item.name}`);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [order, store]);
+
   const [categoryId, setCategoryId] = useState("all");
   const [query, setQuery] = useState("");
   const [configItem, setConfigItem] = useState<MenuItem | null>(null);
@@ -97,6 +160,7 @@ function OrderCartPage() {
   const [customPrice, setCustomPrice] = useState(0);
   const [noteLineFor, setNoteLineFor] = useState<OrderLine | null>(null);
   const [addonLineFor, setAddonLineFor] = useState<OrderLine | null>(null);
+  const [moveKotRound, setMoveKotRound] = useState<number | null>(null);
   const [customQty, setCustomQty] = useState(1);
   const [chargesOpen, setChargesOpen] = useState(false);
   const [deliveryOverride, setDeliveryOverride] = useState(0);
@@ -370,9 +434,35 @@ function OrderCartPage() {
                 const editable = round > order.kotRounds && !settled;
                 return (
                   <div key={round}>
-                    <p className="mb-1.5 inline-block rounded bg-surface-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-                      {round > order.kotRounds ? "New — not sent" : `KOT ${round}`}
-                    </p>
+                    <div className="mb-1.5 flex items-center gap-1.5">
+                      <p className="inline-block rounded bg-surface-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                        {round > order.kotRounds ? "New — not sent" : `KOT ${round}`}
+                      </p>
+                      {round <= order.kotRounds ? (
+                        <>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="size-6"
+                            onClick={() => void store.printKot(order.id, round)}
+                            aria-label={`Reprint KOT round ${round}`}
+                          >
+                            <Printer className="size-3.5" />
+                          </Button>
+                          {order.type === "Dine In" ? (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="size-6"
+                              onClick={() => setMoveKotRound(round)}
+                              aria-label={`Move KOT round ${round}`}
+                            >
+                              <ArrowLeftRight className="size-3.5" />
+                            </Button>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
                     <ul className="space-y-2">
                       {lines.map((l) => (
                         <li key={l.id} className="rounded-xl border border-border p-3">
@@ -423,7 +513,7 @@ function OrderCartPage() {
                                   variant="outline"
                                   className="size-7"
                                   disabled={settled}
-                                  onClick={() => store.changeQty(order.id, l.id, -1)}
+                                  onClick={() => store.changeQty(order.id, l.id, -1, "biller")}
                                 >
                                   <Minus className="size-3.5" />
                                 </Button>
@@ -435,7 +525,7 @@ function OrderCartPage() {
                                   variant="outline"
                                   className="size-7"
                                   disabled={settled}
-                                  onClick={() => store.changeQty(order.id, l.id, 1)}
+                                  onClick={() => store.changeQty(order.id, l.id, 1, "biller")}
                                 >
                                   <Plus className="size-3.5" />
                                 </Button>
@@ -468,7 +558,7 @@ function OrderCartPage() {
                                   variant="ghost"
                                   className="size-7 text-primary"
                                   disabled={settled}
-                                  onClick={() => store.removeLine(order.id, l.id)}
+                                  onClick={() => store.removeLine(order.id, l.id, "biller")}
                                 >
                                   <Trash2 className="size-3.5" />
                                 </Button>
@@ -806,6 +896,32 @@ function OrderCartPage() {
             value={discountValue}
             onChange={(e) => setDiscountValue(Number(e.target.value) || 0)}
           />
+          {store.promoCodes.filter((p) => p.active).length ? (
+            <div>
+              <Label className="text-xs text-muted-foreground">Promo codes</Label>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {store.promoCodes
+                  .filter((p) => p.active)
+                  .map((p) => (
+                    <Button
+                      key={p.id}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const amount =
+                          p.type === "percent"
+                            ? Math.round(totals.subtotal * (p.value / 100))
+                            : p.value;
+                        store.applyDiscount(order.id, p.code, amount);
+                        setDiscountOpen(false);
+                      }}
+                    >
+                      {p.code}
+                    </Button>
+                  ))}
+              </div>
+            </div>
+          ) : null}
           <DialogFooter>
             <Button
               variant="outline"
@@ -948,6 +1064,7 @@ function OrderCartPage() {
 
       <NoteDialog line={noteLineFor} order={order} onClose={() => setNoteLineFor(null)} />
       <AddonDialog line={addonLineFor} order={order} onClose={() => setAddonLineFor(null)} />
+      <MoveKotDialog round={moveKotRound} order={order} onClose={() => setMoveKotRound(null)} />
     </div>
   );
 }
