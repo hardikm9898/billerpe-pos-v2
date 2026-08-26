@@ -785,7 +785,6 @@ function toShortCode(sku: string | undefined, name: string, seed: string): strin
 }
 
 function mapRawUser(u: RawHotelUser): User {
-  const accessByName = new Map((u.hms_user_accesses ?? []).map((a) => [a.access_name, a]));
   return {
     id: String(u.id),
     name: u.name,
@@ -805,24 +804,20 @@ function mapRawUser(u: RawHotelUser): User {
     // way to display or re-derive it. Left blank; only a re-save sets a
     // new one.
     pin: "",
-    permissionOverrides: (() => {
-      const modules: Partial<Record<PermissionModule, Partial<ModuleGrant>>> = {};
-      for (const [permModule, backendArea] of Object.entries(MODULE_TO_ACCESS_AREA) as [
-        PermissionModule,
-        string,
-      ][]) {
-        const access = accessByName.get(backendArea);
-        if (access) {
-          modules[permModule] = {
-            view: access.read,
-            create: access.create,
-            edit: access.edit,
-            delete: access.delete,
-          };
-        }
-      }
-      return Object.keys(modules).length ? { modules } : undefined;
-    })(),
+    // permissionOverrides deliberately isn't seeded from the real
+    // backend's own hms_user_accesses here (used to be, via
+    // MODULE_TO_ACCESS_AREA) - those are coarse legacy CRUD flags on the
+    // real account, and letting them populate an override meant a real
+    // backend admin account's own broad access silently beat whatever
+    // role default or explicit grant was set in this app's own Users/
+    // Permissions screen (e.g. a Manager showing up with Users access
+    // despite the role default being NONE, because the authenticated
+    // backend account happened to have broad legacy access). This app's
+    // own role-based system + explicit per-user overrides (set via
+    // updateUserPermissionOverrides) is the intended source of truth for
+    // gating features inside this app - callers that load users are
+    // expected to carry forward any existing local override (see
+    // loadUsersFromServer) rather than relying on this function for it.
   };
 }
 
@@ -3820,7 +3815,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     loadUsersFromServer: async () => {
       try {
         const { hotelUsers } = await userApi.getUsers();
-        patch((p) => ({ ...p, users: hotelUsers.map(mapRawUser) }));
+        patch((p) => ({
+          ...p,
+          // A per-user override set locally via updateUserPermissionOverrides
+          // (the Users screen's own permission editor) must survive a
+          // resync - mapRawUser always returns a fresh user with no
+          // override of its own, so carry the existing one forward by id
+          // rather than letting every reload silently wipe an Owner's
+          // explicit grant back to the role default.
+          users: hotelUsers.map((u) => {
+            const fresh = mapRawUser(u);
+            const existing = p.users.find((x) => x.id === fresh.id);
+            return existing?.permissionOverrides
+              ? { ...fresh, permissionOverrides: existing.permissionOverrides }
+              : fresh;
+          }),
+        }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load users from server");
       }
