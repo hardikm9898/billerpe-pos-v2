@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ChevronDown, KeySquare, Plus, RotateCcw, Users } from "lucide-react";
 import { useState } from "react";
 
+import { useHasPendingRequests } from "@/components/app/GlobalLoadingBar";
 import { DataTable, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import {
@@ -196,6 +197,8 @@ function UsersPage() {
   const [resetPassword, setResetPassword] = useState("");
   const [showOverrides, setShowOverrides] = useState(false);
   const [viewRole, setViewRole] = useState<Role>("Manager");
+  const hasPending = useHasPendingRequests();
+  const usersLoading = store.users.length === 0 && hasPending;
 
   const canEditPermissions = store.can("permissions", "edit");
   const canEditUsers = store.can("users", "edit");
@@ -278,6 +281,7 @@ function UsersPage() {
       <SectionCard title={`${store.users.length} staff accounts`} bodyClassName="p-3 sm:p-4">
         <DataTable
           rows={store.users}
+          loading={usersLoading}
           keyFn={(u) => u.id}
           onRowClick={(u) => {
             setDraft({ ...u });

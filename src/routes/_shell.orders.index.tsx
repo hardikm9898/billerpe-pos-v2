@@ -20,6 +20,7 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
+import { useHasPendingRequests } from "@/components/app/GlobalLoadingBar";
 import {
   BulkActionsBar,
   DataTable,
@@ -173,6 +174,11 @@ function OrdersPage() {
     [store.orders, store.orderHistory, status, q],
   );
   const paged = usePagedRows(rows, 10);
+  // Only while genuinely empty AND a request is still in flight - once
+  // real rows show up, an unrelated in-flight request elsewhere shouldn't
+  // ever replace them with a skeleton again.
+  const hasPending = useHasPendingRequests();
+  const loading = rows.length === 0 && hasPending;
 
   useEffect(() => setSelected([]), [status, q]);
 
@@ -289,6 +295,7 @@ function OrdersPage() {
 
         <DataTable
           rows={paged.pageRows}
+          loading={loading}
           keyFn={(o) => o.id}
           onRowClick={(o) => navigate({ to: "/orders/$orderId", params: { orderId: o.id } })}
           empty={
