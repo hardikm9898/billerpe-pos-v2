@@ -4,7 +4,10 @@ import { Fingerprint, KeyRound, LogIn, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
-import billerpeLogo from "@/assets/billerpe-logo.svg";
+// image.png is white-on-transparent (for the dark left panel); the mobile
+// header sits on the light sign-in card, so it needs the dark-on-white SVG.
+import billerpeLogoOnDark from "@/assets/image.png";
+import billerpeLogoOnLight from "@/assets/billerpe-logo.svg";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -88,9 +91,17 @@ function LoginPage() {
     <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
       <div className="relative hidden flex-col justify-between bg-sidebar p-10 text-sidebar-foreground lg:flex">
         <div className="flex items-center gap-3">
-          <span className="flex h-11 items-center rounded-xl bg-white px-3 shadow-card">
-            <img src={billerpeLogo} alt="BillerPe" className="h-4 w-auto" />
-          </span>
+          {/* image.png is the full lockup (wordmark + "Powered by ITLION"
+              tagline, ~4.12:1) - cropped to just the wordmark band via a
+              wide container + object-top, rather than shrinking the whole
+              lockup down to fit. */}
+          <div className="h-8 w-[220px] shrink-0 overflow-hidden">
+            <img
+              src={billerpeLogoOnDark}
+              alt="BillerPe"
+              className="h-full w-full object-cover object-top"
+            />
+          </div>
           <p className="text-xs text-sidebar-accent-foreground opacity-70">
             Restaurant Point of Sale
           </p>
@@ -128,7 +139,7 @@ function LoginPage() {
           className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-raised sm:p-8"
         >
           <div className="mb-6 flex items-center lg:hidden">
-            <img src={billerpeLogo} alt="BillerPe" className="h-6 w-auto" />
+            <img src={billerpeLogoOnLight} alt="BillerPe" className="h-7 w-auto" />
           </div>
 
           <h2 className="text-xl font-semibold tracking-tight">Sign in</h2>

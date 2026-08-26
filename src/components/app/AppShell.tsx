@@ -1,6 +1,9 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
-import billerpeLogo from "@/assets/billerpe-logo.svg";
+// image.png is white-on-transparent (for the dark sidebar); the mobile nav
+// sheet has a light surface, so it needs the dark-on-white SVG instead.
+import billerpeLogoOnDark from "@/assets/image.png";
+import billerpeLogoOnLight from "@/assets/billerpe-logo.svg";
 import billerpeMark from "@/assets/billerpe-mark.jpeg";
 import {
   AlertOctagon,
@@ -369,17 +372,28 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Link
           to="/dashboard"
           className={cn(
-            "mb-2 flex h-11 items-center overflow-hidden rounded-xl bg-white px-2 shadow-card transition-all",
+            "mb-2 flex h-11 items-center overflow-hidden rounded-xl px-2 transition-all",
             railExpanded ? "w-[196px] justify-start" : "w-[60px] justify-center",
           )}
         >
           {railExpanded ? (
-            <img src={billerpeLogo} alt="BillerPe" className="h-5 w-auto" />
+            // image.png is the full lockup (wordmark + "Powered by ITLION"
+            // tagline, ~4.12:1). Cropped to just the wordmark band via a
+            // ~8.5:1 container + object-top, rather than shrinking the
+            // whole lockup down to fit - keeps the actual logotype large
+            // and legible instead of the tagline eating into its size.
+            <div className="h-6 w-[170px] shrink-0 overflow-hidden">
+              <img
+                src={billerpeLogoOnDark}
+                alt="BillerPe"
+                className="h-full w-full object-cover object-top"
+              />
+            </div>
           ) : (
             <img
               src={billerpeMark}
               alt="BillerPe"
-              className="size-7 shrink-0 rounded-md object-cover"
+              className="size-8 shrink-0 rounded-md object-cover"
             />
           )}
         </Link>
@@ -479,7 +493,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <SheetContent side="left" className="w-[280px] p-0">
                   <SheetHeader className="border-b border-border px-4 py-3">
                     <SheetTitle>
-                      <img src={billerpeLogo} alt="BillerPe" className="h-5 w-auto" />
+                      <img src={billerpeLogoOnLight} alt="BillerPe" className="h-6 w-auto" />
                     </SheetTitle>
                   </SheetHeader>
                   <nav className="max-h-[calc(100vh-64px)] overflow-y-auto p-2">
