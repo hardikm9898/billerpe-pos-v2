@@ -33,32 +33,52 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { RESTAURANT, connectionStateLabels } from "@/mock/data";
 import { useStore } from "@/mock/store";
-import type { ConnectionState } from "@/mock/types";
+import type { ConnectionState, PermissionModule } from "@/mock/types";
+
+interface NavChild {
+  label: string;
+  to: string;
+  /** Which permission module gates this specific link - undefined means
+   * "same as the parent item's own module(s)". */
+  module?: PermissionModule;
+}
 
 interface NavItem {
   code: string;
   label: string;
   icon: LucideIcon;
   to?: string;
-  children?: { label: string; to: string }[];
+  /** view-gated by store.can(module, "view") - an array means "visible if
+   * the user can view ANY of these" (e.g. Stock's several sub-modules).
+   * Undefined (Profile/Help) means always visible - nothing to gate. */
+  module?: PermissionModule | PermissionModule[];
+  children?: NavChild[];
 }
 
 export const NAV: NavItem[] = [
-  { code: "DSH", label: "Dashboard", icon: LayoutDashboard, to: "/dashboard" },
-  { code: "BIL", label: "Biller", icon: UtensilsCrossed, to: "/table-grid" },
-  { code: "KBD", label: "Keyboard Billing", icon: Keyboard, to: "/keyboard-billing" },
-  { code: "KDS", label: "Kitchen Display", icon: ChefHat, to: "/kds" },
-  { code: "ORD", label: "Orders", icon: Receipt, to: "/orders" },
+  { code: "DSH", label: "Dashboard", icon: LayoutDashboard, to: "/dashboard", module: "dashboard" },
+  { code: "BIL", label: "Biller", icon: UtensilsCrossed, to: "/table-grid", module: "biller" },
+  {
+    code: "KBD",
+    label: "Keyboard Billing",
+    icon: Keyboard,
+    to: "/keyboard-billing",
+    module: "keyboard-billing",
+  },
+  { code: "KDS", label: "Kitchen Display", icon: ChefHat, to: "/kds", module: "kds" },
+  { code: "ORD", label: "Orders", icon: Receipt, to: "/orders", module: "orders" },
   {
     code: "MEN",
     label: "Menu",
     icon: Store,
+    module: "menu",
     children: [
       { label: "Categories", to: "/menu/categories" },
       { label: "Items", to: "/menu/items" },
@@ -71,26 +91,46 @@ export const NAV: NavItem[] = [
     code: "TBL",
     label: "Table",
     icon: CalendarDays,
+    module: ["tables", "reservations"],
     children: [
-      { label: "Table Category", to: "/tables/categories" },
-      { label: "Manage Table", to: "/tables/manage" },
-      { label: "Reservations", to: "/reservations" },
+      { label: "Table Category", to: "/tables/categories", module: "tables" },
+      { label: "Manage Table", to: "/tables/manage", module: "tables" },
+      { label: "Reservations", to: "/reservations", module: "reservations" },
     ],
   },
-  { code: "USR", label: "Manage Users", icon: Users, to: "/users" },
-  { code: "RPT", label: "Reports", icon: BarChart3, to: "/reports" },
+  { code: "USR", label: "Manage Users", icon: Users, to: "/users", module: "users" },
+  { code: "RPT", label: "Reports", icon: BarChart3, to: "/reports", module: "reports" },
   {
     code: "EXP",
     label: "Expense",
     icon: Wallet,
+    module: "expense",
     children: [
       { label: "Expense Head", to: "/expense/heads" },
       { label: "Expense Entry", to: "/expense/entries" },
     ],
   },
-  { code: "STK", label: "Stock", icon: Boxes, to: "/stock" },
-  { code: "CSH", label: "Opening & Closing", icon: Wallet, to: "/cash-session" },
-  { code: "OPS", label: "Operations", icon: Settings2, to: "/operations" },
+  {
+    code: "STK",
+    label: "Stock",
+    icon: Boxes,
+    to: "/stock",
+    module: ["stock-masters", "stock-transactions", "stock-recipes", "stock-reports"],
+  },
+  {
+    code: "CSH",
+    label: "Opening & Closing",
+    icon: Wallet,
+    to: "/cash-session",
+    module: "cash-session",
+  },
+  {
+    code: "OPS",
+    label: "Operations",
+    icon: Settings2,
+    to: "/operations",
+    module: ["ops-billing", "ops-hardware", "ops-experience", "ops-ledger", "approval-matrix"],
+  },
   { code: "PRF", label: "Profile", icon: UserCog, to: "/profile" },
   { code: "HLP", label: "Help", icon: CircleHelp, to: "/support/help" },
 ];
@@ -109,6 +149,39 @@ const connectionMeta: Record<
 };
 
 type Popover = "none" | "bell" | "conn" | "account" | string;
+
+/** True if `can` grants view on at least one module - undefined/no module
+ * means "nothing to gate" (Profile/Help), always true. */
+function hasViewAccess(
+  can: (m: PermissionModule, a: "view" | "create" | "edit" | "delete") => boolean,
+  module: PermissionModule | PermissionModule[] | undefined,
+): boolean {
+  if (!module) return true;
+  const modules = Array.isArray(module) ? module : [module];
+  return modules.some((m) => can(m, "view"));
+}
+
+// Reachable only from the account dropdown, not the main NAV rail, but
+// still real PermissionModule entries worth guarding against a typed URL.
+const ACCOUNT_MENU_ROUTES: { to: string; module: PermissionModule }[] = [
+  { to: "/system/audit-log", module: "audit-log" },
+  { to: "/system", module: "system" },
+];
+
+/** Finds the most specific NAV entry (a child link, else its parent) that
+ * matches `pathname`, so a route guard can check the right module even for
+ * a link that isn't in the rail at its parent's top level. */
+function findNavModule(pathname: string): PermissionModule | PermissionModule[] | undefined {
+  for (const item of NAV) {
+    const child = item.children?.find((c) => pathname === c.to || pathname.startsWith(`${c.to}/`));
+    if (child) return child.module ?? item.module;
+    if (item.to && (pathname === item.to || pathname.startsWith(`${item.to}/`))) return item.module;
+  }
+  for (const route of ACCOUNT_MENU_ROUTES) {
+    if (pathname === route.to || pathname.startsWith(`${route.to}/`)) return route.module;
+  }
+  return undefined;
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   const store = useStore();
@@ -130,6 +203,23 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!store.authed) navigate({ to: "/login" });
   }, [store.authed, navigate]);
+
+  // Hiding a nav link isn't real access control - someone can still type
+  // the URL directly, so the module a role/user lacks view on needs to be
+  // blocked here too, not just filtered out of navItems below.
+  useEffect(() => {
+    if (!store.authed) return;
+    const module = findNavModule(pathname);
+    // /profile carries no module tag (always accessible) - a safe fallback
+    // regardless of how a role/user's permissions are configured, so this
+    // can never loop back into itself the way /table-grid theoretically
+    // could for a role with no biller access at all.
+    if (pathname !== "/profile" && !hasViewAccess(store.can, module)) {
+      toast.error("You don't have access to that section");
+      navigate({ to: "/profile" });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.authed, pathname, navigate]);
 
   // Replaces the seeded mock tables/categories with real backend data once
   // there's a session to fetch them with - covers both a fresh login and a
@@ -249,7 +339,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   const conn = connectionMeta[store.connection];
   const ConnIcon = conn.icon;
 
-  const navItems = store.keyboardOnly ? NAV.filter((i) => i.code !== "BIL") : NAV;
+  const navItems = (store.keyboardOnly ? NAV.filter((i) => i.code !== "BIL") : NAV).filter((i) =>
+    hasViewAccess(store.can, i.module),
+  );
 
   const isActive = (item: NavItem) =>
     item.to
@@ -329,19 +421,21 @@ export function AppShell({ children }: { children: ReactNode }) {
                   </button>
                   {railExpanded && isOpenGroup ? (
                     <div className="ml-3 mt-0.5 flex flex-col gap-0.5 border-l border-sidebar-border/60 pl-3">
-                      {item.children.map((c) => (
-                        <Link
-                          key={c.to}
-                          to={c.to}
-                          className={cn(
-                            "truncate rounded-lg px-2.5 py-1.5 text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                            pathname.startsWith(c.to) &&
-                              "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
-                          )}
-                        >
-                          {c.label}
-                        </Link>
-                      ))}
+                      {item.children
+                        .filter((c) => hasViewAccess(store.can, c.module ?? item.module))
+                        .map((c) => (
+                          <Link
+                            key={c.to}
+                            to={c.to}
+                            className={cn(
+                              "truncate rounded-lg px-2.5 py-1.5 text-sm text-sidebar-foreground/80 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                              pathname.startsWith(c.to) &&
+                                "bg-sidebar-accent font-medium text-sidebar-accent-foreground",
+                            )}
+                          >
+                            {c.label}
+                          </Link>
+                        ))}
                     </div>
                   ) : null}
                 </div>
@@ -383,15 +477,17 @@ export function AppShell({ children }: { children: ReactNode }) {
                           <p className="px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                             {item.label}
                           </p>
-                          {item.children.map((c) => (
-                            <Link
-                              key={c.to}
-                              to={c.to}
-                              className="block rounded-lg px-3 py-2 text-sm hover:bg-surface-muted"
-                            >
-                              {c.label}
-                            </Link>
-                          ))}
+                          {item.children
+                            .filter((c) => hasViewAccess(store.can, c.module ?? item.module))
+                            .map((c) => (
+                              <Link
+                                key={c.to}
+                                to={c.to}
+                                className="block rounded-lg px-3 py-2 text-sm hover:bg-surface-muted"
+                              >
+                                {c.label}
+                              </Link>
+                            ))}
                         </div>
                       ) : (
                         <Link
