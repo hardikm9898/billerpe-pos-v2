@@ -6,8 +6,13 @@
 
 /*
  * BillerPe V2 design system.
- * Light-theme only, brand red #a4453a as the single primary action colour.
- * All colours are oklch. Never hardcode colour utilities in components.
+ * Light-theme only, brand red #c5202b as the single primary action colour.
+ * The wordmark logo's brighter #EE3234 was tried too but only hits ~4:1
+ * contrast against white text vs #c5202b's ~5.7:1, so this is the one
+ * actually used as a solid background behind white text everywhere.
+ * All colours are oklch except the primary-red family below (kept as the
+ * exact brand hex rather than a lossy oklch approximation).
+ * Never hardcode colour utilities in components.
  */
 
 @theme inline {
@@ -100,19 +105,19 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.276 0.008 264.4);
 
-  --primary: oklch(0.514 0.128 28.9);
+  --primary: #c5202b;
   --primary-foreground: oklch(0.995 0.002 84.6);
-  --primary-soft: oklch(0.955 0.016 22.1);
-  --primary-soft-foreground: oklch(0.463 0.126 28.9);
+  --primary-soft: #faeced;
+  --primary-soft-foreground: #941820;
 
   --secondary: oklch(0.954 0.003 247.9);
   --secondary-foreground: oklch(0.335 0.01 264.4);
   --muted: oklch(0.962 0.003 247.9);
   --muted-foreground: oklch(0.553 0.023 270);
-  --accent: oklch(0.955 0.016 22.1);
-  --accent-foreground: oklch(0.463 0.126 28.9);
+  --accent: #faeced;
+  --accent-foreground: #941820;
 
-  --destructive: oklch(0.514 0.128 28.9);
+  --destructive: #c5202b;
   --destructive-foreground: oklch(0.995 0.002 84.6);
   --success: oklch(0.536 0.094 152);
   --success-foreground: oklch(0.995 0.002 84.6);
@@ -127,7 +132,7 @@
   --border: oklch(0.915 0.006 264.5);
   --border-strong: oklch(0.845 0.008 261.8);
   --input: oklch(0.9 0.006 264.5);
-  --ring: oklch(0.514 0.128 28.9);
+  --ring: #c5202b;
 
   --status-free: oklch(0.968 0.004 247.9);
   --status-free-foreground: oklch(0.459 0.012 261.8);
@@ -142,14 +147,14 @@
 
   --sidebar: oklch(0.276 0.008 264.4);
   --sidebar-foreground: oklch(0.86 0.005 264.5);
-  --sidebar-primary: oklch(0.514 0.128 28.9);
+  --sidebar-primary: #c5202b;
   --sidebar-primary-foreground: oklch(0.995 0.002 84.6);
   --sidebar-accent: oklch(0.34 0.01 264.4);
   --sidebar-accent-foreground: oklch(0.98 0.003 84.6);
   --sidebar-border: oklch(0.36 0.01 264.4);
-  --sidebar-ring: oklch(0.514 0.128 28.9);
+  --sidebar-ring: #c5202b;
 
-  --chart-1: oklch(0.514 0.128 28.9);
+  --chart-1: #c5202b;
   --chart-2: oklch(0.536 0.094 152);
   --chart-3: oklch(0.443 0.08 250.6);
   --chart-4: oklch(0.728 0.138 89.7);
