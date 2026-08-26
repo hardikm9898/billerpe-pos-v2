@@ -138,8 +138,8 @@
   --status-free-foreground: oklch(0.459 0.012 261.8);
   --status-held: oklch(0.931 0.003 264.5);
   --status-held-foreground: oklch(0.42 0.012 261.8);
-  --status-running: oklch(0.922 0.031 7.9);
-  --status-running-foreground: oklch(0.48 0.139 13.4);
+  --status-running: #faeced;
+  --status-running-foreground: #941820;
   --status-billed: oklch(0.954 0.054 94.7);
   --status-billed-foreground: oklch(0.481 0.108 87.2);
   --status-reserved: oklch(0.923 0.022 250.2);
@@ -158,7 +158,7 @@
   --chart-2: oklch(0.536 0.094 152);
   --chart-3: oklch(0.443 0.08 250.6);
   --chart-4: oklch(0.728 0.138 89.7);
-  --chart-5: oklch(0.48 0.139 13.4);
+  --chart-5: #941820;
 }
 
 .dark {
