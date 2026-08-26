@@ -76,8 +76,13 @@ function LoginPage() {
 
   const registered = store.deviceRegistered;
 
-  const doLogin = () => {
-    store.login(userId);
+  // OTP has no real backend counterpart (see its own "Demo only" notice) so
+  // it keeps using whichever account the "Staff account" picker has
+  // selected. Password/PIN are both real, verified logins - those pass the
+  // resolved real account id here instead, so the app authenticates as
+  // whoever the credentials actually belonged to.
+  const doLogin = (realUserId?: string) => {
+    store.login(realUserId ?? userId);
     toast.success("Welcome back", { description: RESTAURANT.name });
     navigate({ to: "/table-grid" });
   };
@@ -121,7 +126,9 @@ function LoginPage() {
             ))}
           </div>
         </div>
-        <p className="text-xs opacity-60">{RESTAURANT.name} · {RESTAURANT.outlet}</p>
+        <p className="text-xs opacity-60">
+          {RESTAURANT.name} · {RESTAURANT.outlet}
+        </p>
       </div>
 
       <div className="flex items-center justify-center bg-background px-4 py-10">
@@ -183,21 +190,26 @@ function LoginPage() {
           </div>
 
           <fieldset disabled={!registered} className="mt-5 space-y-4">
-            <div>
-              <Label htmlFor="who">Staff account</Label>
-              <select
-                id="who"
-                value={userId}
-                onChange={(e) => setUserId(e.target.value)}
-                className="mt-1.5 h-10 w-full rounded-lg border border-input bg-surface px-3 text-sm"
-              >
-                {store.users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} — {u.role}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {tab === "otp" ? (
+              <div>
+                <Label htmlFor="who">Staff account</Label>
+                <select
+                  id="who"
+                  value={userId}
+                  onChange={(e) => setUserId(e.target.value)}
+                  className="mt-1.5 h-10 w-full rounded-lg border border-input bg-surface px-3 text-sm"
+                >
+                  {store.users.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} — {u.role}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  OTP has no real backend yet, so this picks who the demo login simulates.
+                </p>
+              </div>
+            ) : null}
 
             {tab === "password" ? (
               <>
@@ -229,7 +241,7 @@ function LoginPage() {
                     setPwLoading(true);
                     try {
                       await authApi.restaurantLogin(pwMobile, password, getDeviceId());
-                      doLogin();
+                      doLogin((await store.syncCurrentUser()) ?? undefined);
                     } catch (err) {
                       toast.error(err instanceof ApiError ? err.message : "Login failed");
                     } finally {
@@ -273,7 +285,7 @@ function LoginPage() {
                 ) : null}
                 {otpSent ? (
                   <div className="flex gap-2">
-                    <Button className="flex-1" onClick={doLogin}>
+                    <Button className="flex-1" onClick={() => doLogin()}>
                       Verify OTP & Login
                     </Button>
                     <Button
@@ -331,7 +343,7 @@ function LoginPage() {
                     setPinLoading(true);
                     try {
                       await authApi.pinLogin(pinMobile, pin, getDeviceId());
-                      doLogin();
+                      doLogin((await store.syncCurrentUser()) ?? undefined);
                     } catch (err) {
                       toast.error(err instanceof ApiError ? err.message : "Login failed");
                     } finally {

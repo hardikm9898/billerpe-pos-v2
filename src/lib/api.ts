@@ -456,6 +456,15 @@ export const userApi = {
   // used here instead even though its name suggests a different purpose.
   getUsers: () => apiGet<{ hotelUsers: RawHotelUser[] }>("/offlineHotelUser"),
 
+  // controller/user.js#userAccess (GET /getUserAccess) - the one endpoint
+  // that resolves to the SPECIFIC hotelUser the current session's cookie
+  // belongs to (req.userId, not just req.user/hotel_id), same shape as
+  // getUsers' RawHotelUser rows. Used right after a real login
+  // (restaurantLogin/pinLogin) to find out who actually just authenticated,
+  // instead of trusting whatever this app's own local "Staff account"
+  // picker happens to have selected.
+  getCurrentUserAccess: () => apiGet<{ access: RawHotelUser }>("/getUserAccess"),
+
   createUser: (params: UserPayload) => apiPost<{ message?: string }>("/user", params),
   // userSchemaUpdate requires `password` unconditionally (unlike create,
   // where it's optional in the schema but the controller hashes it

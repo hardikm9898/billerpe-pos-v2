@@ -458,6 +458,12 @@ interface Ctx extends State {
   /* auth */
   registerDevice: () => void;
   login: (userId?: string) => void;
+  /** Resolves the real hotelUser the current session's cookie belongs to
+   * (GET /getUserAccess), adds/updates it in `users`, and returns its id -
+   * or null if the lookup failed. Called right after a real credential
+   * login (password/PIN), so `login()` authenticates as who actually just
+   * signed in rather than whatever the local account picker has selected. */
+  syncCurrentUser: () => Promise<string | null>;
   logout: () => void;
   /* helpers */
   tableLabel: (tableId: string) => string;
@@ -1973,6 +1979,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     logout: () => {
       patch((p) => ({ ...p, authed: false }));
       if (typeof window !== "undefined") window.localStorage.removeItem("billerpe.session");
+    },
+    syncCurrentUser: async () => {
+      try {
+        const { access } = await userApi.getCurrentUserAccess();
+        const mapped = mapRawUser(access);
+        patch((p) => ({
+          ...p,
+          users: p.users.some((u) => u.id === mapped.id)
+            ? p.users.map((u) =>
+                u.id === mapped.id ? { ...mapped, permissionOverrides: u.permissionOverrides } : u,
+              )
+            : [...p.users, mapped],
+        }));
+        return mapped.id;
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not identify the logged-in account",
+        );
+        return null;
+      }
     },
 
     // Just hands back a deterministic id for the cart-builder screen to
