@@ -452,7 +452,8 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
             {store.connection}
           </span>
           <span className="hidden items-center gap-1.5 text-[11px] text-muted-foreground sm:flex">
-            <Clock className="size-3.5" /> #{order.orderNo} · {order.status}
+            <Clock className="size-3.5" /> {order.orderNo ? `#${order.orderNo}` : "New"} ·{" "}
+            {order.status}
           </span>
           <Button size="sm" variant="outline" className="h-7" onClick={() => setNewOrderOpen(true)}>
             <PlusSquare className="size-3.5" /> New order
@@ -517,7 +518,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
           <div className="space-y-3 p-3">
             <div className="rounded-lg border border-border p-2.5">
               <p className="text-[10px] uppercase tracking-[0.08em] text-muted-foreground">Order</p>
-              <p className="num text-lg font-bold">#{order.orderNo}</p>
+              <p className="num text-lg font-bold">{order.orderNo ? `#${order.orderNo}` : "New"}</p>
               <p className="text-[11px] text-muted-foreground">
                 {order.type} · {order.guests} guests · KOT {order.kotRounds}
               </p>
@@ -1893,7 +1894,7 @@ function NewOrderDialog({
                 key={t.id}
                 variant="outline"
                 className="h-14 flex-col"
-                onClick={() => openOrder(store.startOrder(t.id, 1))}
+                onClick={() => openOrder(store.startOrder(t.id))}
               >
                 <span className="num text-sm font-semibold">{t.name}</span>
                 <span className="text-[10px] text-muted-foreground">{t.seats} seats</span>

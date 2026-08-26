@@ -132,8 +132,7 @@ function TableGridPage() {
       openBiller(table.orderId);
       return;
     }
-    const id = store.startOrder(table.id, Math.min(table.seats, 2));
-    openBiller(id);
+    openBiller(store.startOrder(table.id));
   };
 
   const itemCountOf = (order: Order | undefined) =>

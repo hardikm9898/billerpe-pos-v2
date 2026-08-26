@@ -371,7 +371,7 @@ function OrderCartPage() {
           <div className="flex items-center justify-between gap-2">
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold">
-                {order.tableLabel} · #{order.orderNo}
+                {order.tableLabel} · {order.orderNo ? `#${order.orderNo}` : "New"}
               </p>
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <span>{order.type}</span>

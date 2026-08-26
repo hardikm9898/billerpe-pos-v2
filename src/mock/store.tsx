@@ -471,7 +471,7 @@ interface Ctx extends State {
    * win the dedup since they carry accurate backendTotals. */
   allOrders: () => Order[];
   /* order lifecycle */
-  startOrder: (tableId: string, guests: number) => string;
+  startOrder: (tableId: string) => string;
   startTakeAway: () => string;
   /** Starts a new order using the outlet's configured default order type — auto-picks a free table for Dine In, falling back to Pickup if none are free. */
   startDefaultOrder: () => string;
@@ -1779,6 +1779,95 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // Old BillerPe creates nothing at all when a table/pickup screen is
+  // opened - no order, no id, no table-status change - until a real
+  // action with a non-empty cart actually succeeds (confirmed by reading
+  // Biller.js's tableClick/orderHold/orderKot/orderPlace, and kto.js's
+  // holdOrder rejecting an empty cart outright: `if (!cart?.items?.length)
+  // return error(CART_NOT_FOUND)`). Matched here: startOrder/startTakeAway
+  // hand back a deterministic id with nothing real behind it yet;
+  // synthesizeDraft reconstructs a blank, unsaved Order on read so the
+  // cart-builder screen has something to render; ensureRealOrder is the
+  // one place that actually promotes a draft into a real p.orders entry
+  // (and marks the table Held), called only by actions that add real
+  // content - never by finalize-only actions (hold/KOT/bill/settle),
+  // which keep failing against a still-nonexistent order exactly like
+  // they already fail against an empty one.
+  const synthesizeDraft = (id: string): Order | undefined => {
+    const tableMatch = /^draft-table-(.+)$/.exec(id);
+    if (tableMatch) {
+      const tableId = tableMatch[1]!;
+      const table = s.tables.find((t) => t.id === tableId);
+      // Table doesn't exist, or already has a real order under a
+      // different id - this virtual id no longer resolves to anything.
+      if (!table || table.orderId) return undefined;
+      return {
+        id,
+        orderNo: 0,
+        type: "Dine In",
+        tableId,
+        tableLabel: tableLabel(tableId),
+        guests: Math.min(table.seats || 1, 2),
+        status: "Held",
+        kotRounds: 0,
+        lines: [],
+        menuId: resolveMenu(s.menus, table, "Dine In")?.id,
+        businessDate: todayLabel,
+        createdAt: nowStamp(),
+        createdBy: currentUser?.name ?? "Taj",
+        itemised: true,
+      };
+    }
+    if (id.startsWith("draft-pickup-")) {
+      return {
+        id,
+        orderNo: 0,
+        type: "Pickup",
+        tableLabel: "Take Away",
+        guests: 1,
+        status: "Held",
+        kotRounds: 0,
+        lines: [],
+        menuId: resolveMenu(s.menus, undefined, "Pickup")?.id,
+        businessDate: todayLabel,
+        createdAt: nowStamp(),
+        createdBy: currentUser?.name ?? "Taj",
+        itemised: true,
+      };
+    }
+    return undefined;
+  };
+
+  // Materializes a virtual draft into a real p.orders entry (and marks its
+  // table Held) if it isn't one already. No-ops for an id that's already
+  // real, or that doesn't resolve to a draft at all. Returns the draft
+  // object used (for callers that need it for logging etc. right away,
+  // since `s` here won't reflect this patch() until next render).
+  const ensureRealOrder = (orderId: string): Order | undefined => {
+    if (s.orders.some((o) => o.id === orderId)) return undefined;
+    const draft = synthesizeDraft(orderId);
+    if (!draft) return undefined;
+    patch((p) => ({
+      ...p,
+      orders: [
+        { ...draft, orderNo: Math.max(...p.orders.map((o) => o.orderNo), 100) + 1 },
+        ...p.orders,
+      ],
+      tables: p.tables.map((t) =>
+        t.id === draft.tableId
+          ? {
+              ...t,
+              status: "Held",
+              guests: draft.guests,
+              orderId: draft.id,
+              occupiedSince: nowStamp(),
+            }
+          : t,
+      ),
+    }));
+    return draft;
+  };
+
   // A table/pickup order that never had a real action taken on it (no
   // items ever added, or every item removed again before Hold/KOT/Save)
   // never reached the backend - there's nothing a "cancelled" toast would
@@ -1815,7 +1904,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     canSpecial,
     tableLabel,
     tableById: (id) => s.tables.find((t) => t.id === id),
-    orderById: (id) => s.orders.find((o) => o.id === id) ?? s.orderHistory.find((o) => o.id === id),
+    orderById: (id) =>
+      s.orders.find((o) => o.id === id) ??
+      s.orderHistory.find((o) => o.id === id) ??
+      synthesizeDraft(id),
     orderForTable: (tableId) =>
       s.orders.find(
         (o) => o.tableId === tableId && ["Held", "Running", "Bill Generated"].includes(o.status),
@@ -1888,78 +1980,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (typeof window !== "undefined") window.localStorage.removeItem("billerpe.session");
     },
 
-    startOrder: (tableId, guests) => {
-      const id = uid("o");
-      const label = tableLabel(tableId);
-      const table = s.tables.find((t) => t.id === tableId);
-      const menuId = resolveMenu(s.menus, table, "Dine In")?.id;
-      patch((p) => ({
-        ...p,
-        tables: p.tables.map((t) =>
-          t.id === tableId
-            ? { ...t, status: "Held", guests, orderId: id, occupiedSince: nowStamp() }
-            : t,
-        ),
-        orders: [
-          {
-            id,
-            orderNo: Math.max(...p.orders.map((o) => o.orderNo), 100) + 1,
-            type: "Dine In",
-            tableId,
-            tableLabel: label,
-            guests,
-            // Opening a table shouldn't read as "Running" with zero real
-            // activity yet - "Held" is the only existing status that's both
-            // non-misleading and already treated as "has an active order"
-            // by orderForTable's filter, and by startDefaultOrder's own
-            // Free-table lookup below (which must NOT pick this table again
-            // while a draft is sitting on it).
-            status: "Held",
-            kotRounds: 0,
-            lines: [],
-            menuId,
-            businessDate: todayLabel,
-            createdAt: nowStamp(),
-            createdBy: currentUser?.name ?? "Taj",
-            itemised: true,
-          },
-          ...p.orders,
-        ],
-      }));
-      return id;
-    },
+    // Just hands back a deterministic id for the cart-builder screen to
+    // route to - nothing is created here (no order, no table-status
+    // change). See ensureRealOrder's own comment for why: matches old
+    // BillerPe, which does exactly the same thing on a table click.
+    // Deterministic (not uid()-based) so navigating to the same table
+    // again before anything's been added returns to the same draft rather
+    // than minting a new id each time.
+    startOrder: (tableId) => `draft-table-${tableId}`,
 
-    startTakeAway: () => {
-      const id = uid("o");
-      const menuId = resolveMenu(s.menus, undefined, "Pickup")?.id;
-      patch((p) => ({
-        ...p,
-        orders: [
-          {
-            id,
-            orderNo: Math.max(...p.orders.map((o) => o.orderNo), 100) + 1,
-            type: "Pickup",
-            tableLabel: "Take Away",
-            guests: 1,
-            status: "Held",
-            kotRounds: 0,
-            lines: [],
-            menuId,
-            businessDate: todayLabel,
-            createdAt: nowStamp(),
-            createdBy: currentUser?.name ?? "Taj",
-            itemised: true,
-          },
-          ...p.orders,
-        ],
-      }));
-      return id;
-    },
+    startTakeAway: () => uid("draft-pickup"),
 
     startDefaultOrder: () => {
       if (s.defaultOrderType === "Dine In") {
         const freeTable = s.tables.find((t) => t.status === "Free");
-        if (freeTable) return value.startOrder(freeTable.id, 1);
+        if (freeTable) return value.startOrder(freeTable.id);
         toast.error("No free tables", {
           description: "Started a pickup order instead — assign a table from Keyboard Billing.",
         });
@@ -2002,7 +2037,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     addLine: (orderId, input) => {
       const mi = s.menuItems.find((m) => m.id === input.itemId);
       if (!mi) return;
-      const order = s.orders.find((o) => o.id === orderId);
+      const draft = ensureRealOrder(orderId);
+      const order = s.orders.find((o) => o.id === orderId) ?? draft;
+      if (!order) return;
       const price = input.variant
         ? (mi.variants?.find((v) => v.name === input.variant)?.price ?? mi.price)
         : mi.price;
@@ -2488,7 +2525,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
 
     applyDiscount: (orderId, label, amount) => {
-      const o = s.orders.find((x) => x.id === orderId);
+      const draft = ensureRealOrder(orderId);
+      const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
       const rule = s.approvalRules.find((r) => r.domain === "Discount" && r.enabled);
       const subtotal = orderTotals(o, s).subtotal;
@@ -2512,7 +2550,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
 
     setCustomer: (orderId, name, phone) => {
-      const o = s.orders.find((x) => x.id === orderId);
+      const draft = ensureRealOrder(orderId);
+      const o = s.orders.find((x) => x.id === orderId) ?? draft;
+      if (!o) return;
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
@@ -2527,7 +2567,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
 
     setCharges: (orderId, delivery, packaging) => {
-      const o = s.orders.find((x) => x.id === orderId);
+      const draft = ensureRealOrder(orderId);
+      const o = s.orders.find((x) => x.id === orderId) ?? draft;
+      if (!o) return;
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
@@ -5677,7 +5719,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Default menu updated");
     },
     setOrderMenu: (orderId, menuId) => {
-      const o = s.orders.find((x) => x.id === orderId);
+      const draft = ensureRealOrder(orderId);
+      const o = s.orders.find((x) => x.id === orderId) ?? draft;
       const fromName = s.menus.find((m) => m.id === o?.menuId)?.name ?? "Default";
       const toName = s.menus.find((m) => m.id === menuId)?.name ?? "Default";
       patch((p) => ({
@@ -5713,7 +5756,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     setGuestCount: (orderId, guests) => {
       const safe = Math.max(1, guests);
-      const o = s.orders.find((x) => x.id === orderId);
+      const draft = ensureRealOrder(orderId);
+      const o = s.orders.find((x) => x.id === orderId) ?? draft;
       patch((p) => ({
         ...p,
         orders: p.orders.map((x) => (x.id === orderId ? { ...x, guests: safe } : x)),
@@ -5724,8 +5768,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
     addCustomLine: (orderId, name, price, qty) => {
-      const o = s.orders.find((x) => x.id === orderId);
-      if (!o || !name.trim() || qty <= 0) return;
+      if (!name.trim() || qty <= 0) return;
+      const draft = ensureRealOrder(orderId);
+      const o = s.orders.find((x) => x.id === orderId) ?? draft;
+      if (!o) return;
       const round = o.kotRounds + 1;
       const newLine: OrderLine = {
         id: uid("custom"),
