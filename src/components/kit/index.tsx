@@ -82,7 +82,7 @@ export function SectionCard({
   return (
     <section
       className={cn(
-        "overflow-hidden rounded-2xl border border-border bg-surface shadow-card",
+        "min-w-0 overflow-hidden rounded-2xl border border-border bg-surface shadow-card",
         className,
       )}
     >
@@ -201,7 +201,7 @@ export function StatCard({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
       className={cn(
-        "relative overflow-hidden rounded-2xl border border-l-4 bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-md",
+        "relative min-w-0 overflow-hidden rounded-2xl border border-l-4 bg-surface p-4 shadow-card transition-shadow duration-200 hover:shadow-md",
         accentBorder[tone],
         isHero &&
           "border-transparent bg-gradient-to-br from-primary to-primary/80 text-primary-foreground",
@@ -227,7 +227,7 @@ export function StatCard({
               {delta}
             </span>
           ) : null}
-          {hint ? <span className={cn("truncate text-xs", mutedTone)}>{hint}</span> : null}
+          {hint ? <span className={cn("min-w-0 truncate text-xs", mutedTone)}>{hint}</span> : null}
         </div>
       ) : null}
 
