@@ -228,17 +228,19 @@ function OrdersPage() {
         </div>
 
         <BulkActionsBar count={selected.length} onClear={() => setSelected([])}>
-          <Button
-            size="sm"
-            variant="outline"
-            className="text-primary"
-            onClick={() => {
-              store.removeOrders(selected);
-              setSelected([]);
-            }}
-          >
-            <Trash2 className="size-4" /> Delete selected
-          </Button>
+          {store.canSpecial("orders.deleteOrder") ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-primary"
+              onClick={() => {
+                store.removeOrders(selected);
+                setSelected([]);
+              }}
+            >
+              <Trash2 className="size-4" /> Delete selected
+            </Button>
+          ) : null}
         </BulkActionsBar>
 
         <DataTable
@@ -341,13 +343,12 @@ function OrdersPage() {
               header: "",
               cell: (o) => {
                 const editable = !["Settled", "Cancelled"].includes(o.status);
-                // Synced history (id "oh-...") is a read-only snapshot of
-                // real backend state - delete is a real, irreversible
-                // soft-delete against the live backend now (see
-                // store.removeOrder's own comment), so it's hidden for
-                // history rows rather than exposed casually on old
-                // records.
-                const isHistorical = o.id.startsWith("oh-");
+                // Delete is a real, irreversible soft-delete against the
+                // live backend (see store.removeOrder's own comment) for
+                // both live and synced-history rows alike - gated by the
+                // orders.deleteOrder special permission (Owner by default)
+                // rather than hidden outright for settled/historical rows.
+                const canDelete = store.canSpecial("orders.deleteOrder");
                 return (
                   <div className="flex items-center gap-1">
                     <Button
@@ -385,7 +386,7 @@ function OrdersPage() {
                         <ArrowRight className="size-4" />
                       </Button>
                     ) : null}
-                    {!isHistorical ? (
+                    {canDelete ? (
                       <Button
                         size="icon"
                         variant="ghost"
