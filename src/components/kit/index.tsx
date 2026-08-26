@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 /* ---------------- page primitives ---------------- */
@@ -362,6 +363,8 @@ export function DataTable<T>({
   onRowClick,
   empty,
   mobileCard,
+  loading,
+  skeletonRows = 6,
 }: {
   rows: T[];
   columns: { key: string; header: ReactNode; cell: (row: T) => ReactNode; className?: string }[];
@@ -369,7 +372,57 @@ export function DataTable<T>({
   onRowClick?: (row: T) => void;
   empty?: ReactNode;
   mobileCard?: (row: T) => ReactNode;
+  /** Renders skeleton placeholder rows instead of `rows`/`empty` - for a page's initial data load. */
+  loading?: boolean;
+  skeletonRows?: number;
 }) {
+  if (loading) {
+    return (
+      <>
+        <div className="hidden overflow-x-auto md:block scrollbar-slim">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-border text-left">
+                {columns.map((c) => (
+                  <th
+                    key={c.key}
+                    className={cn(
+                      "px-3 py-2.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                      c.className,
+                    )}
+                  >
+                    {c.header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: skeletonRows }).map((_, i) => (
+                <tr key={i} className="border-b border-border/70 last:border-0">
+                  {columns.map((c) => (
+                    <td key={c.key} className={cn("px-3 py-3 align-middle", c.className)}>
+                      <Skeleton className="h-4 w-full max-w-32" />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="space-y-2 md:hidden">
+          {Array.from({ length: Math.min(skeletonRows, 4) }).map((_, i) => (
+            <div
+              key={i}
+              className="space-y-2 rounded-xl border border-border bg-surface p-3 shadow-card"
+            >
+              <Skeleton className="h-4 w-2/3" />
+              <Skeleton className="h-4 w-1/3" />
+            </div>
+          ))}
+        </div>
+      </>
+    );
+  }
   if (!rows.length && empty) return <>{empty}</>;
   return (
     <>

@@ -50,53 +50,91 @@ function unwrap<T>(json: ApiEnvelope<T> | null): T {
   return json.results;
 }
 
+// Every real request in this app funnels through apiGet/apiPost/apiPut/
+// apiDelete below, so tracking in-flight count here (rather than in each
+// of the ~150 call sites) gives a single, always-accurate signal for a
+// global "something is loading" indicator - see GlobalLoadingBar, the only
+// consumer. Plain module state + a listener set, not React state, since
+// this file has no component of its own; components read it via
+// useSyncExternalStore (subscribePendingRequests/getPendingRequestCount).
+let pendingRequestCount = 0;
+const pendingRequestListeners = new Set<() => void>();
+
+export function subscribePendingRequests(listener: () => void): () => void {
+  pendingRequestListeners.add(listener);
+  return () => pendingRequestListeners.delete(listener);
+}
+
+export function getPendingRequestCount(): number {
+  return pendingRequestCount;
+}
+
+async function trackPending<T>(run: () => Promise<T>): Promise<T> {
+  pendingRequestCount++;
+  pendingRequestListeners.forEach((l) => l());
+  try {
+    return await run();
+  } finally {
+    pendingRequestCount--;
+    pendingRequestListeners.forEach((l) => l());
+  }
+}
+
 async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    method: "GET",
-    credentials: "include",
+  return trackPending(async () => {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
+      method: "GET",
+      credentials: "include",
+    });
+    if (res.status === 401) return handleUnauthorized<T>();
+    const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+    return unwrap(json);
   });
-  if (res.status === 401) return handleUnauthorized<T>();
-  const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
-  return unwrap(json);
 }
 
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (res.status === 401) return handleUnauthorized<T>();
+  return trackPending(async () => {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) return handleUnauthorized<T>();
 
-  const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
-  return unwrap(json);
+    const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+    return unwrap(json);
+  });
 }
 
 async function apiPut<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    method: "PUT",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (res.status === 401) return handleUnauthorized<T>();
+  return trackPending(async () => {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) return handleUnauthorized<T>();
 
-  const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
-  return unwrap(json);
+    const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+    return unwrap(json);
+  });
 }
 
 async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
-    method: "DELETE",
-    credentials: "include",
-    ...(body !== undefined
-      ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
-      : {}),
+  return trackPending(async () => {
+    const res = await fetch(`${API_BASE_URL}${path}`, {
+      method: "DELETE",
+      credentials: "include",
+      ...(body !== undefined
+        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+        : {}),
+    });
+    if (res.status === 401) return handleUnauthorized<T>();
+    const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+    return unwrap(json);
   });
-  if (res.status === 401) return handleUnauthorized<T>();
-  const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
-  return unwrap(json);
 }
 
 export const authApi = {
