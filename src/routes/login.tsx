@@ -1,13 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import {
-  Fingerprint,
-  KeyRound,
-  LogIn,
-  ShieldCheck,
-  Smartphone,
-  UtensilsCrossed,
-} from "lucide-react";
+import { Fingerprint, KeyRound, LogIn, ShieldCheck, UtensilsCrossed } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -45,25 +38,24 @@ export const Route = createFileRoute("/login")({
       {
         name: "description",
         content:
-          "Sign in to BillerPe with password, OTP or PIN. Offline-capable login for restaurant staff.",
+          "Sign in to BillerPe with password or PIN. Offline-capable login for restaurant staff.",
       },
       { property: "og:title", content: "Sign in · BillerPe POS" },
       {
         property: "og:description",
-        content: "Offline-capable restaurant POS login with password, OTP and PIN.",
+        content: "Offline-capable restaurant POS login with password and PIN.",
       },
     ],
   }),
   component: LoginPage,
 });
 
-type Tab = "password" | "otp" | "pin";
+type Tab = "password" | "pin";
 
 function LoginPage() {
   const store = useStore();
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("password");
-  const [otpSent, setOtpSent] = useState(false);
   const [forgot, setForgot] = useState(false);
   const [step, setStep] = useState(1);
   const [pin, setPin] = useState("");
@@ -72,24 +64,21 @@ function LoginPage() {
   const [pwMobile, setPwMobile] = useState("");
   const [password, setPassword] = useState("");
   const [pwLoading, setPwLoading] = useState(false);
-  const [userId, setUserId] = useState("u1");
 
   const registered = store.deviceRegistered;
 
-  // OTP has no real backend counterpart (see its own "Demo only" notice) so
-  // it keeps using whichever account the "Staff account" picker has
-  // selected. Password/PIN are both real, verified logins - those pass the
-  // resolved real account id here instead, so the app authenticates as
-  // whoever the credentials actually belonged to.
-  const doLogin = (realUserId?: string) => {
-    store.login(realUserId ?? userId);
+  const doLogin = (realUserId: string | null) => {
+    if (!realUserId) {
+      toast.error("Could not identify the logged-in account");
+      return;
+    }
+    store.login(realUserId);
     toast.success("Welcome back", { description: RESTAURANT.name });
     navigate({ to: "/table-grid" });
   };
 
   const tabs: { id: Tab; label: string; icon: typeof LogIn }[] = [
     { id: "password", label: "Password", icon: LogIn },
-    { id: "otp", label: "OTP", icon: Smartphone },
     { id: "pin", label: "PIN", icon: KeyRound },
   ];
 
@@ -170,7 +159,7 @@ function LoginPage() {
 
           <div
             className={cn(
-              "mt-5 grid grid-cols-3 gap-1 rounded-xl bg-surface-muted p-1",
+              "mt-5 grid grid-cols-2 gap-1 rounded-xl bg-surface-muted p-1",
               !registered && "pointer-events-none opacity-50",
             )}
           >
@@ -190,27 +179,6 @@ function LoginPage() {
           </div>
 
           <fieldset disabled={!registered} className="mt-5 space-y-4">
-            {tab === "otp" ? (
-              <div>
-                <Label htmlFor="who">Staff account</Label>
-                <select
-                  id="who"
-                  value={userId}
-                  onChange={(e) => setUserId(e.target.value)}
-                  className="mt-1.5 h-10 w-full rounded-lg border border-input bg-surface px-3 text-sm"
-                >
-                  {store.users.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.name} — {u.role}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1.5 text-xs text-muted-foreground">
-                  OTP has no real backend yet, so this picks who the demo login simulates.
-                </p>
-              </div>
-            ) : null}
-
             {tab === "password" ? (
               <>
                 <div>
@@ -241,7 +209,7 @@ function LoginPage() {
                     setPwLoading(true);
                     try {
                       await authApi.restaurantLogin(pwMobile, password, getDeviceId());
-                      doLogin((await store.syncCurrentUser()) ?? undefined);
+                      doLogin(await store.syncCurrentUser());
                     } catch (err) {
                       toast.error(err instanceof ApiError ? err.message : "Login failed");
                     } finally {
@@ -261,51 +229,6 @@ function LoginPage() {
                 >
                   Forgot Password?
                 </button>
-              </>
-            ) : null}
-
-            {tab === "otp" ? (
-              <>
-                <p className="rounded-lg bg-warning-soft px-3 py-1.5 text-xs text-warning">
-                  Demo only - the backend has no OTP send/verify capability yet.
-                </p>
-                <div>
-                  <Label htmlFor="mob">Mobile number</Label>
-                  <Input
-                    id="mob"
-                    className="mt-1.5"
-                    defaultValue={store.users.find((u) => u.id === userId)?.mobile}
-                  />
-                </div>
-                {otpSent ? (
-                  <div>
-                    <Label htmlFor="otp">Enter OTP</Label>
-                    <Input id="otp" className="mt-1.5 num tracking-[0.4em]" defaultValue="123456" />
-                  </div>
-                ) : null}
-                {otpSent ? (
-                  <div className="flex gap-2">
-                    <Button className="flex-1" onClick={() => doLogin()}>
-                      Verify OTP & Login
-                    </Button>
-                    <Button
-                      variant="outline"
-                      onClick={() => toast.success("OTP resent to registered mobile")}
-                    >
-                      Resend
-                    </Button>
-                  </div>
-                ) : (
-                  <Button
-                    className="w-full"
-                    onClick={() => {
-                      setOtpSent(true);
-                      toast.success("OTP sent", { description: "Demo OTP is 123456" });
-                    }}
-                  >
-                    <Smartphone className="size-4" /> Send OTP
-                  </Button>
-                )}
               </>
             ) : null}
 
@@ -343,7 +266,7 @@ function LoginPage() {
                     setPinLoading(true);
                     try {
                       await authApi.pinLogin(pinMobile, pin, getDeviceId());
-                      doLogin((await store.syncCurrentUser()) ?? undefined);
+                      doLogin(await store.syncCurrentUser());
                     } catch (err) {
                       toast.error(err instanceof ApiError ? err.message : "Login failed");
                     } finally {
