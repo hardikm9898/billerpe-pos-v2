@@ -1,5 +1,22 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, Clock, Printer, Receipt, Search, Trash2 } from "lucide-react";
+import {
+  ArrowRight,
+  CheckCircle2,
+  ChefHat,
+  Circle,
+  Clock,
+  LayoutGrid,
+  ListOrdered,
+  MinusCircle,
+  PauseCircle,
+  Pencil,
+  Printer,
+  Receipt,
+  Search,
+  Trash2,
+  UserRound,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -21,6 +38,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -47,13 +65,30 @@ const ACTION_LABELS: Record<string, string> = {
   delete_order: "Order deleted",
 };
 
-function mapRawTimelineEntry(t: RawTimelineEntry): AuditLog {
+// Icon + tone per raw action key, for the timeline's visual markers -
+// intentionally keyed off the same domain as ACTION_LABELS above, not the
+// display label, so it stays correct if a label's wording ever changes.
+const ACTION_VISUALS: Record<string, { icon: LucideIcon; tone: string }> = {
+  place_order: { icon: Receipt, tone: "bg-info-soft text-info" },
+  kot: { icon: ChefHat, tone: "bg-warning-soft text-warning" },
+  hold: { icon: PauseCircle, tone: "bg-surface-muted text-muted-foreground" },
+  settle: { icon: CheckCircle2, tone: "bg-success-soft text-success" },
+  update_order: { icon: Pencil, tone: "bg-info-soft text-info" },
+  update_order_item: { icon: Pencil, tone: "bg-info-soft text-info" },
+  decrease_kot_qty: { icon: MinusCircle, tone: "bg-warning-soft text-warning" },
+  free_table: { icon: LayoutGrid, tone: "bg-surface-muted text-muted-foreground" },
+  delete_order: { icon: Trash2, tone: "bg-primary-soft text-primary" },
+};
+const DEFAULT_ACTION_VISUAL = { icon: Circle, tone: "bg-surface-muted text-muted-foreground" };
+
+function mapRawTimelineEntry(t: RawTimelineEntry): AuditLog & { rawAction: string } {
   const at = new Date(t.created_Date);
   return {
     id: `tl-${t.id}`,
     userId: String(t.hotelUserId ?? ""),
     userName: t.hms_hotelUser_master?.name || t.creator || "Staff",
     action: ACTION_LABELS[t.action] ?? t.action,
+    rawAction: t.action,
     entity: `Order #${t.bill_no}`,
     before: "",
     after: `${t.order_status} · ₹${t.grandAmount}`,
@@ -116,6 +151,7 @@ function OrdersPage() {
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [timelineOrder, setTimelineOrder] = useState<Order | null>(null);
+  const [sequenceOpen, setSequenceOpen] = useState(false);
 
   const rows = useMemo(
     () =>
@@ -140,10 +176,11 @@ function OrdersPage() {
 
   useEffect(() => setSelected([]), [status, q]);
 
-  // "Delete selected" is still a local-only action (see the actions
-  // column's own comment) - history rows are excluded from bulk selection
-  // entirely so it can't be used against real settled orders.
-  const pageIds = paged.pageRows.filter((o) => !o.id.startsWith("oh-")).map((o) => o.id);
+  // store.removeOrders hits the real backend for both live and synced-
+  // history rows alike (same as the single-row delete button), so
+  // selection isn't restricted by row type - just by the
+  // orders.deleteOrder permission gating the bulk action itself below.
+  const pageIds = paged.pageRows.map((o) => o.id);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
   const toggleAllOnPage = () =>
     setSelected((prev) =>
@@ -154,7 +191,7 @@ function OrdersPage() {
   const toggleOne = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
-  const [timelineEntries, setTimelineEntries] = useState<AuditLog[]>([]);
+  const [timelineEntries, setTimelineEntries] = useState<(AuditLog & { rawAction: string })[]>([]);
   const [timelineLoading, setTimelineLoading] = useState(false);
 
   useEffect(() => {
@@ -196,6 +233,13 @@ function OrdersPage() {
         icon={Receipt}
         title="Orders"
         description="Live orders from this session, plus real settled history from the last 90 days."
+        actions={
+          store.canSpecial("system.remakeOrderSequence") ? (
+            <Button variant="outline" onClick={() => setSequenceOpen(true)}>
+              <ListOrdered className="size-4" /> Renumber sequence
+            </Button>
+          ) : null
+        }
       />
 
       <SectionCard>
@@ -260,14 +304,13 @@ function OrdersPage() {
                   aria-label="Select all on this page"
                 />
               ),
-              cell: (o) =>
-                o.id.startsWith("oh-") ? null : (
-                  <Checkbox
-                    checked={selected.includes(o.id)}
-                    onClick={(e) => e.stopPropagation()}
-                    onCheckedChange={() => toggleOne(o.id)}
-                  />
-                ),
+              cell: (o) => (
+                <Checkbox
+                  checked={selected.includes(o.id)}
+                  onClick={(e) => e.stopPropagation()}
+                  onCheckedChange={() => toggleOne(o.id)}
+                />
+              ),
             },
             {
               key: "no",
@@ -410,39 +453,91 @@ function OrdersPage() {
       </SectionCard>
 
       <Dialog open={!!timelineOrder} onOpenChange={(o) => !o && setTimelineOrder(null)}>
-        <DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+        <DialogContent className="max-h-[85vh] max-w-xl overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Timeline · Order #{timelineOrder?.orderNo}</DialogTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <DialogTitle>Timeline · Order #{timelineOrder?.orderNo}</DialogTitle>
+              {timelineOrder ? <StatusBadge status={timelineOrder.status} /> : null}
+            </div>
             <DialogDescription>
-              Every recorded change to this order, newest first.
+              {timelineEntries.length
+                ? `${timelineEntries.length} recorded change${timelineEntries.length === 1 ? "" : "s"}, newest first.`
+                : "Every recorded change to this order, newest first."}
             </DialogDescription>
           </DialogHeader>
           {timelineLoading ? (
             <p className="py-6 text-center text-sm text-muted-foreground">Loading timeline…</p>
           ) : timelineEntries.length ? (
-            <ul className="space-y-2">
-              {timelineEntries.map((a) => (
-                <li key={a.id} className="rounded-xl border border-border p-3 text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">{a.action}</span>
-                    <span className="num text-xs text-muted-foreground">{a.at}</span>
+            <div className="mt-1">
+              {timelineEntries.map((a, i) => {
+                const visual = ACTION_VISUALS[a.rawAction] ?? DEFAULT_ACTION_VISUAL;
+                const Icon = visual.icon;
+                const isLast = i === timelineEntries.length - 1;
+                return (
+                  <div key={a.id} className="relative flex gap-3 pb-5 last:pb-0">
+                    {!isLast ? (
+                      <span className="absolute left-4 top-9 bottom-0 w-px bg-border" aria-hidden />
+                    ) : null}
+                    <span
+                      className={cn(
+                        "relative z-10 grid size-8 shrink-0 place-items-center rounded-full",
+                        visual.tone,
+                      )}
+                    >
+                      <Icon className="size-4" />
+                    </span>
+                    <div className="min-w-0 flex-1 rounded-xl border border-border bg-surface p-3 shadow-card">
+                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                        <span className="text-sm font-semibold">{a.action}</span>
+                        <span className="num text-xs text-muted-foreground">{a.at}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {a.before ? `${a.before} → ` : ""}
+                        {a.after}
+                      </p>
+                      <p className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground">
+                        <UserRound className="size-3" /> {a.userName}
+                      </p>
+                      {a.reason ? (
+                        <p className="mt-1.5 rounded-lg bg-surface-muted px-2 py-1 text-xs italic text-muted-foreground">
+                          "{a.reason}"
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {a.before ? `${a.before} → ` : ""}
-                    {a.after}
-                  </p>
-                  <p className="mt-1 text-xs text-muted-foreground">by {a.userName}</p>
-                  {a.reason ? (
-                    <p className="mt-1 text-xs italic text-muted-foreground">"{a.reason}"</p>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
+                );
+              })}
+            </div>
           ) : timelineOrder && !timelineOrder.backendId ? (
             <EmptyState compact icon={Clock} title="Not synced with the server yet" />
           ) : (
             <EmptyState compact icon={Clock} title="No recorded changes yet" />
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={sequenceOpen} onOpenChange={setSequenceOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Renumber order sequence</DialogTitle>
+            <DialogDescription>
+              Every order closes back into one continuous run starting at #1 (or from the start of
+              the financial year, if bill reset is set to yearly). This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSequenceOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                store.remakeOrderSequence();
+                setSequenceOpen(false);
+              }}
+            >
+              Confirm renumber
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </Page>
