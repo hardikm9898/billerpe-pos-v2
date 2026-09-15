@@ -16,6 +16,7 @@ import { useMemo, useState } from "react";
 import {
   DataTable,
   EmptyState,
+  IconButton,
   Money,
   SectionCard,
   StatCard,
@@ -1263,23 +1264,23 @@ export function RequisitionsScreen() {
                         <HealthBar stock={m.stock} reorder={m.reorderLevel} />
                       </div>
                       <div className="flex shrink-0 items-center gap-1">
-                        <Button
-                          size="icon"
+                        <IconButton
+                          label="Decrease quantity"
                           variant="outline"
                           className="size-8"
                           onClick={() => setCart({ ...cart, [m.id]: Math.max(0, qty - 1) })}
                         >
                           <Minus className="size-3.5" />
-                        </Button>
+                        </IconButton>
                         <span className="num w-8 text-center text-sm">{qty}</span>
-                        <Button
-                          size="icon"
+                        <IconButton
+                          label="Increase quantity"
                           variant="outline"
                           className="size-8"
                           onClick={() => setCart({ ...cart, [m.id]: qty + 1 })}
                         >
                           <Plus className="size-3.5" />
-                        </Button>
+                        </IconButton>
                       </div>
                     </div>
                   );

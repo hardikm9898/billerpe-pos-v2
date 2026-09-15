@@ -11,11 +11,14 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ShellRouteImport } from './routes/_shell'
+import { Route as BillviewRouteImport } from './routes/billview'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as QrMenuRouteImport } from './routes/qr-menu'
 import { Route as ShellCashSessionRouteImport } from './routes/_shell.cash-session'
 import { Route as ShellDashboardRouteImport } from './routes/_shell.dashboard'
 import { Route as ShellKdsRouteImport } from './routes/_shell.kds'
 import { Route as ShellProfileRouteImport } from './routes/_shell.profile'
+import { Route as ShellQueueRouteImport } from './routes/_shell.queue'
 import { Route as ShellReservationsRouteImport } from './routes/_shell.reservations'
 import { Route as ShellUsersRouteImport } from './routes/_shell.users'
 import { Route as ShellExpenseEntriesRouteImport } from './routes/_shell.expense.entries'
@@ -29,7 +32,6 @@ import { Route as ShellMenuMenusRouteImport } from './routes/_shell.menu.menus'
 import { Route as ShellMenuVariantsRouteImport } from './routes/_shell.menu.variants'
 import { Route as ShellOperationsIndexRouteImport } from './routes/_shell.operations.index'
 import { Route as ShellOperationsSectionRouteImport } from './routes/_shell.operations.$section'
-import { Route as ShellOperationsApprovalMatrixRouteImport } from './routes/_shell.operations.approval-matrix'
 import { Route as ShellOperationsDeliveryChargeRouteImport } from './routes/_shell.operations.delivery-charge'
 import { Route as ShellOrdersIndexRouteImport } from './routes/_shell.orders.index'
 import { Route as ShellOrdersOrderIdRouteImport } from './routes/_shell.orders.$orderId'
@@ -56,9 +58,19 @@ const ShellRoute = ShellRouteImport.update({
   id: '/_shell',
   getParentRoute: () => rootRouteImport,
 } as any)
+const BillviewRoute = BillviewRouteImport.update({
+  id: '/billview',
+  path: '/billview',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const QrMenuRoute = QrMenuRouteImport.update({
+  id: '/qr-menu',
+  path: '/qr-menu',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ShellCashSessionRoute = ShellCashSessionRouteImport.update({
@@ -79,6 +91,11 @@ const ShellKdsRoute = ShellKdsRouteImport.update({
 const ShellProfileRoute = ShellProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellQueueRoute = ShellQueueRouteImport.update({
+  id: '/queue',
+  path: '/queue',
   getParentRoute: () => ShellRoute,
 } as any)
 const ShellReservationsRoute = ShellReservationsRouteImport.update({
@@ -148,12 +165,6 @@ const ShellOperationsSectionRoute = ShellOperationsSectionRouteImport.update({
   path: '/operations/$section',
   getParentRoute: () => ShellRoute,
 } as any)
-const ShellOperationsApprovalMatrixRoute =
-  ShellOperationsApprovalMatrixRouteImport.update({
-    id: '/operations/approval-matrix',
-    path: '/operations/approval-matrix',
-    getParentRoute: () => ShellRoute,
-  } as any)
 const ShellOperationsDeliveryChargeRoute =
   ShellOperationsDeliveryChargeRouteImport.update({
     id: '/operations/delivery-charge',
@@ -240,11 +251,14 @@ const ShellTableGridOrderOrderIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/billview': typeof BillviewRoute
   '/login': typeof LoginRoute
+  '/qr-menu': typeof QrMenuRoute
   '/cash-session': typeof ShellCashSessionRoute
   '/dashboard': typeof ShellDashboardRoute
   '/kds': typeof ShellKdsRoute
   '/profile': typeof ShellProfileRoute
+  '/queue': typeof ShellQueueRoute
   '/reservations': typeof ShellReservationsRoute
   '/users': typeof ShellUsersRoute
   '/expense/entries': typeof ShellExpenseEntriesRoute
@@ -256,7 +270,6 @@ export interface FileRoutesByFullPath {
   '/menu/menus': typeof ShellMenuMenusRoute
   '/menu/variants': typeof ShellMenuVariantsRoute
   '/operations/$section': typeof ShellOperationsSectionRoute
-  '/operations/approval-matrix': typeof ShellOperationsApprovalMatrixRoute
   '/operations/delivery-charge': typeof ShellOperationsDeliveryChargeRoute
   '/orders/$orderId': typeof ShellOrdersOrderIdRoute
   '/reports/$reportId': typeof ShellReportsReportIdRoute
@@ -278,11 +291,14 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/billview': typeof BillviewRoute
   '/login': typeof LoginRoute
+  '/qr-menu': typeof QrMenuRoute
   '/cash-session': typeof ShellCashSessionRoute
   '/dashboard': typeof ShellDashboardRoute
   '/kds': typeof ShellKdsRoute
   '/profile': typeof ShellProfileRoute
+  '/queue': typeof ShellQueueRoute
   '/reservations': typeof ShellReservationsRoute
   '/users': typeof ShellUsersRoute
   '/expense/entries': typeof ShellExpenseEntriesRoute
@@ -294,7 +310,6 @@ export interface FileRoutesByTo {
   '/menu/menus': typeof ShellMenuMenusRoute
   '/menu/variants': typeof ShellMenuVariantsRoute
   '/operations/$section': typeof ShellOperationsSectionRoute
-  '/operations/approval-matrix': typeof ShellOperationsApprovalMatrixRoute
   '/operations/delivery-charge': typeof ShellOperationsDeliveryChargeRoute
   '/orders/$orderId': typeof ShellOrdersOrderIdRoute
   '/reports/$reportId': typeof ShellReportsReportIdRoute
@@ -318,11 +333,14 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/_shell': typeof ShellRouteWithChildren
+  '/billview': typeof BillviewRoute
   '/login': typeof LoginRoute
+  '/qr-menu': typeof QrMenuRoute
   '/_shell/cash-session': typeof ShellCashSessionRoute
   '/_shell/dashboard': typeof ShellDashboardRoute
   '/_shell/kds': typeof ShellKdsRoute
   '/_shell/profile': typeof ShellProfileRoute
+  '/_shell/queue': typeof ShellQueueRoute
   '/_shell/reservations': typeof ShellReservationsRoute
   '/_shell/users': typeof ShellUsersRoute
   '/_shell/expense/entries': typeof ShellExpenseEntriesRoute
@@ -334,7 +352,6 @@ export interface FileRoutesById {
   '/_shell/menu/menus': typeof ShellMenuMenusRoute
   '/_shell/menu/variants': typeof ShellMenuVariantsRoute
   '/_shell/operations/$section': typeof ShellOperationsSectionRoute
-  '/_shell/operations/approval-matrix': typeof ShellOperationsApprovalMatrixRoute
   '/_shell/operations/delivery-charge': typeof ShellOperationsDeliveryChargeRoute
   '/_shell/orders/$orderId': typeof ShellOrdersOrderIdRoute
   '/_shell/reports/$reportId': typeof ShellReportsReportIdRoute
@@ -358,11 +375,14 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/billview'
     | '/login'
+    | '/qr-menu'
     | '/cash-session'
     | '/dashboard'
     | '/kds'
     | '/profile'
+    | '/queue'
     | '/reservations'
     | '/users'
     | '/expense/entries'
@@ -374,7 +394,6 @@ export interface FileRouteTypes {
     | '/menu/menus'
     | '/menu/variants'
     | '/operations/$section'
-    | '/operations/approval-matrix'
     | '/operations/delivery-charge'
     | '/orders/$orderId'
     | '/reports/$reportId'
@@ -396,11 +415,14 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/billview'
     | '/login'
+    | '/qr-menu'
     | '/cash-session'
     | '/dashboard'
     | '/kds'
     | '/profile'
+    | '/queue'
     | '/reservations'
     | '/users'
     | '/expense/entries'
@@ -412,7 +434,6 @@ export interface FileRouteTypes {
     | '/menu/menus'
     | '/menu/variants'
     | '/operations/$section'
-    | '/operations/approval-matrix'
     | '/operations/delivery-charge'
     | '/orders/$orderId'
     | '/reports/$reportId'
@@ -435,11 +456,14 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/_shell'
+    | '/billview'
     | '/login'
+    | '/qr-menu'
     | '/_shell/cash-session'
     | '/_shell/dashboard'
     | '/_shell/kds'
     | '/_shell/profile'
+    | '/_shell/queue'
     | '/_shell/reservations'
     | '/_shell/users'
     | '/_shell/expense/entries'
@@ -451,7 +475,6 @@ export interface FileRouteTypes {
     | '/_shell/menu/menus'
     | '/_shell/menu/variants'
     | '/_shell/operations/$section'
-    | '/_shell/operations/approval-matrix'
     | '/_shell/operations/delivery-charge'
     | '/_shell/orders/$orderId'
     | '/_shell/reports/$reportId'
@@ -475,7 +498,9 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ShellRoute: typeof ShellRouteWithChildren
+  BillviewRoute: typeof BillviewRoute
   LoginRoute: typeof LoginRoute
+  QrMenuRoute: typeof QrMenuRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -494,11 +519,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/billview': {
+      id: '/billview'
+      path: '/billview'
+      fullPath: '/billview'
+      preLoaderRoute: typeof BillviewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/qr-menu': {
+      id: '/qr-menu'
+      path: '/qr-menu'
+      fullPath: '/qr-menu'
+      preLoaderRoute: typeof QrMenuRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_shell/cash-session': {
@@ -527,6 +566,13 @@ declare module '@tanstack/react-router' {
       path: '/profile'
       fullPath: '/profile'
       preLoaderRoute: typeof ShellProfileRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/queue': {
+      id: '/_shell/queue'
+      path: '/queue'
+      fullPath: '/queue'
+      preLoaderRoute: typeof ShellQueueRouteImport
       parentRoute: typeof ShellRoute
     }
     '/_shell/reservations': {
@@ -618,13 +664,6 @@ declare module '@tanstack/react-router' {
       path: '/operations/$section'
       fullPath: '/operations/$section'
       preLoaderRoute: typeof ShellOperationsSectionRouteImport
-      parentRoute: typeof ShellRoute
-    }
-    '/_shell/operations/approval-matrix': {
-      id: '/_shell/operations/approval-matrix'
-      path: '/operations/approval-matrix'
-      fullPath: '/operations/approval-matrix'
-      preLoaderRoute: typeof ShellOperationsApprovalMatrixRouteImport
       parentRoute: typeof ShellRoute
     }
     '/_shell/operations/delivery-charge': {
@@ -747,6 +786,7 @@ interface ShellRouteChildren {
   ShellDashboardRoute: typeof ShellDashboardRoute
   ShellKdsRoute: typeof ShellKdsRoute
   ShellProfileRoute: typeof ShellProfileRoute
+  ShellQueueRoute: typeof ShellQueueRoute
   ShellReservationsRoute: typeof ShellReservationsRoute
   ShellUsersRoute: typeof ShellUsersRoute
   ShellExpenseEntriesRoute: typeof ShellExpenseEntriesRoute
@@ -758,7 +798,6 @@ interface ShellRouteChildren {
   ShellMenuMenusRoute: typeof ShellMenuMenusRoute
   ShellMenuVariantsRoute: typeof ShellMenuVariantsRoute
   ShellOperationsSectionRoute: typeof ShellOperationsSectionRoute
-  ShellOperationsApprovalMatrixRoute: typeof ShellOperationsApprovalMatrixRoute
   ShellOperationsDeliveryChargeRoute: typeof ShellOperationsDeliveryChargeRoute
   ShellOrdersOrderIdRoute: typeof ShellOrdersOrderIdRoute
   ShellReportsReportIdRoute: typeof ShellReportsReportIdRoute
@@ -784,6 +823,7 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellDashboardRoute: ShellDashboardRoute,
   ShellKdsRoute: ShellKdsRoute,
   ShellProfileRoute: ShellProfileRoute,
+  ShellQueueRoute: ShellQueueRoute,
   ShellReservationsRoute: ShellReservationsRoute,
   ShellUsersRoute: ShellUsersRoute,
   ShellExpenseEntriesRoute: ShellExpenseEntriesRoute,
@@ -795,7 +835,6 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellMenuMenusRoute: ShellMenuMenusRoute,
   ShellMenuVariantsRoute: ShellMenuVariantsRoute,
   ShellOperationsSectionRoute: ShellOperationsSectionRoute,
-  ShellOperationsApprovalMatrixRoute: ShellOperationsApprovalMatrixRoute,
   ShellOperationsDeliveryChargeRoute: ShellOperationsDeliveryChargeRoute,
   ShellOrdersOrderIdRoute: ShellOrdersOrderIdRoute,
   ShellReportsReportIdRoute: ShellReportsReportIdRoute,
@@ -821,7 +860,9 @@ const ShellRouteWithChildren = ShellRoute._addFileChildren(ShellRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ShellRoute: ShellRouteWithChildren,
+  BillviewRoute: BillviewRoute,
   LoginRoute: LoginRoute,
+  QrMenuRoute: QrMenuRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

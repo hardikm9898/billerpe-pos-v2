@@ -1,9 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LayoutList, Plus, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { DataTable, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
+import {
+  BulkActionsBar,
+  DataTable,
+  Page,
+  PageHeader,
+  SectionCard,
+  StatusBadge,
+} from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -55,6 +63,23 @@ function MenuCategoriesPage() {
   );
   const rows = [...menuCategories].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
   const itemCount = (id: string) => store.menuItems.filter((i) => i.categoryId === id).length;
+  // Deletion is gated on ACTIVE items only — a category whose items are all
+  // inactive is safe to remove (the backend cascades the same soft-delete to
+  // them), it's only categories still serving live items that must be
+  // emptied first.
+  const activeItemCount = (id: string) =>
+    store.menuItems.filter((i) => i.categoryId === id && i.active).length;
+
+  const [selected, setSelected] = useState<string[]>([]);
+  useEffect(() => setSelected([]), [viewMenuId]);
+
+  const rowIds = rows.map((c) => c.id);
+  const allSelected = rowIds.length > 0 && rowIds.every((id) => selected.includes(id));
+  const toggleAll = () => setSelected(allSelected ? [] : rowIds);
+  const toggleOne = (id: string) =>
+    setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+
+  const selectedWithItems = selected.filter((id) => activeItemCount(id) > 0);
 
   return (
     <Page>
@@ -102,11 +127,48 @@ function MenuCategoriesPage() {
 
       <SectionCard title={`${menuCategories.length} categories`} bodyClassName="p-0 sm:p-0">
         <div className="p-2 sm:p-3">
+          <BulkActionsBar count={selected.length} onClear={() => setSelected([])}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-primary"
+              disabled={!selected.length}
+              title={
+                selectedWithItems.length
+                  ? `${selectedWithItems.length} of the selected categor${selectedWithItems.length === 1 ? "y has" : "ies have"} active item(s) — those will be skipped`
+                  : "Delete selected"
+              }
+              onClick={() => {
+                store.removeMenuCategories(selected);
+                setSelected([]);
+              }}
+            >
+              <Trash2 className="size-4" /> Delete selected
+            </Button>
+          </BulkActionsBar>
+
           <DataTable
             rows={rows}
             keyFn={(c) => c.id}
             onRowClick={(c) => setDraft({ ...c })}
             columns={[
+              {
+                key: "sel",
+                header: (
+                  <Checkbox
+                    checked={allSelected}
+                    onCheckedChange={toggleAll}
+                    aria-label="Select all categories"
+                  />
+                ),
+                cell: (c) => (
+                  <Checkbox
+                    checked={selected.includes(c.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    onCheckedChange={() => toggleOne(c.id)}
+                  />
+                ),
+              },
               {
                 key: "order",
                 header: "#",
@@ -189,10 +251,10 @@ function MenuCategoriesPage() {
               <Button
                 variant="ghost"
                 className="text-primary"
-                disabled={itemCount(draft.id) > 0}
+                disabled={activeItemCount(draft.id) > 0}
                 title={
-                  itemCount(draft.id) > 0
-                    ? `In use by ${itemCount(draft.id)} item(s) — move or delete them first`
+                  activeItemCount(draft.id) > 0
+                    ? `In use by ${activeItemCount(draft.id)} active item(s) — deactivate or move them first`
                     : "Delete category"
                 }
                 onClick={() => {

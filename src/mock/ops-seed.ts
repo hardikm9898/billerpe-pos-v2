@@ -2,6 +2,7 @@ import type {
   BillChargeRule,
   DueBill,
   InvoiceFormat,
+  KotFormat,
   Kitchen,
   Menu,
   PaymentModeConfig,
@@ -117,6 +118,17 @@ export const invoiceFormat: InvoiceFormat = {
     billWithToken: false,
     saveBehaviour: false,
   },
+};
+
+export const kotFormat: KotFormat = {
+  header: [
+    { id: "kh1", content: "outlet-name", fontSize: 14 },
+    { id: "kh2", content: "order-type", fontSize: 12 },
+    { id: "kh3", content: "kot-number", fontSize: 12 },
+    { id: "kh4", content: "token-number", fontSize: 16 },
+    { id: "kh5", content: "customer-details", fontSize: 11 },
+  ],
+  footer: [{ id: "kf1", content: "billerpe-branding", fontSize: 10 }],
 };
 
 export const promoCodes: PromoCode[] = [

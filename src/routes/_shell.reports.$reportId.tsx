@@ -17,6 +17,7 @@ import {
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { ApiError, reportApi } from "@/lib/api";
+import { downloadTextFile, toCsv } from "@/lib/csv";
 import { cn } from "@/lib/utils";
 import { REPORT_TYPES } from "@/mock/data";
 import {
@@ -87,10 +88,28 @@ function ReportDetailPage() {
   const isoFrom = dmyToIso(from);
   const isoTo = dmyToIso(to);
 
-  const [remote, setRemote] = useState<{ headers: string[]; rows: Row[]; total: number } | null>(
-    null,
-  );
+  const [remote, setRemote] = useState<{
+    headers: string[];
+    rows: Row[];
+    total: number;
+    // kot-report only - the range-wide deleted/unbilled totals, shown as
+    // their own StatCards above the per-date table below.
+    kotExtra?: { deletedTickets: number; unbilledTickets: number };
+  } | null>(null);
   const [remoteLoading, setRemoteLoading] = useState(false);
+
+  // Suppliers/Purchase Orders/Expense Heads/Expenses/Cash Sessions are
+  // confirmed out of scope for the Local EXE - loaded here on Reports'
+  // own mount (several report types read from them) instead of globally
+  // on every login (see AppShell.tsx's own comment on why that moved).
+  useEffect(() => {
+    void store.loadSuppliersFromServer();
+    void store.loadPurchaseOrdersFromServer();
+    void store.loadExpenseHeadsFromServer();
+    void store.loadExpensesFromServer();
+    void store.loadCashSessionsFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (!isRemote) return;
@@ -99,7 +118,12 @@ function ReportDetailPage() {
     setRemote(null);
     const run = async () => {
       try {
-        let result: { headers: string[]; rows: Row[]; total: number };
+        let result: {
+          headers: string[];
+          rows: Row[];
+          total: number;
+          kotExtra?: { deletedTickets: number; unbilledTickets: number };
+        };
         switch (reportId) {
           case "day-wise-sales": {
             const { periodData } = await reportApi.dayWiseSales(isoFrom, isoTo);
@@ -188,26 +212,32 @@ function ReportDetailPage() {
             const r = orders.map((o) => ({
               label: `Bill #${o.bill_no}`,
               a: o.order_type,
+              b: o.hms_hotelUser_master?.name ?? "—",
               value: Math.round(Number(o.totalDiscount)),
             }));
             result = {
-              headers: ["Order", "Type", "Discount"],
+              headers: ["Order", "Type", "Given by", "Discount"],
               rows: r,
               total: r.reduce((s, x) => s + x.value, 0),
             };
             break;
           }
           case "kot-report": {
-            const { periodData } = await reportApi.kotReport(isoFrom, isoTo);
+            const { periodData, deletedTickets, unbilledTickets } = await reportApi.kotReport(
+              isoFrom,
+              isoTo,
+            );
             const r = periodData.map((p) => ({
               label: p.period,
-              a: p.totalOrders,
+              a: p.deletedTickets,
+              b: p.unbilledTickets,
               value: p.totalTickets,
             }));
             result = {
-              headers: ["Business date", "Orders", "KOT tickets"],
+              headers: ["Business date", "Deleted", "Not billed", "KOT tickets"],
               rows: r,
               total: r.reduce((s, x) => s + x.value, 0),
+              kotExtra: { deletedTickets, unbilledTickets },
             };
             break;
           }
@@ -305,20 +335,26 @@ function ReportDetailPage() {
         };
       }
       case "staff-performance": {
-        const map = new Map<string, { orders: number; value: number }>();
+        // Tip is attributed to createdBy (the order's own waiter) - see
+        // mock/types.ts's own comment on Order.tip - so it folds into the
+        // exact same per-staff bucket orders/revenue already use here,
+        // not a separate report.
+        const map = new Map<string, { orders: number; value: number; tips: number }>();
         settled.forEach((o) => {
-          const cur = map.get(o.createdBy) ?? { orders: 0, value: 0 };
+          const cur = map.get(o.createdBy) ?? { orders: 0, value: 0, tips: 0 };
           cur.orders += 1;
           cur.value += grandTotalOf(o);
+          cur.tips += o.tip ?? 0;
           map.set(o.createdBy, cur);
         });
         const r = [...map.entries()].map(([label, v]) => ({
           label,
           a: v.orders,
+          b: Math.round(v.tips),
           value: Math.round(v.value),
         }));
         return {
-          headers: ["Staff", "Orders", "Revenue"],
+          headers: ["Staff", "Orders", "Tips", "Revenue"],
           rows: r as Row[],
           total: r.reduce((s, x) => s + x.value, 0),
         };
@@ -361,9 +397,9 @@ function ReportDetailPage() {
     }
   }, [reportId, settled, store, from, to, grandTotalOf]);
 
-  const { headers, rows, total } = isRemote
-    ? (remote ?? { headers: [], rows: [], total: 0 })
-    : local;
+  const { headers, rows, total, kotExtra } = isRemote
+    ? (remote ?? { headers: [], rows: [], total: 0, kotExtra: undefined })
+    : { ...local, kotExtra: undefined };
   const paged = usePagedRows(rows, 10);
 
   // Only the 6 remote reports and expense-report actually respond to the
@@ -450,6 +486,27 @@ function ReportDetailPage() {
 
   const hasB = headers.length === 4;
 
+  // Was a decorative button with no onClick at all (task 42) - exports
+  // every row (not just the current page) using the exact same column set
+  // the table itself renders (headers[0] is always "label", "a"/"b" only
+  // appear when this report actually has them, "value" is always last).
+  const exportCsv = () => {
+    if (!rows.length) {
+      toast.error("Nothing to export", { description: "This report has no rows yet." });
+      return;
+    }
+    const csvRows: (string | number)[][] = [headers];
+    for (const r of rows) {
+      const line: (string | number)[] = [r.label];
+      if (headers.length > 2) line.push(r.a ?? "");
+      if (hasB) line.push(r.b ?? "");
+      line.push(r.value);
+      csvRows.push(line);
+    }
+    downloadTextFile(`${reportId}-${isoFrom}-to-${isoTo}.csv`, toCsv(csvRows));
+    toast.success("Report exported", { description: `${rows.length} rows` });
+  };
+
   return (
     <Page>
       <PageHeader
@@ -463,7 +520,7 @@ function ReportDetailPage() {
                 <ArrowLeft className="size-4" /> Reports
               </Link>
             </Button>
-            <Button variant="outline">
+            <Button variant="outline" onClick={exportCsv}>
               <Download className="size-4" /> Export
             </Button>
           </div>
@@ -471,7 +528,7 @@ function ReportDetailPage() {
         tabs={rangeControl}
       />
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className={cn("grid gap-3", kotExtra ? "sm:grid-cols-5" : "sm:grid-cols-3")}>
         <StatCard label="Rows" value={rows.length} />
         <StatCard label="Group" value={meta.group} />
         <StatCard
@@ -479,6 +536,12 @@ function ReportDetailPage() {
           value={reportId === "kot-report" ? total : <Money value={Math.round(total)} />}
           tone="primary"
         />
+        {kotExtra ? (
+          <>
+            <StatCard label="Deleted" value={kotExtra.deletedTickets} tone="warning" />
+            <StatCard label="Not billed" value={kotExtra.unbilledTickets} tone="warning" />
+          </>
+        ) : null}
       </div>
 
       <SectionCard title="Report data" bodyClassName="p-3 sm:p-4">

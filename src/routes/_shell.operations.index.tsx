@@ -1,5 +1,5 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
-import { Bell, ChevronRight, ScrollText, ServerCog, Settings2, BadgePercent } from "lucide-react";
+import { Bell, ChevronRight, ScrollText, ServerCog, Settings2 } from "lucide-react";
 
 import { Page, PageHeader, SectionCard } from "@/components/kit";
 import { OperationsLanding } from "@/components/operations/landing";
@@ -27,12 +27,6 @@ export const Route = createFileRoute("/_shell/operations/")({
 });
 
 const related = [
-  {
-    to: "/operations/approval-matrix",
-    name: "Approval Matrix",
-    desc: "Discount thresholds and approvers",
-    icon: BadgePercent,
-  },
   {
     to: "/system",
     name: "Local Server & Sync",

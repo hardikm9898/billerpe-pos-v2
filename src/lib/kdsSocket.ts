@@ -1,6 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 
-import { API_BASE_URL } from "./api";
+import { EXE_BASE_URL } from "./api";
 
 // The /kds namespace's per-KOT-round push shape - shared by "newOrder"
 // (fired on generateKot success, both for a brand-new order and for a
@@ -24,22 +24,25 @@ export type KdsTicketPayload = {
   }[];
 };
 
-// Handshake auth is the same httpOnly "token" cookie every REST call
-// already sends (see connection/socket.js's socketAuth) - withCredentials
-// makes the browser attach it automatically, same as fetch's
-// credentials: "include" in lib/api.ts.
+// Connects through the Local EXE, not the cloud directly - Web POS never
+// talks to the cloud directly per the confirmed Milestone 1 architecture,
+// and the EXE's own /kds namespace (connection/socket.js) now ports this
+// exact contract. Handshake auth is the same httpOnly "token" cookie
+// every REST call already sends (see the EXE's socketAuth) -
+// withCredentials makes the browser attach it automatically, same as
+// fetch's credentials: "include" in lib/api.ts.
 export function connectKdsSocket(handlers: {
   onTicket: (order: KdsTicketPayload) => void;
   onOrderComplete: (orderId: number) => void;
 }): () => void {
-  const socket: Socket = io(`${API_BASE_URL}/kds`, {
+  const socket: Socket = io(`${EXE_BASE_URL}/kds`, {
     transports: ["websocket"],
     withCredentials: true,
   });
 
   const joinAllKitchens = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/kitchen/kitchens`, { credentials: "include" });
+      const res = await fetch(`${EXE_BASE_URL}/kitchen/kitchens`, { credentials: "include" });
       const json = (await res.json().catch(() => null)) as {
         results?: { kitchen?: { id: number }[] };
       } | null;

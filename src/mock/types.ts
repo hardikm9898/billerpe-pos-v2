@@ -18,6 +18,7 @@ export type PermissionModule =
   | "menu"
   | "tables"
   | "reservations"
+  | "queue"
   | "users"
   | "permissions"
   | "reports"
@@ -31,7 +32,6 @@ export type PermissionModule =
   | "ops-hardware"
   | "ops-experience"
   | "ops-ledger"
-  | "approval-matrix"
   | "system"
   | "audit-log";
 
@@ -42,7 +42,6 @@ export type SpecialPermission =
   | "orders.editAfterKot"
   | "orders.reopenSettled"
   | "orders.deleteOrder"
-  | "orders.applyDiscountOverThreshold"
   | "tables.mergeTransfer"
   | "system.remakeOrderSequence"
   | "users.editPermissions";
@@ -91,8 +90,17 @@ export interface RestaurantTable {
   status: TableStatus;
   guests?: number;
   orderId?: string;
-  reservationId?: string;
   occupiedSince?: string;
+  /** Only set while status is "Reserved" - the guest name/number entered
+   * when the reservation holding this table was booked (billerpe-local-exe's
+   * services/reservationTableSync.js), so staff can see who it's for and
+   * the order-builder can pre-fill it without retyping. */
+  reservedGuestName?: string;
+  reservedGuestPhone?: string;
+  /** Cloud-authoritative (uat-backend-v2/model/table.js) - bumped only by
+   * "regenerate this table's QR" (qrOrderApi.regenerateTableQr), which
+   * invalidates every previously-printed/shared link for this table. */
+  qrVersion?: number;
 }
 
 export interface MenuCategory {
@@ -180,6 +188,22 @@ export interface PaymentModeConfig {
   deletable: boolean;
 }
 
+/**
+ * Pre-selects a payment mode when a new PaymentSplitEditor row is added -
+ * pure UI convenience, never enforced server-side (a captain can still pick
+ * any other active mode). `tableCategoryId` unset = the order type's own
+ * base default; set = an override for that one table category, dine-in
+ * only (pickup has no table). At most one base row per order type and one
+ * override row per (order type, table category) - store.savePaymentModeDefault
+ * upserts on that pair rather than allowing duplicates.
+ */
+export interface PaymentModeDefaultRule {
+  id: string;
+  orderType: OpsOrderType;
+  tableCategoryId?: string;
+  paymentModeId: string;
+}
+
 export interface OrderLine {
   id: string;
   itemId: string;
@@ -200,7 +224,24 @@ export interface PaymentSplit {
 
 export interface Order {
   id: string;
+  /** Numeric-only, stripped-prefix derivative of billNo (parseBillNoAsOrderNo)
+   * - kept for sorting/search, since it's cheap to compare numerically, but
+   * NOT the real bill number: an unsynced order's billNo is "OFF12", which
+   * parses to the same 12 a genuinely different, already-synced order could
+   * also have as its real number - two unrelated orders can show the same
+   * orderNo at the same time. Never use this for a customer- or staff-
+   * facing "Bill No" display; use billNo (below) instead, which is exactly
+   * what's actually stored server-side, prefix included. */
   orderNo: number;
+  /** The real Order.bill_no string from the backend - "OFF12" until this
+   * order syncs to the cloud and gets a permanent number, a plain numeric
+   * string ("37") after. This is what a printed bill, the order list, and
+   * the e-bill webview must all show as "the bill number" - showing
+   * orderNo instead (as doPrintBill used to, via the even-more-wrong raw
+   * backendId) was confirmed live as the cause of the printed bill's
+   * number not matching the order list for the same order. Undefined only
+   * for a local draft that has never touched the backend at all. */
+  billNo?: string;
   type: OrderType;
   tableId?: string;
   tableLabel: string;
@@ -212,9 +253,32 @@ export interface Order {
   menuId?: string;
   customerName?: string;
   customerPhone?: string;
-  discount?: { label: string; amount: number; approvalFlagged?: boolean };
+  // `type`/`value` are only ever set by applyDiscount, within THIS session -
+  // an order reloaded from the backend (mapRawLiveOrder/
+  // mapRawOrderHistoryEntry) only ever gets `amount` back (the backend has
+  // no column for "this was originally a percentage"), so it's correctly
+  // frozen from that point on. While `type` is "percent", orderTotals
+  // recomputes `amount` fresh off the order's CURRENT subtotal instead of
+  // trusting this stale value - fixes a live-reported bug where adding an
+  // item after applying a % discount left the discount amount frozen at
+  // its pre-add value instead of growing with the new subtotal.
+  discount?: { label: string; amount: number; type?: "percent" | "flat"; value?: number };
   deliveryCharge?: number;
   packagingCharge?: number;
+  /** Waiter service tip, attributed to whoever created the order
+   * (createdBy) - only ever set once, at settlement (store.settleOrder).
+   * See uat-backend-v2/model/order.js's own comment. */
+  tip?: number;
+  /** Owner-visible "reprinted N times" counter (Task 5) - incremented only
+   * by the explicit "Reprint bill" action (store.printBill), never the
+   * first bill-generation print. See
+   * billerpe-local-exe/model/order.js's own comment. */
+  billPrintCount?: number;
+  /** Real per-day, per-hotel running kitchen token number (Order.token on
+   * the backend, uat-backend-v2/controller/kto.js's generateToken) - 0/
+   * unset means tokens are off for this order (Hotel.is_token_on) or not
+   * yet assigned. Used by the "token-number" KOT format line. */
+  token?: number;
   payments?: PaymentSplit[];
   paymentMode?: PaymentMode;
   businessDate: string;
@@ -237,6 +301,22 @@ export interface Order {
    * changed - consumers of order history should read this instead of
    * calling orderTotals() for these orders. */
   backendTotals?: { grand: number; tax: number; discount: number; serviceCharge: number };
+  /** Set only on a local, editable copy of an already-settled order (see
+   * store.startEditSettledOrder) - the value is that real order's
+   * backendId. Lets the order screen show "Save changes"/"Cancel" instead
+   * of the normal billing actions, and tells saveSettledOrderEdits which
+   * real order to PATCH. */
+  editingSettledOrderId?: number;
+}
+
+export interface RefundDue {
+  id: string;
+  billNo: string;
+  /** Always positive - the amount owed back to the customer (the order's
+   * real `due` column is negative; this is its absolute value). */
+  amount: number;
+  date: string;
+  backendOrderId: number;
 }
 
 export type KotStatus =
@@ -278,22 +358,46 @@ export interface Customer {
   active?: boolean;
 }
 
-export type ReservationStatus =
-  "Booked" | "Confirmed" | "Seated" | "Completed" | "Cancelled" | "No Show";
-
+// Backed by uat-backend-v2's real hms_tableBooking_mst (controller/
+// tableBooking.js) - cloud-routed, not local-exe (see reservationApi's own
+// comment in lib/api.ts for why). A booking can span multiple tables
+// sharing one booking_id; the cloud already collapses that into one row
+// per booking with a `table_name` array on read. No status field: a
+// cancelled/deleted booking is filtered out server-side (deleted:false)
+// rather than coming back with a status flag, so anything in this list is
+// implicitly active by construction.
 export interface Reservation {
   id: string;
   customerName: string;
   mobile: string;
+  email?: string;
   party: number;
-  tableId: string;
-  tableLabel: string;
+  tables: { id: string; label: string }[];
   date: string;
-  time: string;
-  status: ReservationStatus;
-  releaseMode: "Manual" | "Auto";
-  graceSeconds: number;
-  note?: string;
+  startTime: string;
+  endTime: string;
+  totalAmount: number;
+  advance: number;
+  gstNo?: string;
+}
+
+export type QueueStatus = "Waiting" | "Seated" | "No Show" | "Cancelled";
+
+// Walk-in waitlist - deliberately not stored/synced anywhere but this
+// hotel's own exe (billerpe-local-exe/model/queueEntry.js's own comment
+// on why): real-time, single-shift, no accounting/compliance reason to
+// outlive the day it happened.
+export interface QueueEntry {
+  id: string;
+  backendId: number;
+  name: string;
+  mobile: string;
+  partySize: number;
+  status: QueueStatus;
+  joinedAt: string;
+  calledAt?: string;
+  resolvedAt?: string;
+  notes?: string;
 }
 
 export interface StockUnit {
@@ -474,16 +578,30 @@ export interface ExpenseHead {
   name: string;
   type: "Fixed" | "Variable";
   active: boolean;
+  // Soft-deleted heads stay in this list (never dropped by
+  // loadExpenseHeadsFromServer/removeExpenseHeads) purely so past expense
+  // entries can still resolve their head's name - see headName() in
+  // _shell.expense.entries.tsx. Any UI letting the user pick/manage heads
+  // must filter these out itself.
+  deleted?: boolean;
 }
 
 export interface Expense {
   id: string;
   headId: string;
   amount: number;
+  /** "DD/MM/YYYY" - the business date this entry is bucketed under. */
   date: string;
+  /** Real time-of-day this entry was recorded, "H:MM am/pm" - separate
+   * from `date` so existing `date === X` day-bucket comparisons elsewhere
+   * keep working unchanged. */
+  time: string;
   mode: "Cash" | "Bank" | "UPI";
   note: string;
   createdBy: string;
+  /** Real HotelUser id who recorded this, when known - lets the entries
+   * screen filter "entered by" without re-deriving it from createdBy text. */
+  createdByUserId?: string;
 }
 
 export interface CashMovement {
@@ -517,16 +635,6 @@ export type ConnectionState =
   | "local-server-down"
   | "offline-limit-exceeded";
 
-export interface Device {
-  id: string;
-  name: string;
-  type: "POS Terminal" | "Tablet" | "KDS Screen" | "Mobile";
-  status: "Online" | "Offline" | "Blocked";
-  lastSeen: string;
-  ip: string;
-  registeredOn: string;
-}
-
 export interface Printer {
   id: string;
   name: string;
@@ -542,17 +650,6 @@ export interface Printer {
   tableIds?: string[];
   /** the KOT printer categories fall back to when not explicitly assigned to any printer. Exactly one KOT-role printer should carry this. */
   isDefault?: boolean;
-}
-
-export interface SyncItem {
-  id: string;
-  entity: string;
-  reference: string;
-  action: string;
-  status: "Pending" | "Synced" | "Failed" | "Conflict";
-  conflictTier?: "Auto-Resolved" | "Needs Review";
-  queuedAt: string;
-  device: string;
 }
 
 export interface AppNotification {
@@ -583,16 +680,6 @@ export interface NotificationSetting {
   whatsapp: boolean;
   sms: boolean;
   inApp: boolean;
-}
-
-export interface ApprovalRule {
-  id: string;
-  domain: string;
-  threshold: string;
-  approver: Role;
-  enabled: boolean;
-  locked: boolean;
-  note?: string;
 }
 
 /* ---------------- operations module ---------------- */
@@ -643,6 +730,10 @@ export interface InvoiceFormat {
   fssaiNo: string;
   multiLanguage: boolean;
   upiId: string;
+  /** Full, ready-to-render URL for the "logo" header/footer line content -
+   * built client-side from the hotel's own uploaded filename
+   * (hotelApi.getSettings/uploadLogo), never stored as a filename here. */
+  logoUrl?: string;
   header: InvoiceLine[];
   footer: InvoiceLine[];
   /** fields present in the source form with no confirmed frontend consumer */
@@ -652,6 +743,35 @@ export interface InvoiceFormat {
     billWithToken: boolean;
     saveBehaviour: boolean;
   };
+}
+
+// Dynamic KOT format (Task 1) - same header/footer-lines shape as
+// InvoiceFormat, a separate content-type vocabulary since a KOT shows
+// kitchen-relevant fields (order type, token/KOT number, customer/table)
+// rather than billing ones (no logo/UPI-QR/GST here) - restaurant name and
+// address are shared concepts and reuse the same content keys as
+// InvoiceLineContent's "outlet-name"/"address".
+export type KotLineContent =
+  | "outlet-name"
+  | "address"
+  | "order-type"
+  | "customer-details"
+  | "bill-no"
+  | "token-number"
+  | "kot-number"
+  | "billerpe-branding"
+  | "text";
+
+export interface KotLine {
+  id: string;
+  content: KotLineContent;
+  text?: string;
+  fontSize: number;
+}
+
+export interface KotFormat {
+  header: KotLine[];
+  footer: KotLine[];
 }
 
 export interface PromoCode {

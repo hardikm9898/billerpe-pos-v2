@@ -2,13 +2,13 @@ import { Plus, X } from "lucide-react";
 import QRCode from "qrcode";
 import { useEffect, useState } from "react";
 
-import { Money } from "@/components/kit";
+import { IconButton, Money } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
-import type { PaymentSplit } from "@/mock/types";
+import type { OpsOrderType, PaymentSplit } from "@/mock/types";
 
 export function splitPaid(splits: PaymentSplit[]) {
   return splits.reduce((s, p) => s + p.amount, 0);
@@ -57,13 +57,27 @@ export function PaymentSplitEditor({
   splits,
   onChange,
   total,
+  excludeModes,
+  orderType,
+  tableCategoryId,
 }: {
   splits: PaymentSplit[];
   onChange: (splits: PaymentSplit[]) => void;
   total: number;
+  /** Modes to hide from the picker - e.g. "Due" on the Due Bills settle
+   * dialog, where picking it just produces "isn't a payment mode the
+   * backend supports here" (settleDueBills only ever accepts Cash/UPI/
+   * Card - collecting against an existing due can't itself be "more due"). */
+  excludeModes?: string[];
+  /** Order Type Settings -> Default payment mode context - which default
+   * to resolve when a new split row is added. Omit either (e.g. Due Bills'
+   * settle dialog, which isn't scoped to one order) to just fall back to
+   * the first active mode, same as before this existed. */
+  orderType?: OpsOrderType;
+  tableCategoryId?: string;
 }) {
   const store = useStore();
-  const activeModes = store.paymentModes.filter((m) => m.active);
+  const activeModes = store.paymentModes.filter((m) => m.active && !excludeModes?.includes(m.name));
   const paid = splitPaid(splits);
   const due = Math.round((total - paid) * 100) / 100;
   const upiAmount = splits.filter((p) => p.mode === "UPI").reduce((s, p) => s + p.amount, 0);
@@ -111,20 +125,27 @@ export function PaymentSplitEditor({
               )
             }
           />
-          <Button
-            size="icon"
-            variant="ghost"
+          <IconButton
+            label="Remove split"
             onClick={() => onChange(splits.filter((_, i) => i !== idx))}
           >
             <X className="size-4" />
-          </Button>
+          </IconButton>
         </div>
       ))}
       <Button
         variant="outline"
         size="sm"
         onClick={() =>
-          onChange([...splits, { mode: activeModes[0]?.name ?? "Cash", amount: Math.max(0, due) }])
+          onChange([
+            ...splits,
+            {
+              mode: orderType
+                ? store.resolveDefaultPaymentMode(orderType, tableCategoryId)
+                : (activeModes[0]?.name ?? "Cash"),
+              amount: Math.max(0, due),
+            },
+          ])
         }
       >
         <Plus className="size-4" /> Add payment mode

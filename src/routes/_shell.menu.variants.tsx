@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Layers, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
-import { DataTable, Money, Page, PageHeader, SectionCard } from "@/components/kit";
+import { DataTable, Page, PageHeader, SectionCard } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -112,7 +112,6 @@ function MenuVariantsPage() {
               header: "Variant",
               cell: (v) => <span className="font-medium">{v.name}</span>,
             },
-            { key: "price", header: "Default price", cell: (v) => <Money value={v.price} /> },
             { key: "count", header: "Used by", cell: (v) => `${v.items.length} items` },
             {
               key: "delete",
@@ -186,14 +185,10 @@ function MenuVariantsPage() {
                   placeholder="e.g. Half"
                 />
               </div>
-              <div className="space-y-1.5">
-                <Label>Default price (₹)</Label>
-                <Input
-                  type="number"
-                  value={draft.price}
-                  onChange={(e) => setDraft({ ...draft, price: Number(e.target.value) })}
-                />
-              </div>
+              <p className="text-xs text-muted-foreground">
+                Price is set per menu item when this variant is attached to it, on that item's own
+                edit form — every item can price the same variant differently.
+              </p>
             </div>
           ) : null}
           <DialogFooter>

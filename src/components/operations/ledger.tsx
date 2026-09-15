@@ -99,6 +99,34 @@ export function DuePaymentSection() {
         />
       </div>
 
+      {store.refundDueOrders.length ? (
+        <SectionCard
+          title="Refunds due"
+          description="An edited settled order's new total came out lower than what was already collected - hand back the difference and mark it here."
+          bodyClassName="p-3 sm:p-4"
+        >
+          <div className="space-y-2">
+            {store.refundDueOrders.map((r) => (
+              <div
+                key={r.id}
+                className="flex items-center justify-between gap-3 rounded-xl border border-border px-3 py-2"
+              >
+                <div>
+                  <p className="text-sm font-medium">{r.billNo}</p>
+                  <p className="text-xs text-muted-foreground">{r.date}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Money value={r.amount} className="font-semibold text-warning" />
+                  <Button size="sm" variant="outline" onClick={() => store.settleRefundDue(r.id)}>
+                    Mark refunded
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      ) : null}
+
       <SectionCard title="Unsettled bills" bodyClassName="p-3 sm:p-4">
         <Toolbar
           right={
@@ -257,6 +285,7 @@ export function DuePaymentSection() {
               splits={settleSplits}
               onChange={setSettleSplits}
               total={settleTarget.amount}
+              excludeModes={["Due"]}
             />
           ) : null}
           <DialogFooter>

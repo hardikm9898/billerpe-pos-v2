@@ -4,10 +4,557 @@
 // sets (httpOnly), so every call needs credentials: "include".
 export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] ?? "http://localhost:4000";
 
+// Milestone 1 Phase 8 (POS/system-understanding/MILESTONE-1-LOCAL-EXE-PLAN.md):
+// billerpe-local-exe, the on-premise server. Only a subset of endpoints
+// have a real EXE-side implementation as of Phases 1-7 - everything else
+// keeps going to API_BASE_URL (the cloud) unchanged.
+//
+// Architecture memo, Phase C: `let`, not `const` - a build-time env var is
+// the ONLY thing this ever resolved to before, meaning a restaurant's
+// router reassigning a new DHCP lease permanently broke every client until
+// someone rebuilt with a new VITE_EXE_BASE_URL. discoverLocalServer() below
+// can now override this at runtime; every apiGet/apiPost/etc. call site
+// reads resolveBaseUrl() -> this binding fresh on every request (never
+// captured at import time), so overriding it here is enough - no other
+// call site needs to change.
+export let EXE_BASE_URL = import.meta.env["VITE_EXE_BASE_URL"] ?? "http://192.168.1.48:4100";
+
+// crypto.randomUUID() only exists in secure contexts (HTTPS, or the page's
+// own localhost) - undefined (throws "not a function") on a plain-HTTP LAN
+// address like http://192.168.1.12:8080, which this POS is routinely
+// accessed at on a restaurant's own local network. Falls back to a manual
+// RFC4122 v4 generator there instead of failing every login on that origin.
+function randomUUID(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+// This browser's own random per-profile id, sent as `device_id` on every
+// restaurantLogin/pinLogin/registerDevice call - NOT to be confused with
+// the exe's own device-identity.json id (surfaced via /health's
+// `deviceId`, see getLocalServerIdentity above), which identifies the
+// physical server PC instead. Shared here (rather than duplicated in
+// login.tsx and the System page's re-authenticate action) since both now
+// need to call registerDevice with the same value.
+export function getBrowserDeviceId(): string {
+  if (typeof window === "undefined") return "server";
+  const key = "billerpe.deviceId";
+  let id = window.localStorage.getItem(key);
+  if (!id) {
+    id = randomUUID();
+    window.localStorage.setItem(key, id);
+  }
+  return id;
+}
+
+// The exe's own login (restaurantLogin/pinLogin) already returns this
+// token in its response body, and middleware/adminAuth.js already accepts
+// it as `Authorization: Bearer <token>` as a fallback when there's no
+// cookie - both sides of this existed already, just never connected. The
+// app relied ENTIRELY on the httpOnly cookie set by that same login call,
+// which is a cross-origin cookie from the browser's point of view (the
+// frontend and the exe are two different origins - different ports on
+// the same host still count as different origins for cookie purposes in
+// several real-world browser configurations, even when SameSite=Strict
+// alone wouldn't explain it) - confirmed live as the actual cause of a
+// repeated "logged out on every refresh" report: the exe's own endpoints
+// all correctly authorize a valid session (tested directly, bypassing the
+// browser), yet the browser's own copy of `billerpe.session` was getting
+// wiped to authed:false right after a refresh, meaning a real 401 was
+// happening in the browser specifically - the cookie just wasn't making
+// it back. A bearer token sent as an ordinary header isn't subject to any
+// of that cookie-specific policy at all, so this is the fix rather than a
+// further guess at exactly which cookie rule was in play.
+const AUTH_TOKEN_KEY = "billerpe.authToken";
+
+export function setStoredAuthToken(token: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+    else window.localStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    // ignore - falls back to cookie-only auth, same as before this existed
+  }
+}
+
+function getStoredAuthToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+// Merged into every apiGet/apiPost/etc. call below - harmless to send
+// even when there's no stored token (just omitted) or when the target is
+// the cloud rather than the exe (the cloud's own adminAuth doesn't read
+// this header at all, so it's simply ignored there, not a leak of
+// anything sensitive to the wrong origin - this is a per-install exe-
+// signed token, meaningless outside this one exe).
+function authHeader(): Record<string, string> {
+  const token = getStoredAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+const LAST_KNOWN_GOOD_KEY = "billerpe.exeBaseUrl";
+// bonjour-service (services/lanDiscovery.js) advertises the EXE under this
+// exact fixed hostname regardless of the PC's own OS hostname, which varies
+// per install and isn't knowable from the client side ahead of time. mDNS
+// is link-local multicast - it never crosses a router - so every
+// restaurant's own isolated LAN can safely reuse the same fixed name with
+// no cross-site collision risk.
+const MDNS_HOSTNAME_URL = "http://billerpe-local-server.local:4100";
+
+function setExeBaseUrl(url: string) {
+  EXE_BASE_URL = url;
+  try {
+    window.localStorage.setItem(LAST_KNOWN_GOOD_KEY, url);
+  } catch {
+    // localStorage can throw (private browsing, storage disabled) - losing
+    // the cache just means next time skips straight to mDNS, not a failure.
+  }
+}
+
+async function pingHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// Matched by (method, path) pair, not path alone - several EXE-ported reads
+// share a path with a cloud-only write that hasn't been ported (e.g. GET
+// /table is real on the EXE, POST /table - creating a table - is not; they
+// must not both route to the EXE just because they share a prefix). Keep
+// this list in sync with routes/index.js in billerpe-local-exe as further
+// phases land - it is the actual source of truth for what's real there.
+const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: string) => boolean }[] =
+  [
+    { method: "POST", test: (p) => p === "/restaurantLogin" },
+    { method: "POST", test: (p) => p === "/pinLogin" },
+    // Bootstrap-only, no cloud equivalent exists at all - see
+    // controller/deviceRegistration.js in billerpe-local-exe.
+    { method: "POST", test: (p) => p === "/registerDevice" },
+    { method: "GET", test: (p) => p === "/table" },
+    { method: "POST", test: (p) => p === "/table" },
+    { method: "GET", test: (p) => p === "/getTableCatagories" },
+    { method: "POST", test: (p) => p === "/addTableCatagories" },
+    { method: "POST", test: (p) => p === "/editTableCatagories" },
+    { method: "POST", test: (p) => p === "/removeTableCatagories" },
+    { method: "POST", test: (p) => p === "/editTable" },
+    { method: "POST", test: (p) => p === "/removeTable" },
+    { method: "POST", test: (p) => p === "/moveTable" },
+    // Ported alongside moveTable - moves one KOT round rather than the
+    // whole order, but the same class of order-mutating write.
+    { method: "POST", test: (p) => p === "/moveKot" },
+    { method: "GET", test: (p) => p === "/menu" },
+    { method: "GET", test: (p) => p === "/menuShow/all" },
+    // Full CRUD for menu categories and items, mirroring uat-backend-v2's
+    // controller/menu.js exactly (see billerpe-local-exe/controller/menu.js's
+    // own comments) - previously writes fell through to the cloud
+    // unconditionally, which 401'd and force-logged-out every EXE-
+    // authenticated session (confirmed live as the "adding a category
+    // crashes the app" report). UNPORTED_CLOUD_WRITE_PATHS above no longer
+    // needs these three - a 401 here now means a real EXE session expiry.
+    { method: "POST", test: (p) => p === "/catagories" },
+    { method: "POST", test: (p) => p === "/catagoriesEdit" },
+    { method: "POST", test: (p) => p === "/catagoriesRemove" },
+    { method: "POST", test: (p) => p === "/menu" },
+    { method: "POST", test: (p) => p === "/menuEdit" },
+    { method: "POST", test: (p) => p === "/menuRemove" },
+    // Task 10 (Multi Menu backend support): full CRUD was mirrored onto the
+    // EXE for menu catalogues, so all four route here rather than only the
+    // read.
+    { method: "GET", test: (p) => p === "/menuCatalog" },
+    { method: "POST", test: (p) => p === "/menuCatalog" },
+    { method: "POST", test: (p) => p === "/menuCatalogEdit" },
+    { method: "POST", test: (p) => p === "/menuCatalogRemove" },
+    // Payment Modes config backend build - full CRUD mirrored onto the
+    // EXE the same way menu catalogues were.
+    { method: "GET", test: (p) => p === "/paymentMode" },
+    { method: "POST", test: (p) => p === "/paymentMode" },
+    { method: "POST", test: (p) => p === "/paymentModeEdit" },
+    { method: "POST", test: (p) => p === "/paymentModeRemove" },
+    // Delivery/Packaging charge rules backend build - full CRUD mirrored
+    // onto the EXE the same way.
+    { method: "GET", test: (p) => p === "/billChargeRule" },
+    { method: "POST", test: (p) => p === "/billChargeRule" },
+    // Notification settings backend build.
+    { method: "GET", test: (p) => p === "/notificationSetting" },
+    { method: "POST", test: (p) => p === "/notificationSettingToggle" },
+    // Rich Permissions role-defaults backend build.
+    { method: "GET", test: (p) => p === "/rolePermissionDefault" },
+    { method: "POST", test: (p) => p === "/rolePermissionDefault" },
+    { method: "POST", test: (p) => p === "/rolePermissionDefaultSpecial" },
+    { method: "GET", test: (p) => p.startsWith("/catagories/") },
+    // loadMenuFromServer (mock/store.tsx) Promise.all's these three alongside
+    // getCategories - same "one unported call poisons the whole load" lesson
+    // as /pickupOrder above, found the same way (driving the browser).
+    { method: "GET", test: (p) => p === "/menuShowWithVariants" },
+    { method: "GET", test: (p) => p === "/variant" },
+    { method: "POST", test: (p) => p === "/variant" },
+    { method: "PUT", test: (p) => p === "/variant" },
+    { method: "GET", test: (p) => p === "/addon" },
+    { method: "POST", test: (p) => p === "/addon" },
+    { method: "PUT", test: (p) => p === "/addon" },
+    { method: "GET", test: (p) => p === "/role" },
+    { method: "GET", test: (p) => p === "/getUserAccess" },
+    { method: "POST", test: (p) => p === "/adminOrder" },
+    { method: "GET", test: (p) => p.startsWith("/order/") },
+    // Owner-visible bill-reprint counter (Task 5) - a real local write
+    // against the exe's own Order row, not a cloud relay (see
+    // billerpe-local-exe/controller/order.js's incrementBillPrintCount).
+    { method: "POST", test: (p) => /^\/order\/\d+\/reprintCount$/.test(p) },
+    // Load-bearing for the table grid: loadTablesFromServer (mock/store.tsx)
+    // Promise.all's this alongside getTables/getCategories, so it failing
+    // (still cloud-routed) took the whole table load down with it - found by
+    // actually driving the browser, not by reading the route list.
+    { method: "GET", test: (p) => p === "/pickupOrder" },
+    { method: "POST", test: (p) => p === "/settleBills" },
+    { method: "POST", test: (p) => p === "/kotOrder" },
+    // Real local implementation (billerpe-local-exe/controller/holdOrder.js),
+    // same create/update split as kotOrder - NOT a cloud relay, since hold
+    // mutates the same local Order/OrderDetails/Table rows kotOrder and
+    // adminOrder already own as this EXE's source of truth. Missing from
+    // this list was a real bug: store.holdOrder posted straight to
+    // POST /holdOrder with no EXE_ROUTES entry, so it fell through to a
+    // direct browser->cloud call and 401'd - same class of bug as the
+    // payment-mode-defaults one, confirmed live as "hold order logs the app
+    // out."
+    { method: "POST", test: (p) => p === "/holdOrder" },
+    // Waitlist queue - real local implementation (billerpe-local-exe/
+    // controller/queue.js), no cloud counterpart at all - see model/
+    // queueEntry.js's own comment on why.
+    { method: "POST", test: (p) => p === "/queue" },
+    { method: "GET", test: (p) => p === "/queue" },
+    { method: "PUT", test: (p) => /^\/queue\/\d+$/.test(p) },
+    { method: "POST", test: (p) => /^\/queue\/\d+\/call$/.test(p) },
+    { method: "POST", test: (p) => p === "/queue/clear" },
+    // Order timeline - ported alongside kotOrder/adminOrder/settleBills/
+    // editSettledOrder, which now each write a hms_timeline_mst row here
+    // too (billerpe-local-exe/helpers/timeline.js). startsWith, not exact -
+    // orderApi.getTimeline always calls this with "?id=..." appended (same
+    // bug class as /stock/getAllRawMaterial above - caught this time before
+    // shipping it, not after).
+    { method: "GET", test: (p) => p.startsWith("/getTimelineByOrderId") },
+    { method: "GET", test: (p) => p === "/localSyncStatus" },
+    // Order History screen (orderHistoryApi.getAllHeaders) - see
+    // controller/order.js#getOrdersByBillNo in billerpe-local-exe.
+    { method: "GET", test: (p) => p.startsWith("/searchOrder/") },
+
+    // Follow-up pass: read-only endpoints for screens that were falling
+    // through to the real cloud on every login and 401ing there. Write
+    // paths for these (create/edit forms) are NOT ported yet, except tax
+    // rules (TaxType has no cloud sync endpoint at all to fall back to -
+    // see cloudPull.js's own comment - so its writes are local-only by
+    // necessity, not a shortcut).
+    
+    { method: "GET", test: (p) => p === "/offlineHotelUser" },
+    { method: "POST", test: (p) => p === "/user" },
+    { method: "POST", test: (p) => p === "/userUpdate" },
+    { method: "GET", test: (p) => p === "/singleHotel" },
+    { method: "POST", test: (p) => p === "/updateInvoiceFormate" },
+    { method: "POST", test: (p) => p === "/updateRestaurantSetting" },
+    { method: "POST", test: (p) => p === "/service_charge" },
+
+    // Exact-match would miss this - customerApi.getAll() always calls
+    // "/customer/getAll?limit=500" (query string included in the path
+    // passed to apiGet), confirmed live as a real bug: this fell through
+    // to the cloud on every call until switched to startsWith.
+
+    { method: "GET", test: (p) => p.startsWith("/customer/getAll") },
+    { method: "POST", test: (p) => p === "/customer/create" },
+    { method: "PUT", test: (p) => p === "/customer/update" },
+    { method: "GET", test: (p) => p.startsWith("/customer/lastOrder") },
+    { method: "GET", test: (p) => p === "/offlinePrinterSetting" },
+    { method: "POST", test: (p) => p === "/setPrinter" },
+    { method: "POST", test: (p) => p === "/EditPrinter" },
+    { method: "POST", test: (p) => p === "/deletePrinter" },
+    { method: "POST", test: (p) => p === "/setCategoriesForPrinter" },
+    { method: "GET", test: (p) => p === "/taxType/tax" },
+    { method: "POST", test: (p) => p === "/taxType/tax" },
+    { method: "PUT", test: (p) => p === "/taxType/tax" },
+    { method: "GET", test: (p) => p === "/stock/getAllUnit" },
+    { method: "POST", test: (p) => p === "/stock/addUnit" },
+    { method: "PUT", test: (p) => p === "/stock/editUnit" },
+    // startsWith, not exact - rawMaterialApi.getAll(search) appends
+    // "?search=..." when a search term is typed, and an exact match would
+    // miss that suffix and silently fall through to the cloud, same bug
+    // class as the /customer/getAll fix above (confirmed by reading the
+    // call site, same shape as that one - not yet reproduced live).
+    { method: "GET", test: (p) => p.startsWith("/stock/getAllRawMaterial") },
+    { method: "POST", test: (p) => p === "/stock/addRowMaterial" },
+    { method: "PUT", test: (p) => p === "/stock/editRowMaterial" },
+    { method: "GET", test: (p) => p === "/stock/stockInHand" },
+    { method: "POST", test: (p) => p === "/stock/stockIn" },
+    { method: "POST", test: (p) => p === "/stock/stockOut" },
+    { method: "GET", test: (p) => p === "/stock/stockHistory" },
+    { method: "PUT", test: (p) => p === "/stock/stockHistory" },
+    { method: "DELETE", test: (p) => p === "/stock/stockHistory" },
+    { method: "POST", test: (p) => p === "/stock/manualStock" },
+    { method: "POST", test: (p) => p === "/stock/manualAveragePrice" },
+    { method: "GET", test: (p) => p.startsWith("/report/order-aggregation") },
+    { method: "GET", test: (p) => p.startsWith("/report/posCollection") },
+    { method: "GET", test: (p) => p.startsWith("/report/itemTextReports") },
+    { method: "GET", test: (p) => p.startsWith("/report/discountedReports") },
+    { method: "GET", test: (p) => p.startsWith("/report/kotReport") },
+    { method: "POST", test: (p) => p === "/getDueOrders" },
+    { method: "POST", test: (p) => p === "/settleDue" },
+    { method: "POST", test: (p) => p === "/allSettleDue" },
+    { method: "POST", test: (p) => p === "/editSettledOrder" },
+    { method: "GET", test: (p) => p === "/refundDue" },
+    { method: "POST", test: (p) => p === "/refundDue" },
+    { method: "POST", test: (p) => p === "/orderRemove" },
+
+    // KDS - kitchen list/config. The /kds socket namespace itself isn't
+    // path-routed here (kdsSocket.ts connects directly to EXE_BASE_URL,
+    // not through apiGet/apiPost) - see its own comment.
+    { method: "GET", test: (p) => p === "/kitchen/kitchens" },
+    { method: "POST", test: (p) => p === "/kitchen/kitchens" },
+    { method: "POST", test: (p) => p === "/kitchen/setCategoryForKitchen" },
+    { method: "DELETE", test: (p) => p.startsWith("/kitchen/deleteKitchen/") },
+
+    // Phase F (architecture memo): recipes + semi-finished, closing one of
+    // the 11 remaining direct-cloud paths - see
+    // billerpe-local-exe/controller/{recipes,semiFinishedItems}.js.
+    { method: "POST", test: (p) => p === "/recipes/addRecipe" },
+    { method: "PUT", test: (p) => p === "/recipes/editRecipe" },
+    { method: "DELETE", test: (p) => p === "/recipes/deleteRecipe" },
+    { method: "GET", test: (p) => p === "/recipes/getAllRecipes" },
+    { method: "GET", test: (p) => p === "/recipes/getAllRecipesForMenu" },
+    { method: "GET", test: (p) => p.startsWith("/recipes/getSingleRecipes") },
+    { method: "GET", test: (p) => p === "/semiFinished/all" },
+    { method: "GET", test: (p) => p.startsWith("/semiFinished/single") },
+    { method: "GET", test: (p) => p === "/semiFinished/names" },
+    { method: "GET", test: (p) => p === "/semiFinished/stockLevels" },
+    { method: "POST", test: (p) => p === "/semiFinished/add" },
+    { method: "PUT", test: (p) => p === "/semiFinished/edit" },
+    { method: "DELETE", test: (p) => p.startsWith("/semiFinished/delete") },
+    { method: "POST", test: (p) => p === "/semiFinished/production" },
+
+    // Phase F: expense + cash session.
+    { method: "POST", test: (p) => p === "/expense/addExpenseHead" },
+    { method: "GET", test: (p) => p === "/expense/getAllExpenseHead" },
+    { method: "PUT", test: (p) => p === "/expense/editExpenseHead" },
+    { method: "DELETE", test: (p) => p === "/expense/deleteExpenseHead" },
+    { method: "POST", test: (p) => p === "/expense/addExpense" },
+    { method: "GET", test: (p) => p.startsWith("/expense/allEntry") },
+    { method: "PUT", test: (p) => p === "/expense/editExpense" },
+    { method: "DELETE", test: (p) => p === "/expense/deleteExpense" },
+    { method: "GET", test: (p) => p === "/cashSession" },
+    { method: "POST", test: (p) => p === "/cashSession/open" },
+    { method: "POST", test: (p) => p === "/cashSession/movement" },
+    { method: "POST", test: (p) => p === "/cashSession/close" },
+
+    // Phase F: promo codes + e-bill credit balance (read-only, cached
+    // locally - see billerpe-local-exe/controller/ebillCredit.js).
+    { method: "POST", test: (p) => p === "/promocodes/create" },
+    { method: "PUT", test: (p) => p === "/promocodes/update" },
+    { method: "GET", test: (p) => p === "/promocodes/getAll" },
+    { method: "GET", test: (p) => p === "/getEbillCredit" },
+
+    // Cloud relay (billerpe-local-exe/services/cloudRelay.js) - real
+    // business logic (WhatsApp e-bill send, the reservation auto-open
+    // scheduler, the shared stock-image catalogue) deliberately stays
+    // cloud-side, not reimplemented here, but the browser only ever holds
+    // a session for the EXE's own origin - a direct browser->cloud call
+    // always 401'd regardless of session validity (confirmed live on the
+    // Reservations screen). These now route to the EXE, which relays them
+    // server-to-server using its own stored cloud session instead.
+    { method: "POST", test: (p) => p === "/sentEbill" },
+    { method: "GET", test: (p) => p === "/getBookingData" },
+    { method: "POST", test: (p) => p === "/tableBooking" },
+    { method: "POST", test: (p) => p.startsWith("/updatedBooking/") },
+    { method: "POST", test: (p) => p === "/deleteBooking" },
+    { method: "GET", test: (p) => p.startsWith("/getProductImages") },
+
+    // Default payment mode - same relay reasoning as sentEbill above (real,
+    // hotel-scoped cloud table, no local mirror). Missing from this list
+    // was a real bug: a direct browser->cloud call 401s regardless of
+    // session validity (no cookie for the cloud's own origin ever exists
+    // under an exe-authenticated session), and that 401 is treated as fatal
+    // everywhere except the isKnownOutOfScope exclusions below - so this
+    // was forcing a full logout back to /login on every app boot, right
+    // after a perfectly good exe login, the moment AppShell's own
+    // loadPaymentModeDefaultsFromServer effect fired.
+    { method: "GET", test: (p) => p === "/paymentModeDefault" },
+    { method: "POST", test: (p) => p === "/paymentModeDefault" },
+    { method: "POST", test: (p) => p === "/paymentModeDefaultRemove" },
+
+    // Invoice header/footer lines + hotel logo upload - same relay
+    // reasoning as payment-mode-defaults above (real cloud-side tables,
+    // no local mirror, never on the offline order-taking path).
+    { method: "GET", test: (p) => p === "/headerFooter" },
+    { method: "POST", test: (p) => p === "/invoiceSetting" },
+    { method: "GET", test: (p) => p === "/kotHeaderFooter" },
+    { method: "POST", test: (p) => p === "/kotFormatSetting" },
+    { method: "POST", test: (p) => p === "/hotelLogo" },
+
+    // QR table ordering, staff-facing half (billerpe-local-exe/controller/
+    // qrOrder.js). Pending-orders inbox and accept/reject are real local
+    // reads/writes against the exe's own mirror, not a relay - only
+    // "regenerate this table's QR" (qr_version is cloud-authoritative) goes
+    // through the exe's cloudRelay pattern instead.
+    { method: "GET", test: (p) => p === "/qrOrder/pending" },
+    { method: "POST", test: (p) => p.startsWith("/qrOrder/") && p.endsWith("/accept") },
+    { method: "POST", test: (p) => p.startsWith("/qrOrder/") && p.endsWith("/reject") },
+    { method: "POST", test: (p) => p.startsWith("/table/") && p.endsWith("/qr-version") },
+
+    // Phase F: stock/purchasing - the largest remaining piece, closing the
+    // last of the 11 originally-flagged direct-cloud paths.
+    { method: "GET", test: (p) => p === "/stock/supplier" },
+    { method: "POST", test: (p) => p === "/stock/supplier" },
+    { method: "PUT", test: (p) => p === "/stock/supplier" },
+    { method: "GET", test: (p) => p === "/stock/maxPo" },
+    { method: "POST", test: (p) => p === "/stock/payment" },
+    { method: "POST", test: (p) => p === "/stock/purchaseOrder" },
+    { method: "GET", test: (p) => p.startsWith("/stock/purchaseOrder") },
+    { method: "PUT", test: (p) => p === "/stock/purchaseOrder" },
+    { method: "DELETE", test: (p) => p === "/stock/purchaseOrder" },
+    { method: "POST", test: (p) => p === "/stock/wastage" },
+    { method: "GET", test: (p) => p.startsWith("/stock/wastage") },
+    { method: "DELETE", test: (p) => p.startsWith("/stock/wastage/") },
+    { method: "GET", test: (p) => p === "/stock/requisition" },
+    { method: "POST", test: (p) => p === "/stock/requisition" },
+    { method: "POST", test: (p) => p === "/stock/requisitionStatus" },
+    { method: "POST", test: (p) => p === "/stock/requisitionItemQty" },
+    { method: "POST", test: (p) => p === "/stock/requisitionRemove" },
+    { method: "POST", test: (p) => p === "/stock/requisitionFulfil" },
+
+    // Printing: real local printer enumeration + PDF generation (same
+    // format as the old system) + direct silent printing from the EXE.
+    { method: "GET", test: (p) => p === "/localPrinters" },
+    { method: "GET", test: (p) => p === "/localServerStatus" },
+    { method: "POST", test: (p) => p === "/localServerForceSync" },
+    { method: "GET", test: (p) => p.startsWith("/auditLog") },
+    { method: "POST", test: (p) => p === "/auditLog" },
+    { method: "POST", test: (p) => p === "/generateKotPdf" },
+    { method: "POST", test: (p) => p === "/generateInvoicePdf" },
+    { method: "POST", test: (p) => p === "/printKotDirect" },
+    { method: "POST", test: (p) => p === "/printInvoiceDirect" },
+    { method: "POST", test: (p) => p === "/testPrintDirect" },
+  ];
+
+function resolveBaseUrl(method: "GET" | "POST" | "PUT" | "DELETE", path: string): string {
+  const isExeRoute = EXE_ROUTES.some((route) => route.method === method && route.test(path));
+  return isExeRoute ? EXE_BASE_URL : API_BASE_URL;
+}
+
+// Architecture memo, Phase C: distinguishes "the EXE process itself isn't
+// reachable" from "reachable but returned a real error" - previously a raw
+// fetch failure (connection refused, since nothing was listening) was a
+// plain TypeError, not an ApiError, so login.tsx's `err instanceof ApiError`
+// checks fell through to a generic "failed" toast indistinguishable from a
+// wrong password. Deliberately a plain, unauthenticated hit on /health (see
+// billerpe-local-exe/server.js) - no cookie, safe to call before any
+// registration or login exists, which is exactly when this matters most.
+//
+// Also where LAN discovery actually happens: 1) the address that worked
+// last time (fast path - nothing changed on most visits), 2) the fixed
+// mDNS hostname (handles a DHCP lease change - the whole reason a pure
+// hardcoded IP/last-known-good cache alone isn't enough), 3) whatever
+// EXE_BASE_URL is already set to (the original build-time default) as a
+// last resort, so a fresh browser profile with nothing cached yet and no
+// mDNS resolution available still gets exactly today's behavior, not a
+// worse one.
+//
+// The mDNS step gets a longer timeout than the other two, deliberately -
+// verified live that a COLD mDNS lookup (the client's OS hasn't resolved
+// this hostname recently) genuinely needs real time for the multicast
+// query/response round trip, and can still fail outright on some Windows
+// network configurations even when the underlying server is perfectly
+// reachable (confirmed: a direct IP hit succeeded on the same machine at
+// the same time a `.local` lookup timed out). That's exactly why
+// setManualServerAddress below exists as a real, necessary fallback - not
+// a hypothetical one - for whichever restaurant PCs hit that gap.
+export async function checkLocalServerHealth(timeoutMs = 3000): Promise<boolean> {
+  let cached: string | null = null;
+  try {
+    cached = window.localStorage.getItem(LAST_KNOWN_GOOD_KEY);
+  } catch {
+    // ignore - falls through to mDNS/default below
+  }
+
+  if (cached && (await pingHealth(cached, timeoutMs))) {
+    EXE_BASE_URL = cached;
+    return true;
+  }
+  if (await pingHealth(MDNS_HOSTNAME_URL, Math.max(timeoutMs, 5000))) {
+    setExeBaseUrl(MDNS_HOSTNAME_URL);
+    return true;
+  }
+  if (await pingHealth(EXE_BASE_URL, timeoutMs)) {
+    setExeBaseUrl(EXE_BASE_URL);
+    return true;
+  }
+  return false;
+}
+
+// Last-resort manual override for whichever restaurant PCs land in the real
+// gap above - a technician types the server PC's LAN IP once (shown on
+// that PC's own dashboard - see billerpe-local-exe/controller/dashboard.js),
+// and it's cached as the new last-known-good from then on, so this is a
+// true last resort, not something anyone re-enters "every time the
+// network changes" (the architecture's own stated requirement) - only the
+// rare case where BOTH the cache and mDNS have already failed.
+export async function setManualServerAddress(hostOrUrl: string): Promise<boolean> {
+  const url = /^https?:\/\//.test(hostOrUrl) ? hostOrUrl : `http://${hostOrUrl}`;
+  const normalized = url.replace(/\/$/, "");
+  if (!(await pingHealth(normalized, 4000))) return false;
+  setExeBaseUrl(normalized);
+  return true;
+}
+
+// login.tsx's boot-time reconciliation for a real production failure mode:
+// this browser's cached `billerpe.session.device === true` survives a
+// reinstall of the exe that wiped its local DB (data/ sits next to the .exe
+// on disk - see billerpe-local-exe/utils/appPaths.js's own comment), so the
+// cached flag no longer reflects reality. /health now carries
+// {registered, deviceId} precisely so this can be checked without needing
+// a session a wiped DB can never grant (the one endpoint that already
+// computed this shape, /localServerStatus, is adminAuth-gated - useless
+// here). Reuses checkLocalServerHealth's own discovery (last-known-good ->
+// mDNS -> default) rather than duplicating it - that call already leaves
+// EXE_BASE_URL pointed at whichever address actually answered. Returns
+// null (not false) when unreachable, distinct from "reachable and not
+// registered" - callers must not treat "can't tell" as "definitely not
+// registered".
+export async function getLocalServerIdentity(): Promise<{
+  registered: boolean;
+  deviceId: string;
+} | null> {
+  if (!(await checkLocalServerHealth())) return null;
+  try {
+    const res = await fetch(`${EXE_BASE_URL}/health`);
+    const body = (await res.json()) as { registered?: unknown; deviceId?: unknown };
+    return { registered: body.registered === true, deviceId: String(body.deviceId ?? "") };
+  } catch {
+    return null;
+  }
+}
+
 export class ApiError extends Error {
-  constructor(message: string) {
+  // Set when the local exe's controller/auth.js finds no Hotel row at all
+  // in its local DB (requireRegisteredDevice) - a real "wrong password" and
+  // a real "this device's local data was wiped" produce byte-identical
+  // MESSAGE.NOT_AUTHORIZE text otherwise, so login.tsx needs this explicit
+  // flag to tell them apart and reset back to the registration screen
+  // instead of showing a login-failure toast.
+  needsRegistration?: boolean;
+  constructor(message: string, needsRegistration?: boolean) {
     super(message);
     this.name = "ApiError";
+    this.needsRegistration = needsRegistration;
   }
 }
 
@@ -21,6 +568,30 @@ export class ApiError extends Error {
 // res.status(...), so that's what session-expiry detection below keys off.
 type ApiEnvelope<T> = { error: boolean; results: T };
 
+// Architecture memo, Phase F: this list held 11 direct-cloud paths at the
+// start of that pass (stock, recipes, semiFinished, expense, cashSession,
+// promocodes, getEbillCredit) - all now ported to the EXE and removed here.
+// sentEbill is the one deliberate, permanent exception (see its own
+// comment below), not a leftover. Matched by prefix since a path can carry
+// a query string or id/sub-action suffix.
+// sentEbill, reservations (getBookingData/tableBooking/updatedBooking/
+// deleteBooking) and getProductImages used to live here as "call the cloud
+// directly, but don't force-logout on the inevitable 401" - the browser
+// never has a cookie for the cloud's own origin (it only ever logs into
+// the EXE), so those always real-401'd regardless of session validity.
+// All of them are now relayed through the EXE instead (billerpe-local-exe/
+// services/cloudRelay.js - real business logic stays cloud-side, only the
+// browser<->cloud auth gap moved server-to-server), so a 401 on these
+// paths now means a genuinely dead LOCAL session, same as everywhere else -
+// no exclusion list needed here anymore. Kept as an empty, extensible list
+// rather than deleted outright in case a future endpoint needs the same
+// "deliberately unauthenticatable from the browser" treatment.
+const KNOWN_OUT_OF_SCOPE_PATHS: string[] = [];
+
+function isKnownOutOfScope(path: string): boolean {
+  return KNOWN_OUT_OF_SCOPE_PATHS.some((p) => path.startsWith(p));
+}
+
 // A session that's expired, been logged out from another device, or been
 // deactivated server-side previously surfaced as just another failed
 // request - a "Could not load X" toast per in-flight call, nothing ever
@@ -31,21 +602,81 @@ type ApiEnvelope<T> = { error: boolean; results: T };
 // whatever React/store state was mid-flight. Returns a Promise that never
 // settles so the caller's own .catch()/toast never fires on top of the
 // redirect (the page is about to unload anyway).
-function handleUnauthorized<T>(): Promise<T> {
+//
+// A 401 from EITHER backend (exe or cloud) is now treated as fatal and
+// logs the user out, EXCEPT for the confirmed-out-of-scope paths above -
+// those are excluded deliberately, not as a loophole: they 401 against
+// the cloud on every single login regardless of session validity (no
+// local model exists to serve them from instead), so treating them as
+// fatal would bounce every login straight back to /login immediately -
+// confirmed live as a real, unusable-app-level regression before this
+// exclusion was added.
+function handleUnauthorized<T>(path: string): Promise<T> | null {
+  if (isKnownOutOfScope(path)) return null;
   if (typeof window !== "undefined" && window.location.pathname !== "/login") {
-    window.localStorage.removeItem("billerpe.session");
+    // A dead staff session doesn't mean the device itself is unregistered -
+    // the exe already has this hotel's real data regardless - so this keeps
+    // `device` from whatever was already saved rather than wiping the
+    // whole entry, which previously forced a full re-registration on every
+    // ordinary session expiry (confirmed live as the "asks to register
+    // device again" bug, not the session-eviction one).
+    try {
+      const saved = window.localStorage.getItem("billerpe.session");
+      const parsed = saved ? (JSON.parse(saved) as { device?: boolean }) : {};
+      window.localStorage.setItem(
+        "billerpe.session",
+        JSON.stringify({ device: parsed.device ?? false, authed: false }),
+      );
+    } catch {
+      window.localStorage.removeItem("billerpe.session");
+    }
+    setStoredAuthToken(null);
     window.location.href = "/login";
   }
   return new Promise<T>(() => {});
 }
 
+// handleUnauthorized returns null for exactly one reason: isKnownOutOfScope
+// matched. Reaching this line always means that - a real 401 the app can't
+// do anything about (no cookie for the cloud origin will ever exist under
+// an EXE-authenticated session, by design). Without this, the raw backend
+// message ("Not Authorize User" - identical to a genuinely wrong password,
+// see controller/auth.js's own comment on that ambiguity) surfaced
+// verbatim via unwrap() below, confirmed live as confusing on the
+// Reservations screen once the forced-logout was suppressed - staff read
+// it as "you're not allowed," not "this needs the internet."
+function outOfScopeUnauthorized(): ApiError {
+  return new ApiError(
+    "This needs a connection to BillerPe cloud, which isn't available on this local-only session.",
+  );
+}
+
+// Both backends' catch-all error handler returns this exact literal on
+// every unhandled exception, in essentially every controller (constant/
+// const.js's MESSAGE.INTERNAL_SERVER_ERROR, identical on uat-backend-v2
+// and billerpe-local-exe) - shown to restaurant staff verbatim via toast,
+// it reads as a confusing technical error rather than something actionable.
+// This is the one shared chokepoint every API error passes through
+// (~150 call sites), so fixing it here covers both backends at once
+// without touching every individual catch block or toast call site.
+// Deliberately narrow: specific business messages ("Category is in use",
+// "Variant Name Already Available", etc.) are already clear and stay
+// untouched - only the generic catch-all fallbacks get reworded.
+const GENERIC_BACKEND_MESSAGES = new Set(["Internal Server Error", "Request failed"]);
+const FRIENDLY_GENERIC_MESSAGE = "Something went wrong. Please try again in a moment.";
+
 function unwrap<T>(json: ApiEnvelope<T> | null): T {
   if (!json || json.error) {
-    const message =
-      json?.results && typeof json.results === "object" && "message" in json.results
-        ? String((json.results as { message?: unknown }).message)
-        : "Request failed";
-    throw new ApiError(message);
+    const results =
+      json?.results && typeof json.results === "object"
+        ? (json.results as { message?: unknown; needsRegistration?: unknown })
+        : undefined;
+    const message = results && "message" in results ? String(results.message) : "Request failed";
+    const needsRegistration = results?.needsRegistration === true;
+    throw new ApiError(
+      GENERIC_BACKEND_MESSAGES.has(message) ? FRIENDLY_GENERIC_MESSAGE : message,
+      needsRegistration,
+    );
   }
   return json.results;
 }
@@ -82,11 +713,17 @@ async function trackPending<T>(run: () => Promise<T>): Promise<T> {
 
 async function apiGet<T>(path: string): Promise<T> {
   return trackPending(async () => {
-    const res = await fetch(`${API_BASE_URL}${path}`, {
+    const base = resolveBaseUrl("GET", path);
+    const res = await fetch(`${base}${path}`, {
       method: "GET",
       credentials: "include",
+      headers: { ...authHeader() },
     });
-    if (res.status === 401) return handleUnauthorized<T>();
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+      throw outOfScopeUnauthorized();
+    }
     const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
     return unwrap(json);
   });
@@ -94,28 +731,104 @@ async function apiGet<T>(path: string): Promise<T> {
 
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return trackPending(async () => {
-    const res = await fetch(`${API_BASE_URL}${path}`, {
+    const base = resolveBaseUrl("POST", path);
+    const res = await fetch(`${base}${path}`, {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify(body),
     });
-    if (res.status === 401) return handleUnauthorized<T>();
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+      throw outOfScopeUnauthorized();
+    }
 
     const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
     return unwrap(json);
   });
 }
 
-async function apiPut<T>(path: string, body: unknown): Promise<T> {
+// Same as apiPost, for the one call site (hotelApi.uploadLogo) that needs
+// to send a real file. No "Content-Type" header set here deliberately -
+// the browser fills in multipart/form-data with the correct boundary
+// itself only when left to set the header, doing it manually breaks the
+// boundary parsing on the receiving end.
+async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
   return trackPending(async () => {
-    const res = await fetch(`${API_BASE_URL}${path}`, {
-      method: "PUT",
+    const base = resolveBaseUrl("POST", path);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...authHeader() },
+      body: form,
+    });
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+      throw outOfScopeUnauthorized();
+    }
+
+    const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
+    return unwrap(json);
+  });
+}
+
+// billerpe-local-exe's dashboard controller (controller/dashboard.js -
+// getStatus/forceSync) predates and doesn't use this codebase's
+// success()/error() envelope convention - it returns plain JSON directly,
+// matching what public/dashboard.html's own inline script already expects.
+// Reused as-is under a different auth gate (see routes/index.js) rather
+// than reshaping it, so apiGet/apiPost's hard-coded envelope unwrap can't
+// be reused here - this is the one place in this file calling a
+// non-enveloped endpoint.
+async function apiGetRaw<T>(path: string): Promise<T | null> {
+  return trackPending(async () => {
+    const base = resolveBaseUrl("GET", path);
+    const res = await fetch(`${base}${path}`, {
+      method: "GET",
+      credentials: "include",
+      headers: { ...authHeader() },
+    });
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+    }
+    return (await res.json().catch(() => null)) as T | null;
+  });
+}
+
+async function apiPostRaw<T>(path: string, body: unknown): Promise<T | null> {
+  return trackPending(async () => {
+    const base = resolveBaseUrl("POST", path);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify(body),
     });
-    if (res.status === 401) return handleUnauthorized<T>();
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+    }
+    return (await res.json().catch(() => null)) as T | null;
+  });
+}
+
+async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  return trackPending(async () => {
+    const base = resolveBaseUrl("PUT", path);
+    const res = await fetch(`${base}${path}`, {
+      method: "PUT",
+      credentials: "include",
+      headers: { "Content-Type": "application/json", ...authHeader() },
+      body: JSON.stringify(body),
+    });
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+      throw outOfScopeUnauthorized();
+    }
 
     const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
     return unwrap(json);
@@ -124,18 +837,94 @@ async function apiPut<T>(path: string, body: unknown): Promise<T> {
 
 async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
   return trackPending(async () => {
-    const res = await fetch(`${API_BASE_URL}${path}`, {
+    const base = resolveBaseUrl("DELETE", path);
+    const res = await fetch(`${base}${path}`, {
       method: "DELETE",
       credentials: "include",
       ...(body !== undefined
-        ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
-        : {}),
+        ? {
+            headers: { "Content-Type": "application/json", ...authHeader() },
+            body: JSON.stringify(body),
+          }
+        : { headers: { ...authHeader() } }),
     });
-    if (res.status === 401) return handleUnauthorized<T>();
+    if (res.status === 401) {
+      const redirect = handleUnauthorized<T>(path);
+      if (redirect) return redirect;
+      throw outOfScopeUnauthorized();
+    }
     const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
     return unwrap(json);
   });
 }
+
+export type RawBillViewItem = {
+  item_name: string;
+  variantData?: { variants_name?: string } | null;
+  addons?: unknown;
+  price: number;
+  qty: number;
+  sub_categories?: string;
+  totalAmount: number;
+};
+
+export type RawBillViewTax = {
+  hms_tax_type_mst?: { tax_name?: string; percentage?: number };
+  amount?: number;
+};
+
+export type RawBillViewData = {
+  customerName?: string;
+  customerNumber?: string;
+  gstin?: string;
+  address?: string;
+  // Each entry is a pre-built raw HTML fragment (`<p style="...">…</p>`,
+  // `<img .../>`) - controller/kto.js#getHearderAndFooterDataBillView
+  // assembles these server-side from the hotel's own Invoice Format
+  // settings, not from anything a customer submits.
+  footerText?: string[];
+  headerText?: string[];
+  dateAndTime: string;
+  orderId: string;
+  restaurantName: string;
+  bottomText?: string;
+  restaurantNumber?: string;
+  restaurantAddress?: string;
+  items: RawBillViewItem[];
+  tableAndUserInfo?: string;
+  type: string;
+  subtotal: number;
+  gst: number;
+  totalBill: string;
+  token: number;
+  service_charge: number;
+  delivery_charge?: number;
+  packaging_charge?: number;
+  tip?: number;
+  totalQty: number;
+  totalDiscount: number;
+  orderTax: RawBillViewTax[];
+  currency?: string;
+};
+
+// controller/kto.js#getBillViewData (POST /getBillDetails) - the one
+// endpoint a customer's own browser ever calls directly, with no session
+// of any kind. Deliberately public (no adminAuth in routes/hotel.js) and
+// deliberately NOT in EXE_ROUTES: resolveBaseUrl already sends anything
+// not listed there straight to API_BASE_URL (the cloud), which is exactly
+// right here - a customer's phone has no network path to the restaurant's
+// own local exe at all, only to whatever public URL SOCKET_URL points the
+// e-bill link at (see controller/kto.js#sentEbill). `bill_no`/`id` here
+// are the hashed values the link itself carries (generateHashId/
+// decodeHashId on the backend) - passed straight through, never decoded
+// client-side.
+export const billViewApi = {
+  getDetails: (billNoHash: string, hotelIdHash: string) =>
+    apiPost<{ data: RawBillViewData }>("/getBillDetails", {
+      bill_no: billNoHash,
+      id: hotelIdHash,
+    }),
+};
 
 export const authApi = {
   pinLogin: (mobile: string, pin: string, deviceId: string) =>
@@ -146,6 +935,28 @@ export const authApi = {
     }),
   restaurantLogin: (mobile: string, password: string, deviceId: string) =>
     apiPost<{ message?: string; token?: string }>("/restaurantLogin", {
+      mobile,
+      password,
+      device_id: deviceId,
+    }),
+  // EXE-only bootstrap: logs into the real cloud with the outlet owner's
+  // real credentials, resolves which hotel this device belongs to, and
+  // pulls that hotel's real data down for the first time - see
+  // controller/deviceRegistration.js. Not a login itself; a registered
+  // device still needs a normal restaurantLogin/pinLogin afterward.
+  registerDevice: (mobile: string, password: string, deviceId: string) =>
+    apiPost<{
+      message?: string;
+      hotelId?: number;
+      pulled?: Record<string, number | string>;
+      // Phase B: a normal (non-throwing) response always carries
+      // bootstrapComplete: true - pullConfigFromCloud only returns without
+      // throwing once every entity is done. On failure this call rejects
+      // with an ApiError instead; see the resumable-bootstrap note on
+      // billerpe-local-exe/controller/deviceRegistration.js for why simply
+      // calling registerDevice again is itself the retry/resume path.
+      bootstrapComplete?: boolean;
+    }>("/registerDevice", {
       mobile,
       password,
       device_id: deviceId,
@@ -193,6 +1004,13 @@ export const hotelApi = {
   // only and unsuitable for anything that has to be accurate.
   getSettings: () =>
     apiGet<{
+      // Same numeric id as req.user/hotel_id everywhere else - Hotel's own
+      // primary key, preserved verbatim through registerDevice's
+      // Hotel.upsert (billerpe-local-exe/controller/deviceRegistration.js),
+      // so this is safe to encrypt for the public QR menu link
+      // (src/lib/publicMenu.ts) even when this call is EXE-routed - it
+      // resolves to the same row the cloud's own menuByCategory looks up.
+      id: number;
       upiId: string;
       hotel_name: string;
       address1: string | null;
@@ -202,11 +1020,50 @@ export const hotelApi = {
       invoiceFormateHeaderText: string | null;
       invoiceFormateBottomText: string | null;
       printerSize: string | null;
+      // Just the stored filename (e.g. "hotel_logo-mylogo.png"), same
+      // convention uploadLogo's response uses - never a full URL. Both
+      // this app and the backend's own printed-invoice HTML (controller/
+      // kto.js) build the actual image URL as `${base}/images/${filename}`
+      // themselves; see uploadLogo's own comment for why this app uses
+      // API_BASE_URL specifically for that, not EXE_BASE_URL.
+      hotel_logo: string | null;
+      // Real, load-bearing column - controller/kto.js reads this hotel-level
+      // flag when computing an order's own gst/grandAmount server-side, not
+      // just for display. This app's invoiceFormat.gstCalculation toggle
+      // used to be local-only (see setGstCalculation's old comment) - if the
+      // two ever disagreed, the backend's own value always won for what the
+      // customer was actually billed, regardless of what this app showed.
+      invoiceFormateIncGst: boolean;
       hms_serviceCharge_mst: RawServiceCharge | null;
       hms_res_setting: { qr_code_open_on_settle: boolean } | null;
     }>("/singleHotel"),
-  updateUpiId: (upiId: string) =>
-    apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: { upiId } }),
+  // Same endpoint, now also carries the two "marketing" header/footer
+  // line's actual text - those live on Hotel itself
+  // (invoiceFormateHeaderText/invoiceFormateBottomText), not on
+  // hms_invoice_formate_mst with everything else invoiceFormateApi
+  // handles (controller/kto.js#getHearderAndFooterDataBillView's own
+  // marketing_text branch reads them from here, not from the
+  // headerLineN/footerLineN slot itself).
+  updateIdentity: (params: {
+    upiId?: string;
+    invoiceFormateHeaderText?: string;
+    invoiceFormateBottomText?: string;
+    invoiceFormateIncGst?: boolean;
+  }) => apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: params }),
+
+  // POST /hotelLogo (controller/hotel.js#uploadHotelLogo) - deliberately
+  // separate from the real editHotelDetails/hoteledit endpoint, which also
+  // rewrites the owner's email/password and runs cross-hotel duplicate
+  // checks (superAdmin territory). This does exactly one thing. EXE-routed
+  // like every other authenticated write (billerpe-local-exe/controller/
+  // cloudRelay.js#uploadHotelLogo rebuilds the multipart body server-to-
+  // server from the buffer it received, since this app's own session only
+  // exists against the EXE's origin).
+  uploadLogo: (file: File) => {
+    const form = new FormData();
+    form.append("hotel_logo", file);
+    return apiPostForm<{ message?: string; hotel_logo: string }>("/hotelLogo", form);
+  },
 
   // POST /updateRestaurantSetting (controller/hotel.js) - the only
   // writable field on RestaurantSetting right now (see its own comment on
@@ -234,6 +1091,91 @@ export const hotelApi = {
   }) => apiPost<{ message?: string }>("/service_charge", params),
 };
 
+// controller/incoiceFormate.js - a complete, already-existing read/write
+// pair for the bill's header/footer lines that this app's own Invoice
+// Format settings screen never actually called (confirmed reading
+// hotelApi.getSettings's own comment: this app's local header/footer
+// arrays were seed/mock text only, with no real backend round-trip at
+// all). Up to 10 slots each side, each holding either a content KEYWORD
+// (mock/store.tsx's mapRawInvoiceLine/toRawInvoiceLine do the translation
+// to/from this app's own InvoiceLine.content union) or, for anything that
+// isn't a recognized keyword, the literal text to print as-is - matching
+// controller/kto.js#getHearderAndFooterDataBillView's own fallback branch
+// exactly (`else { data = el.value }`). Font sizes are "<n>px" strings
+// here (e.g. "12px"), not the plain numbers this app's own InvoiceLine
+// uses.
+export type RawInvoiceFormate = Record<string, string | number | null | undefined> | null;
+
+export const invoiceFormateApi = {
+  getHeaderFooter: () => apiGet<{ headerFooterData: RawInvoiceFormate }>("/headerFooter"),
+  saveHeaderFooter: (payload: Record<string, string>) =>
+    apiPost<{ message?: string }>("/invoiceSetting", payload),
+};
+
+// controller/kotFormate.js - the dynamic KOT format (Task 1) twin of
+// invoiceFormateApi above, same headerLineN/footerLineN/fontH/fontF slot
+// shape against the separate hms_kot_formate_mst table. Unlike the invoice
+// side, no backend function re-renders these keywords server-side - see
+// mock/store.tsx's KOT_CONTENT_TO_KEYWORD comment for why the keyword
+// convention is a frontend-only choice here.
+export type RawKotFormate = Record<string, string | number | null | undefined> | null;
+
+export const kotFormatApi = {
+  getHeaderFooter: () => apiGet<{ headerFooterData: RawKotFormate }>("/kotHeaderFooter"),
+  saveHeaderFooter: (payload: Record<string, string>) =>
+    apiPost<{ message?: string }>("/kotFormatSetting", payload),
+};
+
+// Delivery/Packaging charge rules - same field shape as RawServiceCharge,
+// two rows per hotel distinguished by rule_for. Unlike addEditServiceCharge,
+// updateBillChargeRule upserts by (hotel, rule_for) server-side, so no row
+// id needs to be tracked/sent from this app's side at all.
+export type RawBillChargeRule = {
+  id: number;
+  rule_for: "delivery" | "packaging";
+  active: boolean;
+  charge_type: "fixed" | "percentage";
+  charge_value: number;
+  calculation_on: "core" | "total";
+  charge_automatic: unknown;
+  calculation_on_tax: boolean;
+  greater_less: "1" | "2" | "3";
+  greater_less_amount: number;
+};
+
+export const billChargeApi = {
+  getAll: () => apiGet<{ rules: RawBillChargeRule[] }>("/billChargeRule"),
+  update: (params: {
+    rule_for: "delivery" | "packaging";
+    active: boolean;
+    charge_type: "fixed" | "percentage";
+    charge_value: number;
+    calculation_on: "core" | "total";
+    charge_automatic: string[];
+    calculation_on_tax: boolean;
+    greater_less: "1" | "2" | "3";
+    greater_less_amount: number;
+  }) => apiPost<{ message?: string }>("/billChargeRule", params),
+};
+
+// Per-hotel, per-trigger, per-channel notification toggles. Management
+// list only - doesn't itself wire up real WhatsApp/SMS sending, which stay
+// the separate, largely hardcoded/dead call sites they already were (see
+// model/notificationSetting.js's own comment on the backend side).
+export type RawNotificationSetting = {
+  id: number;
+  trigger: string;
+  whatsapp: boolean;
+  sms: boolean;
+  in_app: boolean;
+};
+
+export const notificationSettingApi = {
+  getAll: () => apiGet<{ settings: RawNotificationSetting[] }>("/notificationSetting"),
+  toggle: (trigger: string, channel: "whatsapp" | "sms" | "in_app") =>
+    apiPost<{ message?: string }>("/notificationSettingToggle", { trigger, channel }),
+};
+
 // Raw shapes as uat-backend actually returns them (controller/hotel.js) -
 // kept separate from the app's mock RestaurantTable/TableCategory types so
 // the adapter that converts between the two (src/mock/store.tsx) has one
@@ -255,6 +1197,18 @@ export type RawTable = {
   type: "T" | "R";
   table_catag_id: number;
   hms_table_categ?: RawTableCategory;
+  // Local-only (billerpe-local-exe/model/table.js), set by
+  // services/reservationTableSync.js alongside table_status "B" - the
+  // reservation guest's name/number, carried straight onto the table so
+  // staff can see who a "Reserved" table is held for without opening the
+  // Reservations screen separately.
+  reserved_name?: string | null;
+  reserved_number?: string | null;
+  // Cloud-authoritative (uat-backend-v2/model/table.js), mirrored down on
+  // the ordinary table pull - unlike reserved_name/reserved_number, staff
+  // never edits this directly; only "regenerate this table's QR"
+  // (qrOrderApi.regenerateTableQr) bumps it, cloud-side.
+  qr_version?: number;
 };
 
 export const tableApi = {
@@ -323,7 +1277,30 @@ export type RawMenuCategory = {
   menu_categ_nm: string;
   active: boolean;
   rank?: number;
+  menu_catalog_id?: number;
 };
+
+// Which named menu catalogue (e.g. "Main Menu", "Bar Menu") a category/
+// variant/addon-group belongs to - see uat-backend-v2/model/menuCatalog.js.
+// Every hotel always has at least one (seeded on onboarding, backfilled for
+// existing hotels), so this is never an empty list in practice.
+export type RawMenuCatalog = {
+  id: number;
+  name: string;
+  is_default: boolean;
+  active: boolean;
+  table_category_ids?: string[] | number[];
+  order_types?: string[];
+};
+
+// hms_image_mst has no hotel_id at all - a shared, cloud-curated stock
+// image catalogue, not per-tenant data. GET /getProductImages/:search? is
+// only real on uat-backend-v2, not billerpe-local-exe - rather than
+// mirroring a global reference catalogue onto every outlet's local
+// server, this now routes to the EXE (EXE_ROUTES) purely as a relay
+// (services/cloudRelay.js) - the real endpoint and its data stay
+// cloud-side, only the browser<->cloud auth gap moved server-to-server.
+export type RawProductImage = { id: number; name: string; url: string };
 
 export type RawMenuItem = {
   id: number;
@@ -341,7 +1318,12 @@ export type RawMenuItem = {
   hms_menu_categ?: RawMenuCategory;
 };
 
-export type RawVariant = { id: number; variants_name: string; active: boolean };
+export type RawVariant = {
+  id: number;
+  variants_name: string;
+  active: boolean;
+  menu_catalog_id?: number;
+};
 
 // controller/menu.js#getMenuItemsWithVariants (GET /menuShowWithVariants).
 // Every other menu-list endpoint (MenuShow/MenuShowByCatagories/etc.)
@@ -370,6 +1352,7 @@ export type RawAddonGroup = {
   minimum_allowed_addon: number;
   singleSelection: boolean;
   hms_addon_msts?: RawAddonOption[];
+  menu_catalog_id?: number;
 };
 
 type MenuItemPayload = {
@@ -404,6 +1387,7 @@ type AddonGroupPayload = {
   minimum_allowed_addon: number;
   singleSelection: boolean;
   addons: { addon_name: string; price: number; attributes: string }[];
+  menu_catalog_id?: number;
 };
 
 export const menuApi = {
@@ -428,11 +1412,46 @@ export const menuApi = {
   getVariants: () => apiGet<{ variants: RawVariant[] }>("/variant"),
   getAddonGroups: () => apiGet<{ addons: RawAddonGroup[] }>("/addon"),
 
-  createCategory: (name: string) =>
-    apiPost<{ message?: string }>("/catagories", { catagoriesFrom: { catagories_name: name } }),
-  editCategory: (id: number, name: string, rank?: number) =>
+  getMenuCatalogs: () => apiGet<{ menuCatalogs: RawMenuCatalog[] }>("/menuCatalog"),
+  createMenuCatalog: (name: string, tableCategoryIds: string[] = [], orderTypes: string[] = []) =>
+    apiPost<{ message?: string; menuCatalog: RawMenuCatalog }>("/menuCatalog", {
+      name,
+      table_category_ids: tableCategoryIds,
+      order_types: orderTypes,
+    }),
+  editMenuCatalog: (
+    id: number,
+    name: string,
+    isDefault: boolean,
+    tableCategoryIds: string[] = [],
+    orderTypes: string[] = [],
+  ) =>
+    apiPost<{ message?: string }>("/menuCatalogEdit", {
+      id,
+      name,
+      is_default: isDefault,
+      table_category_ids: tableCategoryIds,
+      order_types: orderTypes,
+    }),
+  removeMenuCatalog: (id: number) => apiPost<{ message?: string }>("/menuCatalogRemove", { id }),
+
+  getProductImages: (search = "") =>
+    apiGet<{ data: RawProductImage[] }>(
+      search ? `/getProductImages/${encodeURIComponent(search)}` : "/getProductImages",
+    ),
+
+  createCategory: (name: string, menuCatalogId?: number) =>
+    apiPost<{ message?: string }>("/catagories", {
+      catagoriesFrom: { catagories_name: name, menu_catalog_id: menuCatalogId },
+    }),
+  editCategory: (id: number, name: string, rank?: number, menuCatalogId?: number) =>
     apiPost<{ message?: string }>("/catagoriesEdit", {
-      editCatagoriesFrom: { id, menu_categ_nm: name, rank: rank ?? 0 },
+      editCatagoriesFrom: {
+        id,
+        menu_categ_nm: name,
+        rank: rank ?? 0,
+        menu_catalog_id: menuCatalogId,
+      },
     }),
   removeCategories: (allId: number[]) =>
     apiPost<{ message?: string }>("/catagoriesRemove", { allId }),
@@ -442,15 +1461,61 @@ export const menuApi = {
     apiPost<{ message?: string }>("/menuEdit", params),
   removeItems: (allId: number[]) => apiPost<{ message?: string }>("/menuRemove", { allId }),
 
-  createVariant: (variants_name: string, active: boolean) =>
-    apiPost<{ message?: string; variants: RawVariant[] }>("/variant", { variants_name, active }),
-  editVariant: (id: number, variants_name: string, active: boolean) =>
-    apiPut<{ message?: string; variants: RawVariant[] }>("/variant", { id, variants_name, active }),
+  createVariant: (variants_name: string, active: boolean, menuCatalogId?: number) =>
+    apiPost<{ message?: string; variants: RawVariant[] }>("/variant", {
+      variants_name,
+      active,
+      menu_catalog_id: menuCatalogId,
+    }),
+  editVariant: (id: number, variants_name: string, active: boolean, menuCatalogId?: number) =>
+    apiPut<{ message?: string; variants: RawVariant[] }>("/variant", {
+      id,
+      variants_name,
+      active,
+      menu_catalog_id: menuCatalogId,
+    }),
 
   createAddonGroup: (params: AddonGroupPayload) =>
     apiPost<{ message?: string; addons: RawAddonGroup[] }>("/addon", params),
   editAddonGroup: (params: AddonGroupPayload & { id: number }) =>
     apiPut<{ message?: string; addons: RawAddonGroup[] }>("/addon", params),
+};
+
+// Hotel-configurable payment mode labels (Operations -> Billing). Purely a
+// management list - real settlement (settleOrder in mock/store.tsx) still
+// only ever sends the fixed cash/upi/card/due amounts; this never changes
+// that, it only lets the picklist itself be customized per hotel.
+export type RawPaymentMode = {
+  id: number;
+  name: string;
+  active: boolean;
+  deletable: boolean;
+};
+
+export const paymentModeApi = {
+  getAll: () => apiGet<{ paymentModes: RawPaymentMode[] }>("/paymentMode"),
+  create: (name: string) =>
+    apiPost<{ message?: string; paymentMode: RawPaymentMode }>("/paymentMode", { name }),
+  edit: (id: number, name: string, active: boolean) =>
+    apiPost<{ message?: string }>("/paymentModeEdit", { id, name, active }),
+  remove: (id: number) => apiPost<{ message?: string }>("/paymentModeRemove", { id }),
+};
+
+export type RawPaymentModeDefault = {
+  id: number;
+  order_type: "dinin" | "pickup";
+  table_categ_id: number | null;
+  payment_mode_id: number;
+};
+
+export const paymentModeDefaultApi = {
+  getAll: () => apiGet<{ paymentModeDefaults: RawPaymentModeDefault[] }>("/paymentModeDefault"),
+  save: (payload: {
+    order_type: "dinin" | "pickup";
+    table_categ_id?: number | null;
+    payment_mode_id: number;
+  }) => apiPost<{ message?: string }>("/paymentModeDefault", payload),
+  remove: (id: number) => apiPost<{ message?: string }>("/paymentModeDefaultRemove", { id }),
 };
 
 export type RawUserAccess = {
@@ -525,21 +1590,45 @@ export type KotCartItem = {
 
 export type KotCartAddon = { id: number; addon_name: string; price: number; qty: number };
 
+// controller/kto.js's addOrderTax/updateOrderTax (this cart.taxes field is
+// what actually persists OrderTax rows) - `id` must be the real TaxType id
+// (TaxRule.id). addOrderTax (new order) and updateOrderTax (existing
+// order) each read a different subset of the remaining fields for the
+// same OrderTax columns, so all three are sent to satisfy either path -
+// see mock/store.tsx's buildCartTaxes for how these get filled in.
+export type RawCartTax = {
+  id: number;
+  amount: number;
+  tax_type: string;
+  tax_value: number;
+  tax: number;
+};
+
 type KotPayload = {
   order_type: "dinin" | "pickup";
   order_id?: number;
   table_id?: number;
   tableNumber?: string;
+  /** Attaches/upgrades the order's customer (controller/kto.js#kotOrder's
+   * own findAndUpdateUser call, billerpe-local-exe/helpers/
+   * customerAttach.js's ported twin) - previously never sent at all here,
+   * so a customer attached via store.setCustomer (frontend-only state)
+   * never reached the order's actual User row unless/until a later call
+   * that DID send it (generateBill) happened to run. */
+  userName?: string;
+  mobile?: string;
   cart: {
     gst: number;
     totalDiscount: number;
     grandAmount: number;
     myAmount: number;
     service_charger: number;
+    delivery_charge: number;
+    packaging_charge: number;
     discount_reason: string;
     discount_type: "fix" | "pr";
     discount_value: number;
-    taxes: unknown[]; // OrderTax rows - empty until Tax Configuration is wired
+    taxes: RawCartTax[];
     // Only one entry is ever sent: kotOrder's server-side code looks for
     // `cart.items.find(el => el.status === 'H')` (creating a new order) or
     // `cart.items.filter(el => el.status === 'H')[0]` (adding to an
@@ -561,7 +1650,25 @@ export const orderApi = {
   // Operations -> Printers isn't wired to the real backend yet, so this is
   // a real, current limitation, not a client-side gap.
   kotOrder: (payload: KotPayload) =>
-    apiPost<{ message?: string; kotInfo: { order_id: number } }>("/kotOrder", payload),
+    apiPost<{ message?: string; kotInfo: { order_id: number; bill_no?: string } }>(
+      "/kotOrder",
+      payload,
+    ),
+
+  // POST /holdOrder - same dual create/update shape and same "cart.items
+  // must carry the FULL not-yet-fired set" contract as adminOrder (its own
+  // destroy-then-recreate only targets rows still in ORDER_DETAILS_TYPE
+  // "in-progress", i.e. not yet through a real KOT round, but it still
+  // replaces ALL of those unconditionally from whatever cart is sent - a
+  // partial cart here would silently drop any other still-held line).
+  // Persists Order.status "hold" (backend's ORDER_TYPE.HOLD) and
+  // Table.table_status "H" - this is what makes a held order actually
+  // survive a refresh: mapRawLiveOrder already maps that "hold" status back
+  // to this app's "Held" the moment loadTablesFromServer reconstructs it,
+  // confirmed live - the gap was only ever that nothing called this
+  // endpoint in the first place.
+  holdOrder: (payload: KotPayload) =>
+    apiPost<{ message?: string; orderId: number; bill_no?: string }>("/holdOrder", payload),
 
   // POST /adminOrder finalizes an order (Running -> table status "P",
   // Pending Settle) - but ONLY the dine-in path is safe to call from a
@@ -607,6 +1714,9 @@ export const orderApi = {
     upi?: number;
     card?: number;
     due?: number;
+    /** See KotPayload's own comment on userName/mobile - same
+     * findAndUpdateUser attach/upgrade mechanism, AdminOrder's own call. */
+    userName?: string;
     mobile?: string;
     cart: {
       items: [{ status: "H"; menuItems: KotCartItem[] }];
@@ -615,12 +1725,14 @@ export const orderApi = {
       grandAmount: number;
       myAmount: number;
       service_charger: number;
+      delivery_charge: number;
+      packaging_charge: number;
       discount_reason: string;
       discount_type: "fix" | "pr";
       discount_value: number;
-      taxes: unknown[];
+      taxes: RawCartTax[];
     };
-  }) => apiPost<{ message?: string; orderId?: number }>("/adminOrder", payload),
+  }) => apiPost<{ message?: string; orderId?: number; bill_no?: string }>("/adminOrder", payload),
 
   // POST /settleBills only ever looks up orders with order_type "dinin"
   // (its own WHERE clause) - pickup has no settlement step at all here,
@@ -639,6 +1751,10 @@ export const orderApi = {
     upi: number;
     card: number;
     due: number;
+    /** Dine In only - waiter service tip, kept separate from the
+     * cash+upi+card+due=amount reconciliation server-side (see
+     * uat-backend-v2/model/order.js's own comment). */
+    tip?: number;
     mobile?: string;
   }) => apiPost<{ message?: string }>("/settleBills", payload),
 
@@ -675,6 +1791,9 @@ export const orderApi = {
   // mobile number; the backend never looks one up automatically from the
   // order. Not tested live against a real send (would message a real
   // phone number) - wired from reading the controller in full instead.
+  // Routes to the EXE now (EXE_ROUTES), which relays it to the cloud
+  // using its own stored session (services/cloudRelay.js) - the send
+  // itself, and the WhatsApp credentials it needs, stay cloud-side.
   sendEBill: (params: { orderId: number; mobile: string }) =>
     apiPost<{ message?: string }>("/sentEbill", params),
 
@@ -693,10 +1812,9 @@ export const orderApi = {
   // the UI (table-grid, Orders list), independent of which table (if
   // any) it's on - unlike GET /table's embedded orders, which only ever
   // surfaces orders tied to a table and misses tableless pickup orders
-  // entirely. Doesn't include OrderDetails (line items), so
-  // reconstructing a full order still needs a getSingleOrder follow-up
-  // per id (orderHistoryApi.getDetail).
-  getActiveOrders: () => apiGet<{ order: RawOrderHeader[] }>("/pickupOrder"),
+  // entirely. Now bundles OrderDetails (line items) directly - no more
+  // getSingleOrder follow-up per row needed to reconstruct a full order.
+  getActiveOrders: () => apiGet<{ order: RawOrderDetail[] }>("/pickupOrder"),
 
   // controller/kto.js#invoiceGeneratePdf (POST /generateInvoicePdf).
   // Renders the bill via Puppeteer and returns the PDF as a raw byte
@@ -713,6 +1831,8 @@ export const orderApi = {
   // works from any origin now.
   generateInvoicePdf: (payload: {
     orderId: number;
+    /** See localPrintApi.printInvoice's own comment on this same field. */
+    billNo?: string;
     printerSize: string;
     tableAndUserInfo: string;
     dateAndTime: string;
@@ -734,6 +1854,12 @@ export const orderApi = {
     subtotal: number;
     totalDiscount: number;
     service_charge: number;
+    /** Previously not sent at all - the printed bill's own charge/tip
+     * breakdown silently diverged from the e-bill webview's, which does
+     * carry these (getBillViewData). See mock/store.tsx#doPrintBill. */
+    delivery_charge?: number;
+    packaging_charge?: number;
+    tip?: number;
     orderTax: {
       hms_tax_type_mst: { tax_name: string };
       amount: number;
@@ -764,6 +1890,11 @@ export const orderApi = {
     printerSize: string;
     kotNumber: number;
     token: number;
+    /** Dynamic KOT format (Task 1) - client-rendered HTML fragments from
+     * store.kotFormat (renderKotHeaderFooter, near doPrintKot). Falls back
+     * server-side to the old hardcoded layout when empty/omitted. */
+    headerText?: string[];
+    footerText?: string[];
     items: {
       item_name: string;
       qty: number;
@@ -828,6 +1959,15 @@ export type RawOrderHeader = {
   upi: number;
   card: number;
   due: number;
+  /** Waiter service tip, attributed to hotelUserId below (the order's
+   * creator) - see uat-backend-v2/model/order.js's own comment. */
+  tip?: number | null;
+  /** Owner-visible "reprinted N times" counter - see
+   * billerpe-local-exe/model/order.js's own comment. */
+  billPrintCount?: number | null;
+  /** Real per-day kitchen token number (Order.token,
+   * uat-backend-v2/controller/kto.js's generateToken). */
+  token?: number | null;
   business_date: string;
   createdAt: string;
   updatedAt: string;
@@ -843,7 +1983,9 @@ export type RawOrderLine = {
   price: number;
   variant_name: string | null;
   addons: string;
+  comment: string | null;
   MenuId: number;
+  kotNumber: number;
   hms_menu_mst?: { item_name?: string };
 };
 
@@ -851,25 +1993,203 @@ export type RawOrderDetail = RawOrderHeader & {
   hms_orderDetails: RawOrderLine[];
 };
 
-// controller/order.js. No date-ranged bulk listing endpoint exists that's
-// simultaneously unencrypted and line-item-complete: getAllOrderPaginationWise
-// (GET /paginateOrder) has full line detail but AES-encrypts its whole
-// response with a server-side secret (CryptoJS, controller/order.js's own
-// `encryptData` helper) this app has no decrypt path for and has never
-// needed one before, has no date-range params at all (only `page` and an
-// exact bill_no `search`), and hard-filters to payment:"success" only with
-// a page size fixed at 10 the caller can't raise. So order history here is
-// built from two unencrypted calls instead: getOrdersByBillNo
-// (GET /searchOrder/all) for an unbounded list of every non-deleted
-// order's header (no line items, no date filter of its own - the caller
-// filters client-side), then getSingleOrder (GET /order/:id) per order
-// actually wanted, for its real lines. Cancelled orders are invisible to
-// both (cancellation is modelled purely as deleted:true, and both
-// endpoints filter deleted:false) - there is no backend-retrievable
-// source for a "Cancelled" history entry through this app at all.
+// controller/order.js's getOrdersByBillNo (GET /searchOrder/all) now
+// bundles OrderDetails and takes real page/limit/search params - confirmed
+// live (network panel) that this used to return headers only, forcing a
+// getSingleOrder (GET /order/:id) follow-up per row just to get line items
+// (30+ extra requests on a single history-page load). That's gone: this
+// call alone returns full detail, paginated, with server-side search
+// across order no, bill_no, table name and customer name/phone. Cancelled
+// orders are still invisible here (cancellation is modelled purely as
+// deleted:true, and this endpoint filters deleted:false) - there is no
+// backend-retrievable source for a "Cancelled" history entry through this
+// app at all.
+export type RawOrderHistoryPage = {
+  order: RawOrderDetail[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
 export const orderHistoryApi = {
-  getAllHeaders: () => apiGet<{ order: RawOrderHeader[] }>("/searchOrder/all"),
+  getAllHeaders: (page: number, limit: number, search?: string) =>
+    apiGet<RawOrderHistoryPage>(
+      `/searchOrder/all?page=${page}&limit=${limit}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
+    ),
   getDetail: (id: number) => apiGet<{ order: RawOrderDetail }>(`/order/${id}`),
+  /** Owner-visible bill-reprint counter (Task 5) - fires only from the
+   * explicit "Reprint bill" action, never the first bill-generation print.
+   * Best-effort: a failure here must never block the actual print. */
+  incrementBillPrintCount: (id: number) =>
+    apiPost<{ billPrintCount: number }>(`/order/${id}/reprintCount`, {}),
+};
+
+// Reservations - uat-backend-v2's controller/tableBooking.js, a real,
+// already-working feature (multi-table booking, per-table time-overlap
+// conflict rejection, a node-schedule job that auto-opens an order on the
+// table(s) at start_time). Deliberately NOT ported to billerpe-local-exe:
+// duplicating this into the local-first sync engine would mean
+// re-implementing real business logic that already exists and raises an
+// ownership question (which side's scheduler fires the auto-open?).
+//
+// These paths ARE now in EXE_ROUTES, but only as a relay
+// (billerpe-local-exe/services/cloudRelay.js), not a port - the EXE
+// forwards each call to the cloud server-to-server using its own stored
+// cloud session and relays the response back unchanged. This exists
+// because the browser only ever holds a session for the EXE's own
+// origin, never the cloud's, so a direct browser->cloud call always
+// 401'd regardless of session validity - confirmed live as the
+// Reservations screen force-logging the user out just for opening it.
+// The scheduler/conflict logic itself is untouched and still runs
+// entirely on the cloud; nothing about "which side owns this" changed.
+//
+// getBookingData collapses a multi-table booking into one row per
+// booking_id with `table_name` as an array of table objects - note
+// `no_of_persons` (plural) is a pre-existing bug in that controller (wrong
+// field name, always undefined); the real party size is `no_of_person`
+// (singular), used here instead. No `status`/`deleted` field comes back at
+// all - deleted:false is already applied server-side, so every row this
+// returns is implicitly active by construction; a delete just removes it
+// from future listings, not a separate rendered "Cancelled" state.
+export type RawReservation = {
+  booking_id: number;
+  name: string;
+  email: string;
+  number: string;
+  booking_date: string;
+  start_time: string;
+  end_time: string;
+  no_of_person: number;
+  totalAmount: number;
+  gst_no: string;
+  advance: number;
+  table_name: { id: number; table_name: string }[];
+};
+export type ReservationPayload = {
+  name: string;
+  email: string;
+  number: string;
+  booking_date: string;
+  start_time: string;
+  end_time: string;
+  no_of_person: number;
+  totalAmount: number;
+  gst_no: string;
+  advance: number;
+  // Confusingly, the API's own field name for "table ids to book" is also
+  // `table_name` (an array of ids, not the array-of-objects the read side
+  // returns under the same key) - matching the controller's own request
+  // body shape exactly, not renamed here.
+  table_name: number[];
+};
+export const reservationApi = {
+  getAll: () => apiGet<{ bookings: RawReservation[] }>("/getBookingData"),
+  create: (payload: ReservationPayload) => apiPost<{ message: string }>("/tableBooking", payload),
+  update: (bookingId: number, payload: ReservationPayload) =>
+    apiPost<{ message: string }>(`/updatedBooking/${bookingId}`, payload),
+  remove: (bookingId: number) => apiPost<{ message: string }>("/deleteBooking", { id: bookingId }),
+};
+
+// Walk-in waitlist queue - billerpe-local-exe/controller/queue.js, a real
+// local implementation with no cloud counterpart at all (see model/
+// queueEntry.js's own comment on why). Every terminal pointed at this same
+// exe shares one live queue.
+export type RawQueueEntry = {
+  id: number;
+  name: string;
+  mobile: string;
+  party_size: number;
+  status: "waiting" | "seated" | "no_show" | "cancelled";
+  joined_at: string;
+  called_at: string | null;
+  resolved_at: string | null;
+  notes: string | null;
+};
+export const queueApi = {
+  getAll: () => apiGet<{ queue: RawQueueEntry[] }>("/queue"),
+  add: (payload: { name: string; mobile: string; party_size: number }) =>
+    apiPost<{ queue: RawQueueEntry[] }>("/queue", payload),
+  updateStatus: (id: number, status: RawQueueEntry["status"]) =>
+    apiPut<{ entry: RawQueueEntry }>(`/queue/${id}`, { status }),
+  markCalled: (id: number) => apiPost<{ entry: RawQueueEntry }>(`/queue/${id}/call`, {}),
+  clear: () => apiPost<{ queue: RawQueueEntry[] }>("/queue/clear", {}),
+};
+
+// QR table ordering, staff-facing half - see billerpe-local-exe/controller/
+// qrOrder.js. The pending-orders inbox is a real local read against the
+// exe's own mirror (services/qrOrderSync.js), not a relay; accept/reject
+// are real local writes (accept creates a real KOT). table_status/
+// table_name come along on each row purely for the accept guardrail (warn,
+// never block, if the table doesn't currently look occupied).
+export type RawQrOrderItem = {
+  menuId: number;
+  qty: number;
+  itemName: string;
+  comment?: string;
+  variantId?: number;
+  variantName?: string;
+  addonIds?: number[];
+  addonNames?: string[];
+};
+export type RawPendingQrOrder = {
+  id: number;
+  hotel_id: number;
+  table_id: number;
+  qr_version: number;
+  customer_name: string | null;
+  customer_mobile: string;
+  items: RawQrOrderItem[];
+  status: "pending" | "accepted" | "rejected" | "expired";
+  submitted_at: string;
+  table_status: string | null;
+  table_name: string | null;
+};
+export const qrOrderApi = {
+  getPending: () => apiGet<{ qrOrders: RawPendingQrOrder[] }>("/qrOrder/pending"),
+  accept: (id: number) => apiPost<{ orderId: number }>(`/qrOrder/${id}/accept`, {}),
+  reject: (id: number) => apiPost<{ message: string }>(`/qrOrder/${id}/reject`, {}),
+  regenerateTableQr: (tableId: number) =>
+    apiPost<{ qr_version: number }>(`/table/${tableId}/qr-version`, {}),
+};
+
+// Audit Log persistence (billerpe-local-exe's controller/auditLog.js) -
+// mock/store.tsx's log() POSTs here fire-and-forget right after its own
+// in-memory patch. device/ip are captured server-side from the request,
+// never sent from here - see that controller's own comment.
+export type RawAuditLogEntry = {
+  id: number;
+  user_id: string | null;
+  user_name: string;
+  action: string;
+  entity: string;
+  before: string;
+  after: string;
+  reason: string | null;
+  device: string | null;
+  ip: string | null;
+  createdAt: string;
+};
+export type RawAuditLogPage = {
+  entries: RawAuditLogEntry[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+};
+export const auditLogApi = {
+  create: (entry: {
+    user_id: string;
+    user_name: string;
+    action: string;
+    entity: string;
+    before: string;
+    after: string;
+    reason?: string;
+  }) => apiPost<{ ok: boolean }>("/auditLog", entry),
+  getAll: (page: number, limit: number, q?: string, userId?: string) =>
+    apiGet<RawAuditLogPage>(
+      `/auditLog?page=${page}&limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ""}${userId && userId !== "all" ? `&userId=${encodeURIComponent(userId)}` : ""}`,
+    ),
 };
 
 // Every /kitchen/* route is guarded by a *different* auth middleware
@@ -964,6 +2284,46 @@ export const dueApi = {
     apiPost<{ message?: string }>("/allSettleDue", { idArray, mode }),
 };
 
+// controller/editSettledOrder.js - "reopen and edit a settled order"
+// (orders.reopenSettled). Reverses and re-consumes stock server-side,
+// replaces the item list wholesale, recomputes the total, and turns any
+// gap against what's already been collected into `due` (negative = a
+// refund is owed - see refundDueApi below).
+export const editSettledOrderApi = {
+  edit: (params: {
+    orderId: number;
+    items: {
+      menuId: number;
+      qty: number;
+      price: number;
+      totalDiscount?: number;
+      variantId?: number;
+      variantName?: string;
+      addons?: unknown[];
+    }[];
+    totalAmount: number;
+    gst: number;
+    grandAmount: number;
+    totalDiscount: number;
+    discount_reason?: string;
+    discount_type?: "fix" | "pr";
+    discount_value?: number;
+    service_charge?: number;
+  }) => apiPost<{ message?: string; due: number }>("/editSettledOrder", params),
+};
+
+export type RawRefundDueOrder = {
+  id: number;
+  bill_no: string;
+  due: number;
+  createdAt: string;
+};
+
+export const refundDueApi = {
+  getAll: () => apiGet<{ orders: RawRefundDueOrder[] }>("/refundDue"),
+  settle: (id: number) => apiPost<{ message?: string }>("/refundDue", { id }),
+};
+
 export type RawCustomer = {
   id: number;
   number: string;
@@ -994,6 +2354,22 @@ export const customerApi = {
 
   update: (params: { id: number; name: string; number: string; gstin: string; address: string }) =>
     apiPut<{ message?: string }>("/customer/update", params),
+
+  // controller/customer.js#getLastOrderForCustomer (GET /customer/
+  // lastOrder) - "repeat this customer's last order" suggestion for the
+  // Attach customer dialog. Same RawOrderDetail shape getSingleOrder/
+  // getAllHeaders already return (Menu + line items joined), just scoped
+  // to "most recent non-deleted order for this number, real name/number
+  // required so it never matches the blank placeholder every order gets
+  // when no customer is attached". excludeOrderId leaves out the order
+  // currently being built, so a returning customer's own brand-new (still
+  // empty) order never "suggests" itself right back.
+  getLastOrder: (number: string, excludeOrderId?: number) =>
+    apiGet<{ order: RawOrderDetail | null }>(
+      `/customer/lastOrder?number=${encodeURIComponent(number)}${
+        excludeOrderId ? `&excludeOrderId=${excludeOrderId}` : ""
+      }`,
+    ),
 };
 
 export type RawPrinter = {
@@ -1051,6 +2427,101 @@ export const printerApi = {
   }) => apiPost<{ message?: string }>("/setCategoriesForPrinter", params),
 
   remove: (id: number) => apiPost<{ message?: string }>("/deletePrinter", { id }),
+};
+
+// Real local Windows printers, from the EXE (see billerpe-local-exe's
+// services/localPrinting.js) - lets the Printer Settings screen offer a
+// dropdown of what's actually installed on this PC instead of free-text
+// printer_name entry with no way to know it matches anything real.
+export type RawLocalPrinter = { deviceId: string; name: string; paperSizes: string[] };
+export const localPrinterApi = {
+  getAll: () => apiGet<{ printers: RawLocalPrinter[] }>("/localPrinters"),
+};
+
+// Same payload/handlers as billerpe-local-exe's public/dashboard.html (its
+// own GET /dashboard/api/status), reused here behind adminAuth instead of
+// that page's separate per-install token - see routes/index.js's own
+// comment on why duplicating the route (not the handler) was the right
+// call. Backs the System page's real server/sync status.
+export type RawLocalServerStatus =
+  | { registered: false; deviceId: string; lanAddresses: string[]; serverStartedAt: string }
+  | {
+      registered: true;
+      deviceId: string;
+      hostname: string;
+      app_version: string;
+      lanAddresses: string[];
+      hasCloudSession: boolean;
+      hotelName: string;
+      serverStartedAt: string;
+      sync: {
+        lastSuccessfulSyncAt: string | null;
+        maxOfflineDays: number;
+        daysSinceSync: number;
+        transactionsBlocked: boolean;
+        intervalSeconds: number;
+        pendingOrderCount: number;
+        lastError: { phase: string; message: string; at: string } | null;
+      };
+      tables: { total: number; free: number; running: number };
+      orders: { today: number; offlineTotal: number };
+    };
+export const localServerApi = {
+  getStatus: () => apiGetRaw<RawLocalServerStatus>("/localServerStatus"),
+  forceSync: () => apiPostRaw<{ ok: boolean }>("/localServerForceSync", {}),
+};
+
+// Direct silent printing from the EXE - generates the same PDF format as
+// generateKotPdf/generateInvoicePdf (see billerpe-local-exe's
+// services/pdfGenerator.js, a verbatim port of the real backend's own
+// templates) and sends it straight to whichever printer(s) Printer
+// Settings has configured, no browser print dialog involved.
+export const localPrintApi = {
+  printKot: (params: {
+    order_type: "dinin" | "pickup";
+    order_id: string;
+    restaurantName: string;
+    userOrTableNo: string;
+    timeAndDate: string;
+    kotNumber: number;
+    token: number;
+    table_id?: string;
+    /** Dynamic KOT format (Task 1) - see orderApi.printKot's own comment. */
+    headerText?: string[];
+    footerText?: string[];
+    items: unknown[];
+  }) =>
+    apiPost<{ message?: string; results: { printer: string; ok: boolean; error?: string }[] }>(
+      "/printKotDirect",
+      params,
+    ),
+  printInvoice: (params: {
+    orderId: string;
+    /** The real bill number to print - see mock/store.tsx#doPrintBill's own
+     * comment. Falls back to orderId server-side (services/pdfGenerator.js)
+     * when omitted, so an older caller that never sends it still works. */
+    billNo?: string;
+    tableAndUserInfo: string;
+    dateAndTime: string;
+    type: "dinin" | "pickup";
+    token: number;
+    customerName?: string;
+    customerNumber?: string;
+    items: unknown[];
+    totalQty: number;
+    subtotal: number;
+    totalDiscount: number;
+    service_charge: number;
+    delivery_charge?: number;
+    packaging_charge?: number;
+    tip?: number;
+    orderTax: unknown[];
+    totalBill: number;
+    headerText: string[];
+    footerText: string[];
+  }) => apiPost<{ orderId: string; printer: string }>("/printInvoiceDirect", params),
+  testPrint: (params: { printerName: string; printerSize?: string }) =>
+    apiPost<{ printer: string }>("/testPrintDirect", params),
 };
 
 export type RawTaxType = {
@@ -1190,7 +2661,9 @@ export type RawPurchaseOrderLine = {
   id: number;
   raw_material_id: number;
   raw_material_name?: string;
-  quantity: number;
+  /** DB column is `qty`, not `quantity` - confirmed live against
+   * billerpe-local-exe/model/purchaseRawMaterial.js. */
+  qty: number;
   unit?: RawUnit;
   price: number;
   amount: number;
@@ -1209,6 +2682,20 @@ export type RawPurchaseOrderPayment = {
   createdAt: string;
 };
 
+// Neither uat-backend-v2's controller/stock_Mangement/purchaseOrder.js nor
+// billerpe-local-exe's own port (controller/purchaseOrder.js) puts an `as`
+// alias on the PurchaseOrder->PurchaseRawMaterial/Supplier/
+// PurchaseOrderPayment associations, so Sequelize's own default naming
+// (the associated model's own registered table name, pluralized for a
+// hasMany) is what actually comes back - confirmed live against a real
+// hotel's data. The plain `rawMaterials`/`supplier`/`payments` field names
+// this type used to declare never matched either backend's real response
+// at all: `o.rawMaterials.map(...)` (mock/store.tsx#mapRawPurchaseOrder)
+// threw the moment a hotel had any real PO data to load, surfacing as the
+// generic "Could not load purchase orders from server" toast (a non-
+// ApiError JS exception, not a clean API error). There was never a
+// `payments: number` field either - "how much has been paid" has to be
+// summed from hms_purchase_payments' own line amounts.
 export type RawPurchaseOrder = {
   id: number;
   date: string;
@@ -1222,10 +2709,9 @@ export type RawPurchaseOrder = {
   discount: number;
   discount_type: "fix" | "pr";
   discount_value: number;
-  supplier?: { id: number; name: string };
-  rawMaterials: RawPurchaseOrderLine[];
-  payments: number;
-  paymentList: RawPurchaseOrderPayment[];
+  hms_supplier?: { id: number; name: string };
+  hms_purchase_rawMaterials: RawPurchaseOrderLine[];
+  hms_purchase_payments: RawPurchaseOrderPayment[];
 };
 
 // controller/stock_Mangement/purchaseOrder.js - the most consequential
@@ -1239,6 +2725,7 @@ export type RawPurchaseOrder = {
 // receipt has nothing to call here; only the "receive" step maps to an
 // actual backend write (create, or edit if already received once).
 //
+
 // 2. createPurchaseOrder only records a payment (PurchaseOrderPayment)
 // when payment_type is exactly "paid" - sending paidAmount alongside
 // payment_type "partial" is silently discarded, confirmed live (created
@@ -1247,15 +2734,18 @@ export type RawPurchaseOrder = {
 // endpoint afterward instead of relying on create's embedded logic at
 // all, for both "paid" and "partial".
 //
+
 // editPurchaseOrder is also NOT wrapped in a transaction (unlike create
 // and delete) - a partial failure mid-edit could leave the order, its
 // line items, and stock levels inconsistent. Pre-existing backend risk,
 // not something fixed here.
 //
+
 // getPurchaseOrders requires real startDate/endDate (getShiftedDateRange
 // defaults to "today" if omitted) and does NOT filter out
 // deleted_status:true rows - they stay in the list, which is what this
 // app's own "Cancelled" status already expects to see.
+
 export const purchaseOrderApi = {
   getAll: (startDate: string, endDate: string) =>
     apiGet<{
@@ -1366,6 +2856,86 @@ export const purchaseOrderApi = {
     payment_date: string;
     paidAmount: number;
   }) => apiPost<{ message?: string }>("/stock/payment", params),
+};
+
+export type RawRequisitionItem = {
+  id: number;
+  raw_material_id: number;
+  ordered_qty: number;
+  approved_qty: number | null;
+  unit_price: number;
+};
+
+export type RawRequisition = {
+  id: number;
+  req_no: number;
+  createdAt: string;
+  status: "Pending" | "Accepted" | "Out for delivery" | "Delivered" | "Rejected";
+  remarks: string | null;
+  raised_by: string | null;
+  purchase_order_id: number | null;
+  items: RawRequisitionItem[];
+};
+
+// controller/requisition.js - a procurement-request workflow that produces
+// a real PurchaseOrder (via fulfil, one atomic transaction server-side)
+// once accepted and out for delivery, mirroring purchaseOrderApi's own
+// header+lines shape.
+export const requisitionApi = {
+  getAll: () => apiGet<{ requisitions: RawRequisition[] }>("/stock/requisition"),
+
+  create: (
+    items: { materialId: string; orderedQty: number; unitPrice: number }[],
+    remarks?: string,
+  ) =>
+    apiPost<{ message?: string; id: number; req_no: number }>("/stock/requisition", {
+      items: items.map((i) => ({
+        materialId: Number(i.materialId),
+        orderedQty: i.orderedQty,
+        unitPrice: i.unitPrice,
+      })),
+      remarks,
+    }),
+
+  setStatus: (id: number, status: RawRequisition["status"]) =>
+    apiPost<{ message?: string }>("/stock/requisitionStatus", { id, status }),
+
+  setItemQty: (id: number, materialId: string, qty: number) =>
+    apiPost<{ message?: string }>("/stock/requisitionItemQty", {
+      id,
+      materialId: Number(materialId),
+      qty,
+    }),
+
+  remove: (id: number) => apiPost<{ message?: string }>("/stock/requisitionRemove", { id }),
+
+  fulfil: (id: number) =>
+    apiPost<{ message?: string; purchase_order_id: number; po_no: number }>(
+      "/stock/requisitionFulfil",
+      { id },
+    ),
+};
+
+// controller/rolePermissionDefault.js - one row per (hotel, role), storing
+// the frontend's grant matrix as opaque JSON (permissions/special_permissions
+// aren't typed against mock/types.ts's RolePermissions/SpecialPermission
+// here - this file stays independent of the mock layer, same as every
+// other Raw* type; store.tsx's mapper does the real shape work).
+export type RawRolePermissionDefault = {
+  id: number;
+  role: string;
+  permissions: Record<string, unknown>;
+  special_permissions: Record<string, unknown>;
+};
+
+export const rolePermissionApi = {
+  getAll: () => apiGet<{ defaults: RawRolePermissionDefault[] }>("/rolePermissionDefault"),
+
+  editPermissions: (role: string, permissions: Record<string, unknown>) =>
+    apiPost<{ message?: string }>("/rolePermissionDefault", { role, permissions }),
+
+  editSpecial: (role: string, special: Record<string, unknown>) =>
+    apiPost<{ message?: string }>("/rolePermissionDefaultSpecial", { role, special }),
 };
 
 export type RawStockInHand = {
@@ -1560,9 +3130,7 @@ export type RawExpenseHead = {
   deleted: boolean;
 };
 
-// controller/expence/expence.js. No delete endpoint for heads exists at all
-// (only add/edit) - a head created here can never be removed through this
-// app either.
+// controller/expence/expence.js
 export const expenseHeadApi = {
   getAll: () => apiGet<{ expenseHeads: RawExpenseHead[] }>("/expense/getAllExpenseHead"),
   create: (expense_head_name: string) =>
@@ -1574,6 +3142,8 @@ export const expenseHeadApi = {
       id,
       expense_head_name,
     }),
+  remove: (allId: number[]) =>
+    apiDelete<{ expenseHeads: RawExpenseHead[] }>("/expense/deleteExpenseHead", { allId }),
 };
 
 export type RawExpenseEntry = {
@@ -1584,7 +3154,39 @@ export type RawExpenseEntry = {
   addExpense: boolean;
   business_date: string;
   expense_head_id: number;
+  user_id: number | null;
+  // Sequelize's own timestamp, has real time-of-day unlike business_date
+  // (DATEONLY) - what the entries screen's "date & time" column reads.
+  createdAt: string;
   hms_expense_head_mst?: { expense_head_name?: string };
+  // Was write-only before (user_id was always saved but never joined back
+  // out) - controller/expense.js's allEntry now includes HotelUser, model/
+  // index.js now has the reverse belongsTo that join needs.
+  hms_hotelUser_master?: { id: number; name: string } | null;
+};
+
+// Optional filters allEntry now supports beyond the always-required date
+// range - each maps straight to a `where` clause, so "no filter" just
+// omits the query param entirely rather than sending an empty string.
+export type ExpenseEntryFilters = {
+  expense_head_id?: number;
+  paymentMode?: string;
+  user_id?: number;
+};
+
+export type RawExpenseEntryPage = {
+  entry: RawExpenseEntry[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+  // Always computed over the FULL filtered set (every page), not just
+  // whichever page is being viewed - see controller/expense.js's own
+  // comment on why these are queried separately from the page rows.
+  totalMoneyIn: number;
+  totalExpense: number;
+  totalSale: number;
+  remainingAmount: number;
 };
 
 // controller/expence/expence.js. allEntry requires both startDate/endDate
@@ -1596,17 +3198,38 @@ export type RawExpenseEntry = {
 // addExpense:true. No field on the response identifies which staff member
 // recorded the entry (no user include, unlike Wastage's
 // hms_hotelUser_master), so that's not something this app can show either.
+// controller/expense.js's allEntry - real server-side pagination, not a
+// full unbounded fetch: `opts.page`/`opts.limit` gate which rows come
+// back, `opts.all: true` bypasses that entirely (every matching row in
+// one call) for the two callers that genuinely need the complete set -
+// CSV export, and the full-range aggregate reads (Dashboard/Expense
+// Heads/the expense report) that pre-date real pagination and still need
+// "everything in this range," not one page of it.
 export const expenseApi = {
-  getAll: (startDate: string, endDate: string) =>
-    apiGet<{ entry: RawExpenseEntry[] }>(
-      `/expense/allEntry?startDate=${startDate}&endDate=${endDate}`,
-    ),
+  getAll: (
+    startDate: string,
+    endDate: string,
+    opts?: { page?: number; limit?: number; all?: boolean } & ExpenseEntryFilters,
+  ) => {
+    const params = new URLSearchParams({ startDate, endDate });
+    if (opts?.page) params.set("page", String(opts.page));
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.all) params.set("all", "true");
+    if (opts?.expense_head_id) params.set("expense_head_id", String(opts.expense_head_id));
+    if (opts?.paymentMode) params.set("paymentMode", opts.paymentMode);
+    if (opts?.user_id) params.set("user_id", String(opts.user_id));
+    return apiGet<RawExpenseEntryPage>(`/expense/allEntry?${params.toString()}`);
+  },
   create: (params: {
     expense_head_id: number;
     amount: number;
     paymentMode: string;
     reason: string;
     addExpense: boolean;
+    // ISO timestamp - omitted means "now" (backend default). Staff can
+    // backdate a forgotten entry; the backend independently rejects a
+    // future one regardless of what the client sends.
+    date?: string;
   }) => apiPost<{ message?: string }>("/expense/addExpense", params),
   update: (params: {
     id: number;
@@ -1615,6 +3238,7 @@ export const expenseApi = {
     paymentMode: string;
     reason: string;
     addExpense: boolean;
+    date?: string;
   }) => apiPut<{ message?: string }>("/expense/editExpense", params),
   remove: (id: number) => apiDelete<{ message?: string }>("/expense/deleteExpense", { id }),
 };
@@ -1677,6 +3301,13 @@ export type RawKotReportPeriod = {
   period: string;
   totalTickets: number;
   totalOrders: number;
+  // A ticket counts here when its order was later deleted (deletedTickets)
+  // or is still unsettled - payment !== "success" and not deleted -
+  // (unbilledTickets); every other ticket belongs to a settled order.
+  // deletedTickets + unbilledTickets is the "not in use" count staff asked
+  // to see split out from the raw KOT total.
+  deletedTickets: number;
+  unbilledTickets: number;
 };
 
 export type RawItemWiseRow = {
@@ -1719,6 +3350,9 @@ export type RawDiscountedOrder = {
   totalDiscount: string | number;
   order_type: string;
   createdAt: string;
+  // Who billed/owns the order (Order.hotelUserId), not the customer -
+  // task 44 wanted the discount report to show who gave a discount.
+  hms_hotelUser_master?: { name: string } | null;
 };
 
 // controller/reports/*.js. Every one of these requires BOTH
@@ -1757,9 +3391,12 @@ export const reportApi = {
   // day-wise count of real KOT tickets fired, from hms_timeline_mst rows
   // with action "kot" (a true event log, not derived/guessed).
   kotReport: (startDate: string, endDate: string) =>
-    apiGet<{ periodData: RawKotReportPeriod[]; totalTickets: number }>(
-      `/report/kotReport?startDate=${startDate}&endDate=${endDate}`,
-    ),
+    apiGet<{
+      periodData: RawKotReportPeriod[];
+      totalTickets: number;
+      deletedTickets: number;
+      unbilledTickets: number;
+    }>(`/report/kotReport?startDate=${startDate}&endDate=${endDate}`),
   discountedOrdersPage: (startDate: string, endDate: string, page: number) =>
     apiGet<{
       discountedOrders: { data: RawDiscountedOrder[]; totalPages: number };

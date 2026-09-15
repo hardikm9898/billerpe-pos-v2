@@ -1,10 +1,10 @@
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { BarChart3, ChevronRight } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Money, Page, PageHeader, SectionCard, StatCard } from "@/components/kit";
+import { ApiError, reportApi } from "@/lib/api";
 import { REPORT_TYPES } from "@/mock/data";
-import { orderTotals, useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/reports/")({
   head: () => ({
@@ -25,10 +25,39 @@ export const Route = createFileRoute("/_shell/reports/")({
 });
 
 function ReportsPage() {
-  const store = useStore();
+  // Was computed from store.orders.filter(status === "Settled") - that
+  // array only ever holds live (Held/Running/Bill Generated) orders plus
+  // whatever hasn't synced into order history yet, so these two stat
+  // cards showed near-empty numbers instead of the real all-time totals
+  // (task 43). posCollection is the same real backend aggregate the
+  // Payment Mode/Tax reports already use, called with the same fixed
+  // "all time" wide range this app's report screens already establish as
+  // the convention (see reportApi's own comment in lib/api.ts) - not a
+  // new date-range control.
+  const [totals, setTotals] = useState<{ bills: number; revenue: number } | null>(null);
 
-  const settled = useMemo(() => store.orders.filter((o) => o.status === "Settled"), [store.orders]);
-  const revenue = settled.reduce((s, o) => s + orderTotals(o, store).grand, 0);
+  useEffect(() => {
+    let cancelled = false;
+    reportApi
+      .posCollection("2000-01-01", "2100-01-01")
+      .then(({ posCollections: pc }) => {
+        if (cancelled) return;
+        const revenue =
+          Number(pc.cashTotal) + Number(pc.upiTotal) + Number(pc.cardTotal) + Number(pc.dueTotal);
+        setTotals({ bills: pc.totalBills, revenue });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error(
+          "[reports] Could not load POS collection totals:",
+          err instanceof ApiError ? err.message : err,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const groups = useMemo(() => {
     const map = new Map<string, typeof REPORT_TYPES>();
     REPORT_TYPES.forEach((r) => map.set(r.group, [...(map.get(r.group) ?? []), r]));
@@ -44,10 +73,10 @@ function ReportsPage() {
       />
 
       <div className="grid gap-3 sm:grid-cols-3">
-        <StatCard label="Settled orders" value={settled.length} tone="primary" />
+        <StatCard label="Settled orders" value={totals ? totals.bills : "—"} tone="primary" />
         <StatCard
           label="Revenue captured"
-          value={<Money value={Math.round(revenue)} />}
+          value={totals ? <Money value={Math.round(totals.revenue)} /> : "—"}
           tone="success"
         />
         <StatCard label="Available reports" value={REPORT_TYPES.length} />

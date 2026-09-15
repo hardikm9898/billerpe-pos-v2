@@ -21,14 +21,22 @@ export function nowStamp() {
   return `${todayLabel} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
 }
 
+// Real current time-of-day, in minutes since midnight - was hardcoded to
+// 20*60+15 ("demo now = 08:15 pm") in both functions below, so every
+// elapsed-duration display (running table occupied-since, KDS ticket age)
+// was only ever correct around 8:15pm and nonsense the rest of the day.
+function nowMinutes() {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
 export function elapsedFrom(stamp: string) {
   const m = stamp.match(/(\d{2}):(\d{2})\s?(am|pm)/i);
   if (!m) return "—";
   let h = Number(m[1] ?? 0) % 12;
   if ((m[3] ?? "").toLowerCase() === "pm") h += 12;
   const then = h * 60 + Number(m[2] ?? 0);
-  const base = 20 * 60 + 15; // demo "now" = 08:15 pm
-  const diff = Math.max(0, base - then);
+  const diff = Math.max(0, nowMinutes() - then);
   return diff >= 60 ? `${Math.floor(diff / 60)}h ${diff % 60}m` : `${diff}m`;
 }
 
@@ -37,8 +45,7 @@ export function elapsedMinutes(stamp: string) {
   if (!m) return 0;
   let h = Number(m[1] ?? 0) % 12;
   if ((m[3] ?? "").toLowerCase() === "pm") h += 12;
-  const base = 20 * 60 + 15;
-  return Math.max(0, base - (h * 60 + Number(m[2] ?? 0)));
+  return Math.max(0, nowMinutes() - (h * 60 + Number(m[2] ?? 0)));
 }
 
 export function pct(part: number, total: number) {

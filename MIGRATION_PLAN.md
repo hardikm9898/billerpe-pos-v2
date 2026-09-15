@@ -57,8 +57,11 @@ what's real, what's a confirmed dead end, and what's left.
 | Expense Heads & Entries | Real CRUD |
 | Promo Codes | Real CRUD (deactivate is one-way — see Dead ends) |
 | Dashboard | Real settled-order stats (last 90 days), real-date range picker scoped to this page |
-| Reports — 6 of 13 | day-wise-sales, item-wise-sales, category-wise-sales, payment-mode, tax-report, discount-report via real report endpoints |
-| Reports — 3 of 13 (no dedicated endpoint needed) | expense-report, purchase-report, closing-stock already read fully-synced store data |
+| Reservations | Real load + create via `reservationApi` (cloud-routed, not local-exe — see its own comment in api.ts). This table's "Dead end" entry below was stale as of 2026-09-02 — reservations were wired at some point after that entry was written and the entry was never removed |
+| Cash Sessions | Real open/close/movement + load via `cashSessionApi` (ported to the Local EXE — see loadCashSessionsFromServer's own comment). Also stale below for the same reason as Reservations |
+| Reports — 7 of 13 | day-wise-sales, item-wise-sales, category-wise-sales, payment-mode, tax-report, discount-report, **and kot-report** (also stale below) via real report endpoints |
+| Reports — 6 of 13 (no dedicated endpoint needed, but real data) | cash-session, table-performance, staff-performance, expense-report, purchase-report, closing-stock all compute from other already-backend-synced store data (orders, cash sessions, expenses, etc.) rather than a dedicated `/report/*` call — genuinely real, not mock, just derived client-side |
+| Multi Menu (menu catalogues) | Real full CRUD as of 2026-09-02 — new `MenuCatalog` model + migration + endpoints built in both `uat-backend-v2` and `billerpe-local-exe` (was local-only before; see task 10 in that session's work) |
 
 ---
 
@@ -66,17 +69,19 @@ what's real, what's a confirmed dead end, and what's left.
 
 No further work planned unless the user explicitly authorizes new backend capability.
 
+**Reservations, Cash Sessions and kot-report were wrongly listed here as dead ends** in an
+earlier version of this file — all three were verified real and moved to the "Already wired"
+table above on 2026-09-02. Whatever backend work un-blocked them (not captured in this file at
+the time) already landed; nothing further needed for them.
+
 | Module | Why |
 |---|---|
-| Reservations | Backend controller references columns (`vacant`, `tableNumber`) that no longer exist on the current `Table` schema — dead/broken legacy code |
-| Cash Sessions | No `hotel_id`, no status, no cashier reference on the model; zero controller/route code touches it |
-| Rich Permissions editor | Backend only has coarse per-user CRUD flags across 10 areas — no role-level default-permission concept exists |
+| Rich Permissions editor (role-level defaults) | Backend only has coarse per-user CRUD flags across 10 areas, one flat set of booleans per user — no role-level default-permission concept exists, and no way to distinguish "custom override" from "role default" at all. Per-user overrides *within* those 10 areas do now persist (`updateUserPermissionOverrides`/`upsertUser`'s `access_name` payload, fixed 2026-09-02) - the still-missing piece is the 7 special permissions and 13 modules with no backend-area equivalent (menu items, keyboard-billing, kds, permissions, cash-session, stock-transactions/-recipes/-reports, ops-*, system, audit-log), plus role-level default editing itself (`updateRoleDefaults`/`updateRoleSpecialDefaults`) |
 | Payment Modes config | No payment-mode master/config model anywhere in the backend |
 | Delivery/Packaging charge rules | No rule-engine config or bill-inclusion logic on the backend at all |
-| Approval Rules (discount thresholds) | No discount-approval-by-role config exists; only unrelated CRM/superadmin "approval" concepts |
+| ~~Approval Rules (discount thresholds)~~ | No discount-approval-by-role config existed. Rather than build one, the underlying `orders.applyDiscountOverThreshold` permission concept was removed entirely from the app (types, role defaults, permission editor) on 2026-09-02, per explicit product decision — not applicable anymore, nothing to wire |
 | Requisitions | Closest backend match (Franchise Orders) is a different business domain — franchise-outlet-to-merchant-hub ordering, requires a `merchant_id` this app has no UI to select |
 | Reopen a settled order | No endpoint anywhere resets `payment` back to `pending`; `settleBills` only ever operates on `payment:"pending"` rows |
-| Reports — 4 of 13 (cash-session, table-performance, staff-performance, kot-report) | No dedicated backend report endpoint for any of these |
 | Notification settings (`toggleNotificationSetting`) | No per-hotel, per-trigger, per-channel config exists anywhere. WhatsApp sends are hardcoded at fixed call sites in `smsService.js` with no on/off flag; SMS sending itself is dead/commented-out code; the only adjacent "config" (`autoReplyConfig` in the WhatsApp agent controller) is a global, in-memory, superadmin-only chat auto-reply toggle, unrelated to the 6 seeded triggers (Order settled, KOT ready, Low stock, Sync failure, Cash variance, Reservation reminder). `RestaurantSetting` has no channel-toggle columns either |
 
 ---

@@ -76,7 +76,7 @@ const MODULE_GROUPS: { title: string; modules: PermissionModule[] }[] = [
   },
   {
     title: "Operations",
-    modules: ["ops-billing", "ops-hardware", "ops-experience", "ops-ledger", "approval-matrix"],
+    modules: ["ops-billing", "ops-hardware", "ops-experience", "ops-ledger"],
   },
   { title: "Finance & Reports", modules: ["reports", "expense", "cash-session"] },
   { title: "Admin & System", modules: ["users", "permissions", "system", "audit-log"] },
@@ -86,7 +86,6 @@ const SPECIAL_PERMS: SpecialPermission[] = [
   "orders.editAfterKot",
   "orders.reopenSettled",
   "orders.deleteOrder",
-  "orders.applyDiscountOverThreshold",
   "tables.mergeTransfer",
   "system.remakeOrderSequence",
   "users.editPermissions",
@@ -195,6 +194,7 @@ function UsersPage() {
   const store = useStore();
   const [draft, setDraft] = useState<User | null>(null);
   const [resetPassword, setResetPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [showOverrides, setShowOverrides] = useState(false);
   const [viewRole, setViewRole] = useState<Role>("Manager");
   const hasPending = useHasPendingRequests();
@@ -271,6 +271,7 @@ function UsersPage() {
             onClick={() => {
               setDraft(newUser());
               setResetPassword("");
+              setConfirmPassword("");
             }}
           >
             <Plus className="size-4" /> Add user
@@ -286,6 +287,7 @@ function UsersPage() {
           onRowClick={(u) => {
             setDraft({ ...u });
             setResetPassword("");
+            setConfirmPassword("");
             setShowOverrides(!!u.permissionOverrides);
           }}
           columns={[
@@ -421,33 +423,62 @@ function UsersPage() {
                 </div>
               </div>
               {draft.id ? (
-                <div className="space-y-1.5">
-                  <Label>Reset password</Label>
-                  <PasswordInput
-                    value={resetPassword}
-                    disabled={!canEditUsers}
-                    placeholder="Leave blank to keep current"
-                    onChange={(e) => setResetPassword(e.target.value)}
-                  />
-                  {!canEditUsers ? (
-                    <p className="text-xs text-muted-foreground">
-                      You don't have permission to reset staff credentials.
-                    </p>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      Existing passwords and PINs are stored securely and can't be viewed - only
-                      reset to a new value.
-                    </p>
-                  )}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>Reset password</Label>
+                    <PasswordInput
+                      value={resetPassword}
+                      disabled={!canEditUsers}
+                      placeholder="Leave blank to keep current"
+                      onChange={(e) => setResetPassword(e.target.value)}
+                    />
+                  </div>
+                  {resetPassword ? (
+                    <div className="space-y-1.5">
+                      <Label>Re-enter new password</Label>
+                      <PasswordInput
+                        value={confirmPassword}
+                        disabled={!canEditUsers}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                      />
+                    </div>
+                  ) : null}
+                  <div className="sm:col-span-2">
+                    {!canEditUsers ? (
+                      <p className="text-xs text-muted-foreground">
+                        You don't have permission to reset staff credentials.
+                      </p>
+                    ) : resetPassword && confirmPassword && resetPassword !== confirmPassword ? (
+                      <p className="text-xs text-primary">Passwords don't match.</p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Existing passwords and PINs are stored securely and can't be viewed - only
+                        reset to a new value.
+                      </p>
+                    )}
+                  </div>
                 </div>
               ) : (
-                <div className="space-y-1.5">
-                  <Label>Password</Label>
-                  <PasswordInput
-                    value={resetPassword}
-                    onChange={(e) => setResetPassword(e.target.value)}
-                  />
-                  <p className="text-xs text-muted-foreground">At least 6 characters.</p>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>Password</Label>
+                    <PasswordInput
+                      value={resetPassword}
+                      onChange={(e) => setResetPassword(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Re-enter password</Label>
+                    <PasswordInput
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground sm:col-span-2">
+                    {resetPassword && confirmPassword && resetPassword !== confirmPassword
+                      ? "Passwords don't match."
+                      : "At least 6 characters."}
+                  </p>
                 </div>
               )}
               <div className="space-y-1.5">
@@ -566,7 +597,8 @@ function UsersPage() {
               disabled={
                 !draft?.name.trim() ||
                 (!draft.id && resetPassword.trim().length < 6) ||
-                (!!resetPassword && resetPassword.trim().length < 6)
+                (!!resetPassword && resetPassword.trim().length < 6) ||
+                (!!resetPassword && resetPassword !== confirmPassword)
               }
               onClick={() => {
                 if (!draft) return;

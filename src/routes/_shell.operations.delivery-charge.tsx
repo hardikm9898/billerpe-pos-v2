@@ -21,14 +21,13 @@ import type { BillChargeRule, OpsOrderType } from "@/mock/types";
 export const Route = createFileRoute("/_shell/operations/delivery-charge")({
   head: () => ({
     meta: [
-      { title: "Delivery & Packaging · BillerPe" },
+      { title: "Packaging Charge · BillerPe" },
       {
         name: "description",
-        content:
-          "Dynamic delivery and packaging charge rules — type, auto-apply and tax treatment.",
+        content: "Dynamic packaging charge rule — type, auto-apply and tax treatment.",
       },
-      { property: "og:title", content: "Delivery & Packaging · BillerPe" },
-      { property: "og:description", content: "Delivery and packaging charge rule configuration." },
+      { property: "og:title", content: "Packaging Charge · BillerPe" },
+      { property: "og:description", content: "Packaging charge rule configuration." },
     ],
   }),
   component: DeliveryChargePage,
@@ -48,18 +47,12 @@ function DeliveryChargePage() {
     <Page>
       <PageHeader
         icon={Truck}
-        title="Delivery & Packaging Charge"
+        title="Packaging Charge"
         description="Same rule engine as Service Charge — active toggle, type, auto-apply order types and tax treatment. Billers can still override the computed amount per order."
       />
       <OpsNav active="delivery-charge" />
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <StatCard
-          label="Delivery charge"
-          value={summarize(store.deliveryChargeRule)}
-          tone={store.deliveryChargeRule.active ? "primary" : "default"}
-          hint={store.deliveryChargeRule.autoApply.join(", ") || "Manual only"}
-        />
         <StatCard
           label="Packaging charge"
           value={summarize(store.packagingChargeRule)}
@@ -69,11 +62,6 @@ function DeliveryChargePage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <RuleEditor
-          title="Delivery charge rule"
-          rule={store.deliveryChargeRule}
-          onSave={store.setDeliveryChargeRule}
-        />
         <RuleEditor
           title="Packaging charge rule"
           rule={store.packagingChargeRule}

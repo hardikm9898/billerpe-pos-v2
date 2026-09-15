@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Bell } from "lucide-react";
+import { useEffect } from "react";
 
 import { Page, PageHeader, SectionCard } from "@/components/kit";
 import { Button } from "@/components/ui/button";
@@ -28,6 +29,15 @@ const channels = [
 
 function NotificationSettingsPage() {
   const store = useStore();
+  const status = store.localServerStatus;
+
+  useEffect(() => {
+    store.loadServerStatusFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const maxOfflineDays =
+    status?.registered && status.sync ? status.sync.maxOfflineDays : store.maxOfflineDays;
 
   return (
     <Page>
@@ -77,19 +87,15 @@ function NotificationSettingsPage() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
           <div className="flex-1 space-y-1.5">
             <Label>Maximum offline duration (days)</Label>
-            <Input
-              type="number"
-              defaultValue={store.maxOfflineDays}
-              onBlur={(e) => store.setMaxOfflineDays(Number(e.target.value))}
-            />
+            <Input type="number" value={maxOfflineDays} readOnly disabled className="num" />
           </div>
           <Button variant="outline" onClick={() => store.markAllNotificationsRead()}>
             Mark all notifications read
           </Button>
         </div>
         <p className="mt-3 text-xs text-muted-foreground">
-          After this limit, new transactions are blocked while staff stay logged in and can still view
-          existing data.
+          Set on this device's local server, not editable from the Web POS. After this limit, new
+          transactions are blocked while staff stay logged in and can still view existing data.
         </p>
       </SectionCard>
     </Page>

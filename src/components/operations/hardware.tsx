@@ -1,6 +1,9 @@
-import { Plus, Printer as PrinterIcon, TestTube2, Trash2, Utensils } from "lucide-react";
-import { useState } from "react";
+import { Link } from "@tanstack/react-router";
+import { ChefHat, Plus, Printer as PrinterIcon, TestTube2, Trash2, Utensils } from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+
+import { ApiError, localPrinterApi, localPrintApi, type RawLocalPrinter } from "@/lib/api";
 
 import { DataTable, EmptyState, SectionCard, StatCard, StatusBadge } from "@/components/kit";
 import { AssignmentSummary, ChipSelect, Notice, Toolbar } from "@/components/operations/shared";
@@ -25,6 +28,15 @@ import { useStore } from "@/mock/store";
 import type { Kitchen, OpsOrderType, Printer } from "@/mock/types";
 
 const ORDER_TYPES: OpsOrderType[] = ["Dine-in", "Pickup"];
+
+// Mirrors store.tsx's own (unexported) PRINTER_SIZE_TO_BACKEND - same three
+// values, kept local here rather than exported/shared since this is the
+// only other place that needs to send a paper size code to the EXE.
+const PRINTER_SIZE_TO_BACKEND: Record<NonNullable<Printer["size"]>, "2" | "3" | "4"> = {
+  "58mm": "2",
+  "80mm": "3",
+  A4: "4",
+};
 
 /* =============== Kitchens =============== */
 
@@ -54,6 +66,23 @@ export function KitchenSection() {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface p-3">
+        <div>
+          <p className="text-sm font-semibold">Kitchen Display (KDS)</p>
+          <p className="text-xs text-muted-foreground">
+            The live KOT queue kitchen staff work from - not a regular POS screen, so it's reached
+            from here rather than the main sidebar.
+          </p>
+        </div>
+        {store.can("kds", "view") ? (
+          <Button asChild>
+            <Link to="/kds">
+              <ChefHat className="size-4" /> Open Kitchen Display
+            </Link>
+          </Button>
+        ) : null}
+      </div>
+
       <Notice tone="info" title="A kitchen is a destination, not a device">
         When a KOT is generated, the item's menu category is matched against these kitchens to
         decide which KDS screen it appears on. A category with no match routes to the default
@@ -266,6 +295,20 @@ export function PrinterSection() {
   const store = useStore();
   const [draft, setDraft] = useState<Printer | null>(null);
 
+  // Real Windows printers installed on this PC, fetched from the EXE only
+  // while the dialog is actually open - this is ephemeral "what's plugged
+  // in right now" data, not something worth holding in the global store.
+  // Empty/failed fetch (EXE unreachable, or no printers found) just falls
+  // back to the free-text input below rather than blocking the dialog.
+  const [localPrinters, setLocalPrinters] = useState<RawLocalPrinter[]>([]);
+  useEffect(() => {
+    if (!draft) return;
+    void localPrinterApi
+      .getAll()
+      .then(({ printers }) => setLocalPrinters(printers))
+      .catch(() => setLocalPrinters([]));
+  }, [draft !== null]);
+
   return (
     <div className="space-y-4">
       <Notice tone="info" title="Printers resolve the KOT that kitchens routed">
@@ -360,13 +403,26 @@ export function PrinterSection() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() =>
-                      p.status === "Ready"
-                        ? toast.success("Test print sent", { description: p.name })
-                        : toast.error("Printer not ready", {
-                            description: `${p.name} · ${p.status}`,
-                          })
-                    }
+                    onClick={() => {
+                      if (p.status !== "Ready") {
+                        toast.error("Printer not ready", {
+                          description: `${p.name} · ${p.status}`,
+                        });
+                        return;
+                      }
+                      void localPrintApi
+                        .testPrint({
+                          printerName: p.name,
+                          printerSize: PRINTER_SIZE_TO_BACKEND[p.size ?? "80mm"],
+                        })
+                        .then(() => toast.success("Test print sent", { description: p.name }))
+                        .catch((err) =>
+                          toast.error(
+                            err instanceof ApiError ? err.message : "Could not send test print",
+                            { description: p.name },
+                          ),
+                        );
+                    }}
                   >
                     <TestTube2 className="size-4" />
                   </Button>
@@ -404,11 +460,43 @@ export function PrinterSection() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5 sm:col-span-2">
                   <Label>Printer name</Label>
-                  <Input
-                    value={draft.name}
-                    placeholder="Tandoor KOT"
-                    onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-                  />
+                  {localPrinters.length > 0 ? (
+                    <Select
+                      value={
+                        localPrinters.some((p) => p.name === draft.name) ? draft.name : "__custom__"
+                      }
+                      onValueChange={(v) => {
+                        if (v !== "__custom__") setDraft({ ...draft, name: v });
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select an installed printer" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {localPrinters.map((p) => (
+                          <SelectItem key={p.deviceId} value={p.name}>
+                            {p.name}
+                          </SelectItem>
+                        ))}
+                        <SelectItem value="__custom__">Other (type manually)…</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  ) : null}
+                  {localPrinters.length === 0 ||
+                  !localPrinters.some((p) => p.name === draft.name) ? (
+                    <Input
+                      className="mt-1.5"
+                      value={draft.name}
+                      placeholder="Tandoor KOT"
+                      onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                    />
+                  ) : null}
+                  {localPrinters.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">
+                      Couldn't load installed printers from the Local Server - the name must match
+                      exactly what Windows shows for this printer.
+                    </p>
+                  ) : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Paper size</Label>
@@ -512,8 +600,15 @@ export function PrinterSection() {
             </Button>
             <Button
               onClick={() => {
-                if (draft)
-                  store.upsertPrinter(draft.id ? draft : { ...draft, id: `pr-${Date.now()}` });
+                // Pass draft.id through as-is (empty string for a new
+                // printer, from emptyPrinter()) - upsertPrinter's own
+                // `if (!pr.id)` check decides create vs. edit from that.
+                // Pre-filling a placeholder id here (as this used to do)
+                // made every new printer look like an edit to that check,
+                // so it always took the update path with Number("pr-...")
+                // -> NaN -> a null id sent to the backend, which correctly
+                // reported "Printer Not Found" for every single add.
+                if (draft) store.upsertPrinter(draft);
                 setDraft(null);
               }}
             >

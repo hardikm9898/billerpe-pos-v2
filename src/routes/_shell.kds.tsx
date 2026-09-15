@@ -1,10 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import { ChefHat, Clock, Timer } from "lucide-react";
+import { Ban, ChefHat, Clock, Timer } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { EmptyState, Page, PageHeader, StatusBadge } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { connectKdsSocket } from "@/lib/kdsSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
@@ -41,6 +51,8 @@ function KdsPage() {
   const store = useStore();
   const [station, setStation] = useState<string>("All");
   const stations = ["All", ...store.kitchens.map((k) => k.name)];
+  const [rejectTarget, setRejectTarget] = useState<Kot | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
 
   // Real-time visibility across devices only - see the KDS wiring
   // decision: the backend has just one ready/not-ready flag per item, no
@@ -116,6 +128,10 @@ function KdsPage() {
                     key={k.id}
                     kot={k}
                     onAdvance={() => store.setKotStatus(k.id, flow[k.status]!)}
+                    onReject={() => {
+                      setRejectReason("");
+                      setRejectTarget(k);
+                    }}
                   />
                 ))}
                 {!items.length ? <EmptyState compact icon={ChefHat} title="Nothing here" /> : null}
@@ -124,11 +140,52 @@ function KdsPage() {
           );
         })}
       </div>
+
+      <Dialog open={!!rejectTarget} onOpenChange={(o) => !o && setRejectTarget(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reject KOT #{rejectTarget?.kotNo}</DialogTitle>
+            <DialogDescription>
+              {rejectTarget?.tableLabel} · {rejectTarget?.items.map((i) => i.name).join(", ")}.
+              Front-of-house is notified - they still need to remove it from the bill themselves.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="rejectReason">Reason</Label>
+            <Input
+              id="rejectReason"
+              placeholder="Out of stock"
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (!rejectTarget) return;
+                store.rejectKot(rejectTarget.id, rejectReason.trim() || "Out of stock");
+                setRejectTarget(null);
+              }}
+            >
+              <Ban className="size-4" /> Reject KOT
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Page>
   );
 }
 
-function KotCard({ kot, onAdvance }: { kot: Kot; onAdvance: () => void }) {
+function KotCard({
+  kot,
+  onAdvance,
+  onReject,
+}: {
+  kot: Kot;
+  onAdvance: () => void;
+  onReject: () => void;
+}) {
   const mins = elapsedMinutes(kot.createdAt);
   const urgency = mins > 20 ? "border-primary" : mins > 10 ? "border-warning" : "border-border";
 
@@ -157,7 +214,9 @@ function KotCard({ kot, onAdvance }: { kot: Kot; onAdvance: () => void }) {
             <span className="min-w-0">
               <span className="num font-semibold">{i.qty}×</span> {i.name}
               {i.note ? (
-                <span className="block text-[11px] italic text-warning">{i.note}</span>
+                <span className="block whitespace-pre-wrap break-words text-[11px] italic text-warning">
+                  {i.note}
+                </span>
               ) : null}
             </span>
           </li>
@@ -173,9 +232,14 @@ function KotCard({ kot, onAdvance }: { kot: Kot; onAdvance: () => void }) {
         >
           <Timer className="size-3.5" /> {elapsedFrom(kot.createdAt)}
         </span>
-        <Button size="sm" onClick={onAdvance}>
-          Mark {flow[kot.status]}
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button size="sm" variant="outline" className="text-primary" onClick={onReject}>
+            <Ban className="size-3.5" /> Reject
+          </Button>
+          <Button size="sm" onClick={onAdvance}>
+            Mark {flow[kot.status]}
+          </Button>
+        </div>
       </div>
     </motion.article>
   );

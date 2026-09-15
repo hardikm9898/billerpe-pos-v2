@@ -26,17 +26,18 @@ import {
   StatusBadge,
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { ApiError, reportApi, type RawDayWisePeriod } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   RANGE_OPTIONS,
   addDays,
   dmyToIso,
   inRange,
+  isoToDMY,
   parseDMY,
   type RangeKey,
   realToday,
   resolveRange,
-  todayLabel,
 } from "@/mock/format";
 import { lineTotal, orderTotals, useStore } from "@/mock/store";
 import type { TableStatus } from "@/mock/types";
@@ -96,6 +97,17 @@ function DashboardPage() {
   const [customFrom, setCustomFrom] = useState(dmyToIso(addDays(REAL_TODAY, -6)));
   const [customTo, setCustomTo] = useState(dmyToIso(REAL_TODAY));
 
+  // Cash Sessions, Expenses, and E-Bill Credit are confirmed out of scope
+  // for the Local EXE - loaded here on Dashboard's own mount (it shows
+  // summaries of all three) instead of globally on every login (see
+  // AppShell.tsx's own comment on why that moved).
+  useEffect(() => {
+    void store.loadCashSessionsFromServer();
+    void store.loadExpensesFromServer();
+    void store.loadEBillCreditFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const { from, to, rangeLabel } = useMemo(
     () => resolveRange(rangeKey, customFrom, customTo),
     [rangeKey, customFrom, customTo],
@@ -108,7 +120,14 @@ function DashboardPage() {
   // Synced order history always carries real historical totals (see
   // Order.backendTotals) - reading those instead of calling orderTotals()
   // avoids drift from whatever the *current* tax/service-charge config
-  // happens to be, which is all orderTotals() has to work with.
+  // happens to be, which is all orderTotals() has to work with. Still
+  // used below for covers/type-split/hourly-distribution - the money
+  // totals (sales, avg bill, payment mix, discount) moved to the real
+  // backend aggregate below instead (task 45: those drifted from what
+  // the Reports pages show for the identical range, since orderHistory is
+  // a paginated local cache, not a guaranteed-complete dataset, and this
+  // page was summing already-rounded per-order totals while the backend
+  // sums first and rounds once).
   const grandOf = useCallback(
     (o: (typeof store.orderHistory)[number]) =>
       o.backendTotals?.grand ?? orderTotals(o, store).grand,
@@ -119,25 +138,101 @@ function DashboardPage() {
     () => store.orderHistory.filter((o) => inRange(o.businessDate, from, to)),
     [store.orderHistory, from, to],
   );
-  const prevSettled = useMemo(
-    () => store.orderHistory.filter((o) => inRange(o.businessDate, prevFrom, prevTo)),
-    [store.orderHistory, prevFrom, prevTo],
-  );
   const expensesInRange = useMemo(
     () => store.expenses.filter((e) => inRange(e.date, from, to)),
     [store.expenses, from, to],
   );
 
-  const sales = settledInRange.reduce((s, o) => s + grandOf(o), 0);
-  const prevSales = prevSettled.reduce((s, o) => s + grandOf(o), 0);
-  const salesDelta = prevSales ? ((sales - prevSales) / prevSales) * 100 : null;
+  // Same real aggregate (controller/reports/orderRelated.js's
+  // dayWiseGrowthReport) the "Day-wise Sales" report itself reads - both
+  // screens now derive from the identical backend computation for the
+  // identical range, so they can't drift apart.
+  const [dayWise, setDayWise] = useState<RawDayWisePeriod[] | null>(null);
+  const [prevDayWise, setPrevDayWise] = useState<RawDayWisePeriod[] | null>(null);
+  const isoFrom = dmyToIso(from);
+  const isoTo = dmyToIso(to);
+  useEffect(() => {
+    let cancelled = false;
+    reportApi
+      .dayWiseSales(isoFrom, isoTo)
+      .then(({ periodData }) => !cancelled && setDayWise(periodData))
+      .catch((err) => {
+        if (cancelled) return;
+        setDayWise([]);
+        console.error(
+          "[dashboard] Could not load day-wise sales:",
+          err instanceof ApiError ? err.message : err,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isoFrom, isoTo]);
+  useEffect(() => {
+    let cancelled = false;
+    reportApi
+      .dayWiseSales(dmyToIso(prevFrom), dmyToIso(prevTo))
+      .then(({ periodData }) => !cancelled && setPrevDayWise(periodData))
+      .catch((err) => {
+        if (cancelled) return;
+        setPrevDayWise([]);
+        console.error(
+          "[dashboard] Could not load previous-period sales:",
+          err instanceof ApiError ? err.message : err,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [prevFrom, prevTo]);
+
+  // How many KOTs were punched in the selected range, and how many of
+  // those are "not in use" - the order they belong to was later deleted,
+  // or is still sitting unsettled (no bill generated yet). Same backend
+  // computation the KOT Tickets report itself reads (controller/
+  // reports.js's kotReport), so this card and that report can't drift.
+  const [kotSummary, setKotSummary] = useState<{
+    totalTickets: number;
+    deletedTickets: number;
+    unbilledTickets: number;
+  } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    reportApi
+      .kotReport(isoFrom, isoTo)
+      .then(({ totalTickets, deletedTickets, unbilledTickets }) => {
+        if (!cancelled) setKotSummary({ totalTickets, deletedTickets, unbilledTickets });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setKotSummary(null);
+        console.error(
+          "[dashboard] Could not load KOT punch summary:",
+          err instanceof ApiError ? err.message : err,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isoFrom, isoTo]);
+
+  const dayRows = useMemo(() => (dayWise ?? []).filter((p) => p.period !== "Total"), [dayWise]);
+  const totalRow = useMemo(() => dayWise?.find((p) => p.period === "Total"), [dayWise]);
+  const prevTotalRow = useMemo(() => prevDayWise?.find((p) => p.period === "Total"), [prevDayWise]);
+
+  const sales = totalRow?.grandAmount ?? 0;
+  const prevSales = prevTotalRow?.grandAmount ?? 0;
+  const salesDelta =
+    dayWise && prevDayWise && prevSales ? ((sales - prevSales) / prevSales) * 100 : null;
+  const settledCount = totalRow?.totalOrders ?? 0;
 
   // Guest count isn't tracked on the backend Order model at all - every
   // synced history entry has guests:0 (see mapRawOrderHistoryEntry), so
   // this undercounts for any range that includes synced data rather than
-  // only today's locally-created orders.
+  // only today's locally-created orders. No backend aggregate exists for
+  // this either, so it stays derived from the local cache.
   const covers = settledInRange.reduce((s, o) => s + o.guests, 0);
-  const avgBill = settledInRange.length ? Math.round(sales / settledInRange.length) : 0;
+  const avgBill = settledCount ? Math.round(sales / settledCount) : 0;
 
   const running = store.orders.filter((o) =>
     ["Running", "Held", "Bill Generated"].includes(o.status),
@@ -147,19 +242,24 @@ function DashboardPage() {
   const openKots = store.kots.filter((k) => !["Served", "Cancelled"].includes(k.status));
 
   const paymentMix = useMemo(() => {
-    const map = new Map<string, number>();
-    settledInRange.forEach((o) => {
-      const payments = o.payments ?? [];
-      const paid = payments.reduce((s, p) => s + p.amount, 0);
-      // Scale each mode's share to the order's actual grand total (tax included) so
-      // this panel always reconciles with the Net Sales stat above it.
-      const factor = paid ? grandOf(o) / paid : 1;
-      payments.forEach((p) => map.set(p.mode, (map.get(p.mode) ?? 0) + p.amount * factor));
-    });
-    return [...map.entries()].sort((a, b) => b[1] - a[1]);
-  }, [settledInRange, grandOf]);
+    if (!totalRow) return [] as [string, number][];
+    return (
+      [
+        ["Cash", totalRow.cash],
+        ["UPI", totalRow.upi],
+        ["Card", totalRow.card],
+        ["Due", totalRow.due],
+      ] as [string, number][]
+    )
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1]);
+  }, [totalRow]);
   const paymentTotal = paymentMix.reduce((s, [, v]) => s + v, 0);
 
+  // No backend aggregate splits by order_type - stays derived from the
+  // local cache like covers/hourly above (not itself something the
+  // Reports pages show a comparable number for, so nothing to drift
+  // against).
   const typeSplit = useMemo(() => {
     const dineIn = settledInRange
       .filter((o) => o.type === "Dine In")
@@ -174,36 +274,40 @@ function DashboardPage() {
   const expenseTotal = expensesInRange.reduce((s, e) => s + e.amount, 0);
   const net = sales - expenseTotal;
 
-  const discountGiven = settledInRange.reduce((s, o) => s + (o.discount?.amount ?? 0), 0);
+  const discountGiven = totalRow?.totalDiscount ?? 0;
 
   const openSession = store.openSessionRecord();
   const closedToday = store.cashSessions.find(
-    (c) => c.status === "Closed" && c.closedAt?.startsWith(todayLabel),
+    (c) => c.status === "Closed" && c.closedAt?.startsWith(REAL_TODAY),
   );
   const drawerBalance = openSession ? store.sessionBalance() : null;
 
-  const trendDays = useMemo(() => {
-    const days: { day: string; sales: number }[] = [];
-    for (let i = 0; i < spanDays; i++) {
-      const day = addDays(from, i);
-      days.push({
-        day,
-        sales: store.orderHistory
-          .filter((o) => o.businessDate === day)
-          .reduce((s, o) => s + grandOf(o), 0),
-      });
-    }
-    return days;
-  }, [store, from, spanDays, grandOf]);
+  const trendDays = useMemo(
+    () =>
+      dayRows.map((p) => {
+        // p.period comes back "YYYY-MM-DD" (controller/reports/orderRelated.js
+        // formats it with moment().format('YYYY-MM-DD')) - the old `.slice(0,
+        // 5)` display assumed a "DD/MM/YYYY" string instead and rendered the
+        // same "2026-" prefix under every single bar. Reformatted to this
+        // app's own DD/MM convention (matches realToday()/rangeLabel).
+        const [, m, dd] = p.period.split("-");
+        return { day: p.period, label: dd && m ? `${dd}/${m}` : p.period, sales: p.grandAmount };
+      }),
+    [dayRows],
+  );
   const maxTrend = Math.max(1, ...trendDays.map((d) => d.sales));
 
   // Reads order history rather than the live `orders` array so this stays
   // consistent with the rest of the page's real-dated range - `orders`
   // only ever carries this app's frozen local "today", which would never
   // match `hourlyDay` once that's anchored to the real current date.
-  const hourlyDay = trendDays.length ? trendDays[trendDays.length - 1].day : to;
+  // trendDays' own `day` is the API's raw "YYYY-MM-DD" (see its own
+  // comment); orderHistory's businessDate is "DD/MM/YYYY" - converted here
+  // so the filter below can actually match rather than silently finding
+  // nothing every single day regardless of the real order history.
+  const hourlyDay = trendDays.length ? isoToDMY(trendDays[trendDays.length - 1].day) : to;
   const hourly = useMemo(() => {
-    const buckets = new Map<number, number>();
+    const buckets = new Map<number, { orders: number; amount: number }>();
     store.orderHistory
       .filter((o) => o.businessDate === hourlyDay)
       .forEach((o) => {
@@ -211,12 +315,19 @@ function DashboardPage() {
         if (!m) return;
         let h = Number(m[1]) % 12;
         if ((m[2] ?? "").toLowerCase() === "pm") h += 12;
-        buckets.set(h, (buckets.get(h) ?? 0) + 1);
+        const bucket = buckets.get(h) ?? { orders: 0, amount: 0 };
+        bucket.orders += 1;
+        bucket.amount += grandOf(o);
+        buckets.set(h, bucket);
       });
     return [...buckets.entries()]
       .sort((a, b) => a[0] - b[0])
-      .map(([h, orders]) => ({ hour: `${h % 12 || 12}${h >= 12 ? "p" : "a"}`, orders }));
-  }, [store.orderHistory, hourlyDay]);
+      .map(([h, v]) => ({
+        hour: `${h % 12 || 12} ${h >= 12 ? "PM" : "AM"}`,
+        orders: v.orders,
+        amount: v.amount,
+      }));
+  }, [store.orderHistory, hourlyDay, grandOf]);
   const maxHour = Math.max(1, ...hourly.map((h) => h.orders));
 
   const topItems = useMemo(() => {
@@ -253,7 +364,7 @@ function DashboardPage() {
       <PageHeader
         icon={LayoutDashboard}
         title="Dashboard"
-        description={`Business date ${todayLabel} · ${store.currentUser.name} (${store.currentUser.role})`}
+        description={`Business date ${REAL_TODAY} · ${store.currentUser.name} (${store.currentUser.role})`}
         actions={
           <Button onClick={() => navigate({ to: "/table-grid" })}>
             Go to floor <ArrowRight className="size-4" />
@@ -312,7 +423,7 @@ function DashboardPage() {
         />
         <StatCard
           label="Bills settled"
-          value={<AnimatedNumber value={settledInRange.length} />}
+          value={<AnimatedNumber value={settledCount} />}
           icon={Receipt}
           hint={`${covers} covers`}
         />
@@ -456,17 +567,22 @@ function DashboardPage() {
           {trendDays.length > 1 ? (
             <div className="flex h-52 gap-3">
               {trendDays.map((d) => (
-                <div key={d.day} className="flex min-w-0 flex-1 flex-col items-center gap-2">
-                  <span className="num text-[11px] text-muted-foreground">
-                    {Math.round(d.sales / 1000)}k
-                  </span>
+                <div
+                  key={d.day}
+                  className="flex min-w-0 flex-1 flex-col items-center gap-2"
+                  title={`${d.label} · ₹${d.sales.toLocaleString("en-IN")}`}
+                >
+                  <Money
+                    value={d.sales}
+                    className="block w-full truncate text-center text-[11px] text-muted-foreground"
+                  />
                   <div className="relative w-full flex-1">
                     <div
                       className="absolute inset-x-0 bottom-0 rounded-t-lg bg-primary/85 transition-all"
                       style={{ height: `${(d.sales / maxTrend) * 100}%` }}
                     />
                   </div>
-                  <span className="text-[11px] text-muted-foreground">{d.day.slice(0, 5)}</span>
+                  <span className="text-[11px] text-muted-foreground">{d.label}</span>
                 </div>
               ))}
             </div>
@@ -514,11 +630,51 @@ function DashboardPage() {
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-3">
+        <SectionCard
+          title="KOT punches"
+          description={rangeLabel}
+          bodyClassName="p-3 sm:p-4"
+          className="lg:col-span-3"
+        >
+          <div className="grid gap-3 sm:grid-cols-3">
+            <StatCard
+              label="Total KOTs punched"
+              value={kotSummary?.totalTickets ?? "—"}
+              tone="primary"
+            />
+            <StatCard label="Deleted" value={kotSummary?.deletedTickets ?? "—"} tone="warning" />
+            <StatCard
+              label="Not billed"
+              value={kotSummary?.unbilledTickets ?? "—"}
+              tone="warning"
+            />
+          </div>
+          <Button
+            variant="outline"
+            className="mt-4 w-full"
+            onClick={() =>
+              navigate({ to: "/reports/$reportId", params: { reportId: "kot-report" } })
+            }
+          >
+            <Receipt className="size-4" /> View full KOT report
+          </Button>
+        </SectionCard>
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-3">
         <SectionCard title="Hourly order flow" description={hourlyDay} className="lg:col-span-2">
           {hourly.length ? (
-            <div className="flex h-40 gap-2">
+            <div className="flex h-44 gap-2">
               {hourly.map((h) => (
-                <div key={h.hour} className="flex min-w-0 flex-1 flex-col items-center gap-1.5">
+                <div
+                  key={h.hour}
+                  className="flex min-w-0 flex-1 flex-col items-center gap-1.5"
+                  title={`${h.hour} · ${h.orders} order${h.orders === 1 ? "" : "s"} · ₹${h.amount.toLocaleString("en-IN")}`}
+                >
+                  <Money
+                    value={h.amount}
+                    className="block w-full truncate text-center text-[11px] text-muted-foreground"
+                  />
                   <div className="relative w-full flex-1">
                     <div
                       className="absolute inset-x-0 bottom-0 rounded-t-md bg-info/80"

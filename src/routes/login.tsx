@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import { Fingerprint, KeyRound, LogIn, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { Fingerprint, KeyRound, LogIn, ServerCrash, ShieldCheck } from "lucide-react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 // image.png is white-on-transparent (for the dark left panel); the mobile
@@ -23,31 +23,41 @@ import { Label } from "@/components/ui/label";
 import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
 import { cn } from "@/lib/utils";
-import { authApi, ApiError } from "@/lib/api";
+import {
+  authApi,
+  ApiError,
+  checkLocalServerHealth,
+  getBrowserDeviceId,
+  getLocalServerIdentity,
+  setManualServerAddress,
+  setStoredAuthToken,
+} from "@/lib/api";
 
-// crypto.randomUUID() only exists in secure contexts (HTTPS, or the page's
-// own localhost) - undefined (throws "not a function") on a plain-HTTP LAN
-// address like http://192.168.1.33:8080, which this POS is routinely
-// accessed at on a restaurant's own local network. Falls back to a manual
-// RFC4122 v4 generator there instead of failing every login on that origin.
-function randomUUID() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === "x" ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
+// Phase C: a raw fetch failure (connection refused - the EXE isn't
+// running, or died between the page's initial health check and this
+// click) throws a plain TypeError, not an ApiError - previously
+// indistinguishable from a real wrong-password/validation error in the
+// generic fallback message below it.
+function describeAuthError(err: unknown): string {
+  if (err instanceof ApiError) return err.message;
+  return "Could not reach the BillerPe Local Server - check that it's running on this network.";
 }
 
-function getDeviceId() {
-  if (typeof window === "undefined") return "server";
-  const key = "billerpe.deviceId";
-  let id = window.localStorage.getItem(key);
-  if (!id) {
-    id = randomUUID();
-    window.localStorage.setItem(key, id);
+// A real wrong password and "this device's local data was wiped" (fresh
+// install/reinstall - see getLocalServerIdentity's own comment) return the
+// exact same message text from the exe otherwise - ApiError.needsRegistration
+// (set from controller/auth.js's requireRegisteredDevice) is the only real
+// signal that tells them apart. Shared by both the password and PIN submit
+// handlers below rather than duplicated inline.
+function handleLoginError(err: unknown, resetDeviceRegistration: () => void) {
+  if (err instanceof ApiError && err.needsRegistration) {
+    resetDeviceRegistration();
+    toast.error("This device needs to be registered again", {
+      description: "The local server's data was reset - register this terminal below.",
+    });
+    return;
   }
-  return id;
+  toast.error(describeAuthError(err));
 }
 
 export const Route = createFileRoute("/login")({
@@ -83,8 +93,56 @@ function LoginPage() {
   const [pwMobile, setPwMobile] = useState("");
   const [password, setPassword] = useState("");
   const [pwLoading, setPwLoading] = useState(false);
+  const [regMobile, setRegMobile] = useState("");
+  const [regPassword, setRegPassword] = useState("");
+  const [regLoading, setRegLoading] = useState(false);
 
   const registered = store.deviceRegistered;
+
+  // Architecture memo §04/Phase C: the local-server-required gate only
+  // matters BEFORE this device is registered - once registered, a briefly
+  // unreachable EXE is handled by the ordinary error toasts below on
+  // whichever button was actually clicked, not a blocking full-page state
+  // on every visit (spec §4: detection is for initial setup only, it must
+  // not "unnecessarily block normal operation" afterward).
+  const [serverCheck, setServerCheck] = useState<"checking" | "ok" | "unreachable">(
+    registered ? "ok" : "checking",
+  );
+
+  const runServerCheck = () => {
+    setServerCheck("checking");
+    void checkLocalServerHealth().then((ok) => setServerCheck(ok ? "ok" : "unreachable"));
+  };
+
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualAddress, setManualAddress] = useState("");
+  const [manualLoading, setManualLoading] = useState(false);
+
+  useEffect(() => {
+    if (!registered) {
+      runServerCheck();
+      return;
+    }
+    // Real production failure mode, distinct from "EXE merely unreachable"
+    // above: this browser's cached `billerpe.session.device === true`
+    // survives a reinstall of the exe that wiped its local DB (data/ sits
+    // next to the .exe on disk), so the cached flag can be stale. Checked
+    // here, not folded into serverCheck/runServerCheck above, specifically
+    // so a briefly-unreachable EXE still does NOT full-page-block a
+    // registered device (architecture memo §04/Phase C, spec §4) -
+    // getLocalServerIdentity() returns null (not false) when unreachable,
+    // and null is deliberately a no-op here, not a reset. Only an EXE that
+    // actually answers and explicitly says registered:false triggers the
+    // reset, which drops back to the ordinary (non-blocking) registration
+    // panel below - no devtools/localStorage surgery required anymore.
+    void getLocalServerIdentity().then((identity) => {
+      if (identity && !identity.registered) store.resetDeviceRegistration();
+    });
+    // Only ever needs to run once, on first mount - `registered` flipping
+    // true/false mid-session (right after registering, or after the reset
+    // above fires) should not re-trigger this effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const doLogin = (realUserId: string | null) => {
     if (!realUserId) {
@@ -100,6 +158,77 @@ function LoginPage() {
     { id: "password", label: "Password", icon: LogIn },
     { id: "pin", label: "PIN", icon: KeyRound },
   ];
+
+  if (serverCheck === "unreachable") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background px-4">
+        <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-8 text-center shadow-raised">
+          <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-destructive/10">
+            <ServerCrash className="size-7 text-destructive" />
+          </div>
+          <h1 className="mt-4 text-xl font-semibold tracking-tight">
+            BillerPe Local Server required
+          </h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This terminal can't reach the BillerPe Local Server on this network. It must be
+            installed and running on this outlet's server PC before setup can continue - Web POS
+            never talks to the cloud directly for restaurant operations.
+          </p>
+          <Button className="mt-6 w-full" onClick={runServerCheck}>
+            Try again
+          </Button>
+
+          {!manualOpen ? (
+            <button
+              type="button"
+              className="mt-3 w-full text-center text-xs text-primary"
+              onClick={() => setManualOpen(true)}
+            >
+              Enter the server's address manually
+            </button>
+          ) : (
+            <div className="mt-4 space-y-2 text-left">
+              <Label htmlFor="manualAddress">Server PC's local address</Label>
+              <p className="text-xs text-muted-foreground">
+                Found on the server PC's own dashboard, under "Network" (e.g. 192.168.1.12:4100).
+              </p>
+              <Input
+                id="manualAddress"
+                value={manualAddress}
+                onChange={(e) => setManualAddress(e.target.value)}
+                placeholder="192.168.1.12:4100"
+              />
+              <Button
+                className="w-full"
+                disabled={manualLoading || !manualAddress}
+                onClick={async () => {
+                  setManualLoading(true);
+                  const ok = await setManualServerAddress(manualAddress);
+                  setManualLoading(false);
+                  if (ok) {
+                    toast.success("Connected to the local server");
+                    setServerCheck("ok");
+                  } else {
+                    toast.error("Could not reach that address");
+                  }
+                }}
+              >
+                {manualLoading ? "Connecting…" : "Connect"}
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (serverCheck === "checking") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <p className="text-sm text-muted-foreground">Looking for the BillerPe Local Server…</p>
+      </div>
+    );
+  }
 
   return (
     <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
@@ -170,13 +299,60 @@ function LoginPage() {
                 <div>
                   <p className="text-sm font-medium">Device registration required</p>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    One-time step. Registers Counter POS · 192.168.1.14 to this outlet.
+                    One-time step. Enter the outlet owner/admin's BillerPe cloud login - this device
+                    pulls the outlet's real data down and registers itself against it.
                   </p>
                 </div>
               </div>
-              <Button className="mt-3 w-full" onClick={store.registerDevice}>
-                <ShieldCheck className="size-4" /> Register Device
-              </Button>
+              <div className="mt-3 space-y-3">
+                <div>
+                  <Label htmlFor="regMobile">Owner/admin mobile number</Label>
+                  <Input
+                    id="regMobile"
+                    className="mt-1.5"
+                    value={regMobile}
+                    maxLength={10}
+                    onChange={(e) => setRegMobile(e.target.value.replace(/\D/g, ""))}
+                    placeholder="10-digit mobile number"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="regPassword">Owner/admin password</Label>
+                  <PasswordInput
+                    id="regPassword"
+                    className="mt-1.5"
+                    value={regPassword}
+                    onChange={(e) => setRegPassword(e.target.value)}
+                  />
+                </div>
+                <Button
+                  className="w-full"
+                  disabled={regLoading || !regMobile || !regPassword}
+                  onClick={async () => {
+                    setRegLoading(true);
+                    try {
+                      const { pulled } = await authApi.registerDevice(
+                        regMobile,
+                        regPassword,
+                        getBrowserDeviceId(),
+                      );
+                      store.registerDevice();
+                      const menuCount = pulled?.["menu"] ?? 0;
+                      const tableCount = pulled?.["table"] ?? 0;
+                      toast.success("Device registered", {
+                        description: `Pulled ${menuCount} menu item(s), ${tableCount} table(s) - sign in below.`,
+                      });
+                    } catch (err) {
+                      toast.error(describeAuthError(err));
+                    } finally {
+                      setRegLoading(false);
+                    }
+                  }}
+                >
+                  <ShieldCheck className="size-4" />{" "}
+                  {regLoading ? "Registering…" : "Register Device"}
+                </Button>
+              </div>
             </div>
           ) : null}
 
@@ -230,10 +406,15 @@ function LoginPage() {
                   onClick={async () => {
                     setPwLoading(true);
                     try {
-                      await authApi.restaurantLogin(pwMobile, password, getDeviceId());
+                      const { token } = await authApi.restaurantLogin(
+                        pwMobile,
+                        password,
+                        getBrowserDeviceId(),
+                      );
+                      if (token) setStoredAuthToken(token);
                       doLogin(await store.syncCurrentUser());
                     } catch (err) {
-                      toast.error(err instanceof ApiError ? err.message : "Login failed");
+                      handleLoginError(err, store.resetDeviceRegistration);
                     } finally {
                       setPwLoading(false);
                     }
@@ -287,10 +468,15 @@ function LoginPage() {
                   onClick={async () => {
                     setPinLoading(true);
                     try {
-                      await authApi.pinLogin(pinMobile, pin, getDeviceId());
+                      const { token } = await authApi.pinLogin(
+                        pinMobile,
+                        pin,
+                        getBrowserDeviceId(),
+                      );
+                      if (token) setStoredAuthToken(token);
                       doLogin(await store.syncCurrentUser());
                     } catch (err) {
-                      toast.error(err instanceof ApiError ? err.message : "Login failed");
+                      handleLoginError(err, store.resetDeviceRegistration);
                     } finally {
                       setPinLoading(false);
                     }

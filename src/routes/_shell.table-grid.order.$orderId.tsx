@@ -5,6 +5,7 @@ import {
   ArrowLeftRight,
   BadgePercent,
   ChefHat,
+  History,
   Minus,
   Pause,
   Pencil,
@@ -20,6 +21,7 @@ import {
   Trash2,
   User,
   Wallet,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -31,9 +33,20 @@ import {
   NoteDialog,
   type SelectedAddon,
 } from "@/components/billing/keyboard-display";
-import { EmptyState, Money, StatusBadge } from "@/components/kit";
+import { EmptyState, IconButton, Money, StatusBadge } from "@/components/kit";
 import { PaymentSplitEditor } from "@/components/operations/payment-split-editor";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -51,8 +64,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { ApiError, customerApi, type RawOrderDetail } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { lineTotal, orderTotals, useStore } from "@/mock/store";
+import { lineTotal, orderTotals, parseOrderAddons, useStore } from "@/mock/store";
 import type { MenuItem, OrderLine, PaymentSplit } from "@/mock/types";
 
 export const Route = createFileRoute("/_shell/table-grid/order/$orderId")({
@@ -94,6 +109,35 @@ function OrderCartPage() {
     if (order && order.lines.length === 0) store.freeIfEmpty(order.id);
     navigate({ to: "/table-grid" });
   };
+
+  // Promo Codes is confirmed out of scope for the Local EXE - loaded here
+  // on the billing screen's own mount (this is the one place it's shown)
+  // instead of globally on every route (see AppShell.tsx's own comment).
+  // Same 20s cadence as the table grid's own poll (_shell.table-grid.
+  // index.tsx) - this screen has no equivalent of its own, so a KOT round
+  // added elsewhere while this exact order is open (another terminal, or
+  // a QR order accepted in the background) never showed up here until a
+  // full page reload. See store.tsx's refreshOrderFromServer for why this
+  // is safe to run unconditionally - it no-ops on its own if there's a
+  // local draft round in progress, rather than needing a guard here too.
+  useEffect(() => {
+    if (!order || order.status === "Settled") return;
+    const id = setInterval(() => void store.refreshOrderFromServer(orderId), 20000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId, order?.status]);
+
+  useEffect(() => {
+    void store.loadPromoCodesFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Item-wise KOT checkboxes are a per-visit choice, not per-order state -
+  // navigating to a different order (or this one settling out from under
+  // us) shouldn't leave a stale selection armed for whatever's here next.
+  useEffect(() => {
+    setSelectedLineIds(new Set());
+  }, [orderId]);
 
   // Barcode wedge - a scanner types fast (<60ms between keystrokes) and
   // ends with Enter, a human doesn't. Matches keyboard-display.tsx's
@@ -146,6 +190,7 @@ function OrderCartPage() {
   const [query, setQuery] = useState("");
   const [configItem, setConfigItem] = useState<MenuItem | null>(null);
   const [variant, setVariant] = useState<string>("");
+  const [variantQuery, setVariantQuery] = useState("");
   const [addons, setAddons] = useState<SelectedAddon[]>([]);
   const [note, setNote] = useState("");
   const [discountOpen, setDiscountOpen] = useState(false);
@@ -154,8 +199,16 @@ function OrderCartPage() {
   const [customerOpen, setCustomerOpen] = useState(false);
   const [custName, setCustName] = useState("");
   const [custPhone, setCustPhone] = useState("");
+  const [lastOrder, setLastOrder] = useState<RawOrderDetail | null>(null);
+  const [lastOrderLoading, setLastOrderLoading] = useState(false);
   const [settleOpen, setSettleOpen] = useState(false);
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
+  const [tip, setTip] = useState(0);
+  // Checked pending (not-yet-sent) lines to KOT right now, leaving the rest
+  // of the "New — not sent" group for a later round - store.generateKot's
+  // lineIds option. Empty selection keeps the original "Send KOT fires
+  // everything pending" behaviour.
+  const [selectedLineIds, setSelectedLineIds] = useState<Set<string>>(new Set());
   const [customItemOpen, setCustomItemOpen] = useState(false);
   const [customName, setCustomName] = useState("");
   const [customPrice, setCustomPrice] = useState(0);
@@ -164,8 +217,40 @@ function OrderCartPage() {
   const [moveKotRound, setMoveKotRound] = useState<number | null>(null);
   const [customQty, setCustomQty] = useState(1);
   const [chargesOpen, setChargesOpen] = useState(false);
-  const [deliveryOverride, setDeliveryOverride] = useState(0);
   const [packagingOverride, setPackagingOverride] = useState(0);
+  const [removeTarget, setRemoveTarget] = useState<OrderLine | null>(null);
+  const [removeReason, setRemoveReason] = useState("");
+
+  // removeLine already frees/cancels a real (backendId-having) order the
+  // moment its last line goes away (see this file's own top-of-component
+  // comment on that) - but that only updates the order's *id* (the
+  // rename-to-o-final-<backendId> trick, so a later order on this same
+  // table doesn't collide with it) and frees the table; it doesn't move
+  // this screen off the now-stale orderId route param, matching task 37's
+  // "remove every item from a printed KOT, then menu items stop adding
+  // anything" report. Rather than lean on orderById/ensureRealOrder's own
+  // fallback re-synthesis of a fresh draft under the old id on the next
+  // interaction (real, but easy to get subtly wrong), just leave the
+  // screen immediately - same as every other "this action ends the
+  // order" exit point on this page already does via goToTables.
+  const removeLastLineAndMaybeLeave = (lineId: string, reason?: string) => {
+    if (!order) return;
+    const wasLastLine = order.lines.length === 1;
+    const hadBackendOrder = !!order.backendId;
+    const removed = store.removeLine(order.id, lineId, "biller", reason);
+    if (removed && wasLastLine && hadBackendOrder) navigate({ to: "/table-grid" });
+  };
+
+  // Same fix as removeLastLineAndMaybeLeave, for the decrease-quantity
+  // stepper - dropping the last item's qty to 0 removes it exactly like
+  // the trash button does (see store.changeQty's own comment).
+  const changeQtyAndMaybeLeave = (line: OrderLine, delta: number) => {
+    if (!order) return;
+    const willRemoveLast = order.lines.length === 1 && line.qty + delta <= 0;
+    const hadBackendOrder = !!order.backendId;
+    const applied = store.changeQty(order.id, line.id, delta, "biller");
+    if (applied && willRemoveLast && hadBackendOrder) navigate({ to: "/table-grid" });
+  };
 
   const totals = orderTotals(order, store);
 
@@ -216,6 +301,69 @@ function OrderCartPage() {
       : [];
   const dueTotalForPhone = dueForPhone.reduce((s, b) => s + b.amount, 0);
 
+  // "Repeat this order" suggestion - fires the same moment the due-bill
+  // check above does (10 real digits entered), same reasoning: only worth
+  // a real lookup once the number is actually complete. excludeOrderId
+  // (this order's own backendId) keeps a returning customer's brand-new,
+  // still-empty order from "suggesting" itself.
+  useEffect(() => {
+    if (digits.length !== 10 || !order) {
+      setLastOrder(null);
+      return;
+    }
+    let cancelled = false;
+    setLastOrderLoading(true);
+    customerApi
+      .getLastOrder(digits, order.backendId)
+      .then(({ order: found }) => {
+        if (!cancelled) setLastOrder(found);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLastOrder(null);
+        console.error(
+          "[order] Could not load last order for customer:",
+          err instanceof ApiError ? err.message : err,
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLastOrderLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [digits, order?.backendId]);
+
+  // Adds every still-available item from the suggested last order to the
+  // CURRENT cart at today's live price (store.addLine already re-resolves
+  // price/variant from the current local menu, same as any other add -
+  // never bills the old order's possibly-stale price). An item deleted or
+  // deactivated since that order is silently skipped rather than blocking
+  // the rest - matches the same "never trust a stale cart wholesale"
+  // stance QR ordering's own accept-time repricing already takes.
+  const repeatLastOrder = () => {
+    if (!order || !lastOrder) return;
+    let addedCount = 0;
+    for (const line of lastOrder.hms_orderDetails) {
+      const itemId = String(line.MenuId);
+      if (!store.menuItems.some((m) => m.id === itemId && m.active)) continue;
+      store.addLine(order.id, {
+        itemId,
+        qty: line.qty,
+        variant: line.variant_name ?? undefined,
+        addons: parseOrderAddons(line.addons),
+        note: line.comment || undefined,
+      });
+      addedCount += 1;
+    }
+    if (addedCount === 0) {
+      toast.error("None of those items are on the menu anymore");
+    } else {
+      toast.success(`Added ${addedCount} item${addedCount === 1 ? "" : "s"} from their last order`);
+    }
+  };
+
   if (!order) {
     return (
       <div className="p-6">
@@ -231,11 +379,16 @@ function OrderCartPage() {
 
   const pendingRound = order.lines.some((l) => l.kotRound > order.kotRounds);
   const settled = order.status === "Settled" || order.status === "Cancelled";
+  // A generated bill is meant to be settled as printed, not moved/merged
+  // afterward - same rule the table-grid page's own Merge/Transfer icons
+  // and store.transferTable/mergeTables/moveKot enforce.
+  const billed = order.status === "Bill Generated";
 
   const addToCart = (item: MenuItem) => {
     if (item.variants?.length || item.addonGroupIds?.length) {
       setConfigItem(item);
       setVariant(item.variants?.[0]?.name ?? "");
+      setVariantQuery("");
       setAddons([]);
       setNote("");
       return;
@@ -377,25 +530,23 @@ function OrderCartPage() {
                 <span>{order.type}</span>
                 <span>·</span>
                 <span className="flex items-center gap-1">
-                  <Button
-                    size="icon"
-                    variant="ghost"
+                  <IconButton
+                    label="Decrease guest count"
                     className="size-5"
                     disabled={settled}
                     onClick={() => store.setGuestCount(order.id, order.guests - 1)}
                   >
                     <Minus className="size-3" />
-                  </Button>
+                  </IconButton>
                   <span className="num">{order.guests} guests</span>
-                  <Button
-                    size="icon"
-                    variant="ghost"
+                  <IconButton
+                    label="Increase guest count"
                     className="size-5"
                     disabled={settled}
                     onClick={() => store.setGuestCount(order.id, order.guests + 1)}
                   >
                     <Plus className="size-3" />
-                  </Button>
+                  </IconButton>
                 </span>
                 <span>· KOT rounds {order.kotRounds}</span>
               </div>
@@ -441,25 +592,21 @@ function OrderCartPage() {
                       </p>
                       {round <= order.kotRounds ? (
                         <>
-                          <Button
-                            size="icon"
-                            variant="ghost"
+                          <IconButton
+                            label={`Reprint KOT round ${round}`}
                             className="size-6"
                             onClick={() => void store.printKot(order.id, round)}
-                            aria-label={`Reprint KOT round ${round}`}
                           >
                             <Printer className="size-3.5" />
-                          </Button>
-                          {order.type === "Dine In" ? (
-                            <Button
-                              size="icon"
-                              variant="ghost"
+                          </IconButton>
+                          {order.type === "Dine In" && !billed ? (
+                            <IconButton
+                              label={`Move KOT round ${round}`}
                               className="size-6"
                               onClick={() => setMoveKotRound(round)}
-                              aria-label={`Move KOT round ${round}`}
                             >
                               <ArrowLeftRight className="size-3.5" />
-                            </Button>
+                            </IconButton>
                           ) : null}
                         </>
                       ) : null}
@@ -468,101 +615,125 @@ function OrderCartPage() {
                       {lines.map((l) => (
                         <li key={l.id} className="rounded-xl border border-border p-3">
                           <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-medium">{l.name}</p>
-                              <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                                {l.variant ? `${l.variant} · ` : ""}
-                                {editable ? (
-                                  <span className="num inline-flex items-center gap-0.5">
-                                    ₹
-                                    <input
-                                      defaultValue={l.price}
-                                      key={`${l.id}-price-${l.price}`}
-                                      inputMode="decimal"
-                                      aria-label={`Price for ${l.name}`}
-                                      onFocus={(e) => e.currentTarget.select()}
-                                      onBlur={(e) => {
-                                        const v = Number(e.currentTarget.value);
-                                        if (Number.isFinite(v) && v !== l.price)
-                                          store.setLinePrice(order.id, l.id, v);
-                                      }}
-                                      onKeyDown={(e) => {
-                                        if (e.key === "Enter") e.currentTarget.blur();
-                                      }}
-                                      className="num h-5 w-14 rounded border border-border bg-surface px-1 text-xs"
-                                    />
-                                  </span>
-                                ) : (
-                                  <span className="num">₹{l.price}</span>
-                                )}
-                                {l.originTable ? ` · from ${l.originTable}` : ""}
-                              </p>
-                              {l.addons?.length ? (
-                                <p className="text-[11px] text-muted-foreground">
-                                  + {l.addons.map((a) => a.name).join(", ")}
+                            <div className="flex min-w-0 items-start gap-2">
+                              {editable ? (
+                                <Checkbox
+                                  className="mt-0.5 shrink-0"
+                                  checked={selectedLineIds.has(l.id)}
+                                  onCheckedChange={(checked) =>
+                                    setSelectedLineIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (checked) next.add(l.id);
+                                      else next.delete(l.id);
+                                      return next;
+                                    })
+                                  }
+                                  aria-label={`Send ${l.name} to the kitchen now`}
+                                />
+                              ) : null}
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-medium">{l.name}</p>
+                                <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                                  {l.variant ? `${l.variant} · ` : ""}
+                                  {editable ? (
+                                    <span className="num inline-flex items-center gap-0.5">
+                                      ₹
+                                      <input
+                                        defaultValue={l.price}
+                                        key={`${l.id}-price-${l.price}`}
+                                        inputMode="decimal"
+                                        aria-label={`Price for ${l.name}`}
+                                        onFocus={(e) => e.currentTarget.select()}
+                                        onBlur={(e) => {
+                                          const v = Number(e.currentTarget.value);
+                                          if (Number.isFinite(v) && v !== l.price)
+                                            store.setLinePrice(order.id, l.id, v);
+                                        }}
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") e.currentTarget.blur();
+                                        }}
+                                        className="num h-5 w-14 rounded border border-border bg-surface px-1 text-xs"
+                                      />
+                                    </span>
+                                  ) : (
+                                    <span className="num">₹{l.price}</span>
+                                  )}
+                                  {l.originTable ? ` · from ${l.originTable}` : ""}
                                 </p>
-                              ) : null}
-                              {l.note ? (
-                                <p className="mt-1 text-[11px] italic text-warning">“{l.note}”</p>
-                              ) : null}
+                                {l.addons?.length ? (
+                                  <p className="text-[11px] text-muted-foreground">
+                                    + {l.addons.map((a) => a.name).join(", ")}
+                                  </p>
+                                ) : null}
+                                {l.note ? (
+                                  <p className="mt-1 whitespace-pre-wrap break-words text-[11px] italic text-warning">
+                                    “{l.note}”
+                                  </p>
+                                ) : null}
+                              </div>
                             </div>
                             <div className="flex flex-col items-end gap-2">
                               <Money value={lineTotal(l)} className="text-sm font-semibold" />
                               <div className="flex items-center gap-1">
-                                <Button
-                                  size="icon"
+                                <IconButton
+                                  label="Decrease quantity"
                                   variant="outline"
                                   className="size-7"
                                   disabled={settled}
-                                  onClick={() => store.changeQty(order.id, l.id, -1, "biller")}
+                                  onClick={() => changeQtyAndMaybeLeave(l, -1)}
                                 >
                                   <Minus className="size-3.5" />
-                                </Button>
+                                </IconButton>
                                 <span className="num w-6 text-center text-sm font-semibold">
                                   {l.qty}
                                 </span>
-                                <Button
-                                  size="icon"
+                                <IconButton
+                                  label="Increase quantity"
                                   variant="outline"
                                   className="size-7"
                                   disabled={settled}
                                   onClick={() => store.changeQty(order.id, l.id, 1, "biller")}
                                 >
                                   <Plus className="size-3.5" />
-                                </Button>
+                                </IconButton>
                                 {editable &&
                                 store.menuItems.find((m) => m.id === l.itemId)?.addonGroupIds
                                   ?.length ? (
-                                  <Button
-                                    size="icon"
-                                    variant="ghost"
+                                  <IconButton
+                                    label="Edit addons"
                                     className="size-7"
                                     onClick={() => setAddonLineFor(l)}
-                                    aria-label="Edit addons"
                                   >
                                     <Tags className="size-3.5" />
-                                  </Button>
+                                  </IconButton>
                                 ) : null}
                                 {editable ? (
-                                  <Button
-                                    size="icon"
-                                    variant="ghost"
+                                  <IconButton
+                                    label="Add note"
                                     className="size-7"
                                     onClick={() => setNoteLineFor(l)}
-                                    aria-label="Add note"
                                   >
                                     <StickyNote className="size-3.5" />
-                                  </Button>
+                                  </IconButton>
                                 ) : null}
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
+                                <IconButton
+                                  label="Remove line"
                                   className="size-7 text-primary"
                                   disabled={settled}
-                                  onClick={() => store.removeLine(order.id, l.id, "biller")}
+                                  onClick={() => {
+                                    // Already sent to the kitchen - confirm
+                                    // first (task 37), rather than silently
+                                    // pulling an item the kitchen may
+                                    // already be preparing or has printed.
+                                    if (l.kotRound <= order.kotRounds) {
+                                      setRemoveTarget(l);
+                                      return;
+                                    }
+                                    removeLastLineAndMaybeLeave(l.id);
+                                  }}
                                 >
                                   <Trash2 className="size-3.5" />
-                                </Button>
+                                </IconButton>
                               </div>
                             </div>
                           </div>
@@ -585,11 +756,10 @@ function OrderCartPage() {
             {totals.service ? <Row label="Service charge" value={totals.service} /> : null}
             <div className="flex items-center justify-between text-muted-foreground">
               <dt className="flex items-center gap-1">
-                Delivery &amp; packaging
+                Packaging
                 <button
                   disabled={settled}
                   onClick={() => {
-                    setDeliveryOverride(totals.delivery);
                     setPackagingOverride(totals.packaging);
                     setChargesOpen(true);
                   }}
@@ -599,7 +769,7 @@ function OrderCartPage() {
                 </button>
               </dt>
               <dd>
-                <Money value={totals.delivery + totals.packaging} />
+                <Money value={totals.packaging} />
               </dd>
             </div>
             {totals.taxLines.map((tx) => (
@@ -613,85 +783,128 @@ function OrderCartPage() {
             </div>
           </dl>
 
-          {order.discount?.approvalFlagged ? (
-            <p className="mt-2 rounded-lg bg-warning-soft px-3 py-2 text-xs text-warning">
-              Discount above threshold — manager approval recorded in audit log.
-            </p>
-          ) : null}
-
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <Button
-              variant="outline"
-              disabled={settled}
-              onClick={() => {
-                store.holdOrder(order.id);
-                goToTables();
-              }}
-            >
-              <Pause className="size-4" /> Hold
-            </Button>
-            <Button
-              variant="outline"
-              disabled={settled || !order.lines.length}
-              onClick={() => {
-                void store.generateBill(order.id).then(() => goToTables());
-              }}
-            >
-              <Save className="size-4" /> Save
-            </Button>
-            <Button variant="outline" disabled={settled} onClick={() => setDiscountOpen(true)}>
-              <BadgePercent className="size-4" /> Discount
-            </Button>
-            <Button
-              variant="outline"
-              disabled={settled}
-              onClick={() => {
-                store.generateKot(order.id);
-                goToTables();
-              }}
-              className={cn(pendingRound && "border-primary text-primary")}
-            >
-              <ChefHat className="size-4" /> Send KOT
-            </Button>
-            <Button
-              variant="outline"
-              disabled={!order.customerPhone}
-              onClick={() => {
-                void store.sendEBill(order.id);
-                goToTables();
-              }}
-            >
-              <Send className="size-4" /> E-Bill
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={settled || !order.lines.length}
-              onClick={() => {
-                void store.generateBill(order.id, { print: true }).then(() => goToTables());
-              }}
-            >
-              <Printer className="size-4" /> Bill Print
-            </Button>
-            <Button
-              className="col-span-2"
-              disabled={settled || !order.lines.length}
-              onClick={() => {
-                setSplits([{ mode: "Cash", amount: balance }]);
-                setSettleOpen(true);
-              }}
-            >
-              <Wallet className="size-4" />{" "}
-              {isRefund ? (
-                <>
-                  Refund · <Money value={Math.abs(balance)} />
-                </>
-              ) : (
-                <>
-                  Settle · <Money value={balance} />
-                </>
-              )}
-            </Button>
-          </div>
+          {order.editingSettledOrderId ? (
+            // orders.reopenSettled edit-in-progress draft - none of the
+            // normal actions above apply (Hold/Send KOT/E-Bill/Bill Print
+            // all assume a live, not-yet-settled order; the normal Settle
+            // button would try to settle this a second time). Only save or
+            // discard the edit.
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  store.cancelEditSettledOrder(order.id);
+                  navigate({ to: "/orders" });
+                }}
+              >
+                <X className="size-4" /> Cancel
+              </Button>
+              <Button
+                disabled={!order.lines.length}
+                onClick={() => {
+                  void store
+                    .saveSettledOrderEdits(order.id)
+                    .then(() => navigate({ to: "/orders" }));
+                }}
+              >
+                <Save className="size-4" /> Save changes
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                disabled={settled}
+                onClick={() => {
+                  store.holdOrder(order.id);
+                  goToTables();
+                }}
+              >
+                <Pause className="size-4" /> Hold
+              </Button>
+              <Button
+                variant="outline"
+                disabled={settled || !order.lines.length}
+                onClick={() => {
+                  void store.generateBill(order.id).then(() => goToTables());
+                }}
+              >
+                <Save className="size-4" /> Save
+              </Button>
+              <Button variant="outline" disabled={settled} onClick={() => setDiscountOpen(true)}>
+                <BadgePercent className="size-4" /> Discount
+              </Button>
+              <Button
+                variant="outline"
+                disabled={settled}
+                onClick={() => {
+                  const ids = [...selectedLineIds];
+                  store.generateKot(order.id, ids.length ? { lineIds: ids } : undefined);
+                  setSelectedLineIds(new Set());
+                  // A full send (nothing individually checked) keeps the
+                  // original "fire everything, move on" flow. Sending just
+                  // the checked items stays on this order instead - the
+                  // whole point of checking only some was to keep adding to
+                  // or sending the rest of this same order afterward.
+                  if (!ids.length) goToTables();
+                }}
+                className={cn(pendingRound && "border-primary text-primary")}
+              >
+                <ChefHat className="size-4" />{" "}
+                {selectedLineIds.size ? `Send KOT (${selectedLineIds.size})` : "Send KOT"}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={!order.customerPhone}
+                onClick={() => {
+                  void store.sendEBill(order.id);
+                  goToTables();
+                }}
+              >
+                <Send className="size-4" /> E-Bill
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={settled || !order.lines.length}
+                onClick={() => {
+                  void store.generateBill(order.id, { print: true }).then(() => goToTables());
+                }}
+              >
+                <Printer className="size-4" /> Bill Print
+              </Button>
+              <Button
+                className="col-span-2"
+                disabled={settled || !order.lines.length}
+                onClick={() => {
+                  // Same "this button seeds row zero itself, bypassing
+                  // PaymentSplitEditor's own Add-payment-mode default"
+                  // situation as table-grid.index.tsx's quick-settle icon -
+                  // see that one's comment.
+                  const defaultMode =
+                    order.type === "Dine In"
+                      ? store.resolveDefaultPaymentMode(
+                          "Dine-in",
+                          store.tables.find((t) => t.id === order.tableId)?.categoryId,
+                        )
+                      : store.resolveDefaultPaymentMode("Pickup");
+                  setSplits([{ mode: defaultMode, amount: balance }]);
+                  setTip(0);
+                  setSettleOpen(true);
+                }}
+              >
+                <Wallet className="size-4" />{" "}
+                {isRefund ? (
+                  <>
+                    Refund · <Money value={Math.abs(balance)} />
+                  </>
+                ) : (
+                  <>
+                    Settle · <Money value={balance} />
+                  </>
+                )}
+              </Button>
+            </div>
+          )}
         </div>
       </aside>
 
@@ -753,41 +966,29 @@ function OrderCartPage() {
         </DialogContent>
       </Dialog>
 
-      {/* delivery / packaging charge override */}
+      {/* packaging charge override */}
       <Dialog open={chargesOpen} onOpenChange={setChargesOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delivery &amp; packaging charge</DialogTitle>
+            <DialogTitle>Packaging charge</DialogTitle>
             <DialogDescription>
               Overrides the outlet's default rule for this order only.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label htmlFor="deliveryOverride">Delivery (₹)</Label>
-              <Input
-                id="deliveryOverride"
-                type="number"
-                className="num mt-1.5"
-                value={deliveryOverride}
-                onChange={(e) => setDeliveryOverride(Number(e.target.value) || 0)}
-              />
-            </div>
-            <div>
-              <Label htmlFor="packagingOverride">Packaging (₹)</Label>
-              <Input
-                id="packagingOverride"
-                type="number"
-                className="num mt-1.5"
-                value={packagingOverride}
-                onChange={(e) => setPackagingOverride(Number(e.target.value) || 0)}
-              />
-            </div>
+          <div>
+            <Label htmlFor="packagingOverride">Packaging (₹)</Label>
+            <Input
+              id="packagingOverride"
+              type="number"
+              className="num mt-1.5"
+              value={packagingOverride}
+              onChange={(e) => setPackagingOverride(Number(e.target.value) || 0)}
+            />
           </div>
           <DialogFooter>
             <Button
               onClick={() => {
-                store.setCharges(order.id, deliveryOverride, packagingOverride);
+                store.setCharges(order.id, packagingOverride);
                 setChargesOpen(false);
               }}
             >
@@ -808,20 +1009,41 @@ function OrderCartPage() {
           {configItem?.variants?.length ? (
             <div>
               <Label>Variant</Label>
+              {configItem.variants.length > 8 ? (
+                <div className="relative mt-1.5">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    className="h-9 pl-8"
+                    placeholder="Search variants…"
+                    value={variantQuery}
+                    onChange={(e) => setVariantQuery(e.target.value)}
+                  />
+                </div>
+              ) : null}
               <div className="mt-1.5 flex flex-wrap gap-2">
-                {configItem.variants.map((v) => (
-                  <button
-                    key={v.id}
-                    onClick={() => setVariant(v.name)}
-                    className={cn(
-                      "rounded-lg border px-3 py-1.5 text-sm",
-                      variant === v.name ? "border-primary bg-primary-soft" : "border-border",
-                    )}
-                  >
-                    {v.name} · <span className="num">₹{v.price}</span>
-                  </button>
-                ))}
+                {configItem.variants
+                  .filter((v) => v.name.toLowerCase().includes(variantQuery.trim().toLowerCase()))
+                  .map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => setVariant(v.name)}
+                      className={cn(
+                        "rounded-lg border px-3 py-1.5 text-sm",
+                        variant === v.name ? "border-primary bg-primary-soft" : "border-border",
+                      )}
+                    >
+                      {v.name} · <span className="num">₹{v.price}</span>
+                    </button>
+                  ))}
               </div>
+              {variantQuery.trim() &&
+              !configItem.variants.some((v) =>
+                v.name.toLowerCase().includes(variantQuery.trim().toLowerCase()),
+              ) ? (
+                <p className="mt-1.5 text-xs text-muted-foreground">
+                  No variants match "{variantQuery}"
+                </p>
+              ) : null}
             </div>
           ) : null}
 
@@ -907,11 +1129,12 @@ function OrderCartPage() {
                       size="sm"
                       variant="outline"
                       onClick={() => {
-                        const amount =
-                          p.type === "percent"
-                            ? Math.round(totals.subtotal * (p.value / 100))
-                            : p.value;
-                        store.applyDiscount(order.id, p.code, amount);
+                        store.applyDiscount(
+                          order.id,
+                          p.code,
+                          p.type === "percent" ? "percent" : "flat",
+                          p.value,
+                        );
                         setDiscountOpen(false);
                       }}
                     >
@@ -925,7 +1148,7 @@ function OrderCartPage() {
             <Button
               variant="outline"
               onClick={() => {
-                store.applyDiscount(order.id, "None", 0);
+                store.applyDiscount(order.id, "None", "flat", 0);
                 setDiscountOpen(false);
               }}
             >
@@ -933,14 +1156,11 @@ function OrderCartPage() {
             </Button>
             <Button
               onClick={() => {
-                const amount =
-                  discountType === "percent"
-                    ? Math.round(totals.subtotal * (discountValue / 100))
-                    : discountValue;
                 store.applyDiscount(
                   order.id,
                   discountType === "percent" ? `${discountValue}%` : `Flat ₹${discountValue}`,
-                  amount,
+                  discountType,
+                  discountValue,
                 );
                 setDiscountOpen(false);
               }}
@@ -953,7 +1173,7 @@ function OrderCartPage() {
 
       {/* customer */}
       <Dialog open={customerOpen} onOpenChange={setCustomerOpen}>
-        <DialogContent>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Attach customer</DialogTitle>
             <DialogDescription>Used for bill delivery and repeat-visit reports.</DialogDescription>
@@ -981,6 +1201,24 @@ function OrderCartPage() {
                   Outstanding due: <Money value={dueTotalForPhone} className="font-semibold" /> ·{" "}
                   {dueForPhone.length} bill{dueForPhone.length > 1 ? "s" : ""}
                 </p>
+              ) : null}
+              {digits.length === 10 && lastOrderLoading ? (
+                <p className="mt-1.5 text-xs text-muted-foreground">Checking their last order…</p>
+              ) : null}
+              {digits.length === 10 && !lastOrderLoading && lastOrder ? (
+                <div className="mt-1.5 space-y-1.5 rounded-lg bg-surface-muted px-2.5 py-2">
+                  <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                    <History className="size-3.5" /> Last order · Bill #{lastOrder.bill_no}
+                  </p>
+                  <p className="text-xs">
+                    {lastOrder.hms_orderDetails
+                      .map((l) => `${l.qty}× ${l.hms_menu_mst?.item_name ?? "Item"}`)
+                      .join(", ")}
+                  </p>
+                  <Button size="sm" variant="outline" className="w-full" onClick={repeatLastOrder}>
+                    <History className="size-3.5" /> Repeat this order
+                  </Button>
+                </div>
               ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
@@ -1036,7 +1274,30 @@ function OrderCartPage() {
             </div>
           ) : null}
 
-          <PaymentSplitEditor splits={splits} onChange={setSplits} total={balance} />
+          <PaymentSplitEditor
+            splits={splits}
+            onChange={setSplits}
+            total={balance}
+            orderType={order.type === "Dine In" ? "Dine-in" : "Pickup"}
+            tableCategoryId={
+              order.type === "Dine In"
+                ? store.tables.find((t) => t.id === order.tableId)?.categoryId
+                : undefined
+            }
+          />
+
+          {order.type === "Dine In" && !isRefund ? (
+            <div className="space-y-1.5">
+              <Label>Tip (optional)</Label>
+              <Input
+                type="number"
+                className="num"
+                value={tip || ""}
+                placeholder="0"
+                onChange={(e) => setTip(Math.max(0, Number(e.target.value) || 0))}
+              />
+            </div>
+          ) : null}
 
           <DialogFooter>
             <Button
@@ -1050,7 +1311,21 @@ function OrderCartPage() {
                   );
                   return;
                 }
-                store.settleOrder(order.id, splits);
+                // store.settleOrder rejects this same case with a toast
+                // only (it has no way to open a route-level dialog) -
+                // catching it here first means the biller gets taken
+                // straight to "Attach customer" instead of just an error
+                // with no obvious next step.
+                const duePortion = splits
+                  .filter((p) => p.mode === "Due")
+                  .reduce((sum, p) => sum + p.amount, 0);
+                if (duePortion > 0 && !order.customerPhone) {
+                  setSettleOpen(false);
+                  setCustomerOpen(true);
+                  toast.info("Add a name and mobile number to settle part of this bill as Due");
+                  return;
+                }
+                store.settleOrder(order.id, splits, isRefund ? undefined : tip || undefined);
                 setSettleOpen(false);
                 goToTables();
               }}
@@ -1064,6 +1339,49 @@ function OrderCartPage() {
       <NoteDialog line={noteLineFor} order={order} onClose={() => setNoteLineFor(null)} />
       <AddonDialog line={addonLineFor} order={order} onClose={() => setAddonLineFor(null)} />
       <MoveKotDialog round={moveKotRound} order={order} onClose={() => setMoveKotRound(null)} />
+
+      <AlertDialog
+        open={!!removeTarget}
+        onOpenChange={(o) => {
+          if (!o) {
+            setRemoveTarget(null);
+            setRemoveReason("");
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {removeTarget?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This item was already sent to the kitchen. Removing it now won't undo any preparation
+              already started - make sure the kitchen knows before confirming.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="remove-reason">Reason (optional, kept in the audit log)</Label>
+            <Textarea
+              id="remove-reason"
+              value={removeReason}
+              onChange={(e) => setRemoveReason(e.target.value)}
+              placeholder="e.g. guest changed their mind, kitchen out of stock…"
+              rows={2}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (!removeTarget) return;
+                removeLastLineAndMaybeLeave(removeTarget.id, removeReason.trim() || undefined);
+                setRemoveTarget(null);
+                setRemoveReason("");
+              }}
+            >
+              Remove item
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

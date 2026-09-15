@@ -1,16 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ScrollText, Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
-import {
-  DataTable,
-  EmptyState,
-  Page,
-  PageHeader,
-  SectionCard,
-  TablePager,
-  usePagedRows,
-} from "@/components/kit";
+import { DataTable, EmptyState, Page, PageHeader, SectionCard, TablePager } from "@/components/kit";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -19,6 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { auditLogApi, type RawAuditLogEntry } from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/system/audit-log")({
@@ -36,25 +29,56 @@ export const Route = createFileRoute("/_shell/system/audit-log")({
   component: AuditLogPage,
 });
 
+function formatWhen(iso: string) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString("en-IN");
+}
+
 function AuditLogPage() {
   const store = useStore();
   const [q, setQ] = useState("");
   const [user, setUser] = useState("all");
+  const [page, setPage] = useState(1);
+  const [rows, setRows] = useState<RawAuditLogEntry[]>([]);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
 
-  const rows = useMemo(
-    () =>
-      store.auditLogs
-        .filter((a) => user === "all" || a.userId === user)
-        .filter(
-          (a) =>
-            !q ||
-            `${a.action} ${a.entity} ${a.userName} ${a.reason ?? ""}`
-              .toLowerCase()
-              .includes(q.toLowerCase()),
-        ),
-    [store.auditLogs, q, user],
-  );
-  const paged = usePagedRows(rows, 10);
+  // Real, persisted (billerpe-local-exe's GET /auditLog), paginated
+  // (10/page) and server-searched/filtered - see auditLogApi's own
+  // comment. Resets to page 1 whenever the filters change, since a stale
+  // page number from a previous filter wouldn't mean anything under a new
+  // one.
+  useEffect(() => {
+    const t = setTimeout(() => setPage(1), 300);
+    return () => clearTimeout(t);
+  }, [q, user]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    const run = async () => {
+      try {
+        const res = await auditLogApi.getAll(page, 10, q, user);
+        if (cancelled) return;
+        setRows(res.entries);
+        setTotalPages(res.totalPages);
+        setTotal(res.total);
+      } catch {
+        if (!cancelled) {
+          setRows([]);
+          setTotalPages(1);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
 
   return (
     <Page>
@@ -92,15 +116,20 @@ function AuditLogPage() {
 
         <div className="mt-3">
           <DataTable
-            rows={paged.pageRows}
-            keyFn={(a) => a.id}
+            rows={rows}
+            loading={loading}
+            keyFn={(a) => String(a.id)}
             empty={<EmptyState icon={ScrollText} title="No matching entries" compact />}
             columns={[
-              { key: "at", header: "When", cell: (a) => <span className="num">{a.at}</span> },
+              {
+                key: "at",
+                header: "When",
+                cell: (a) => <span className="num">{formatWhen(a.createdAt)}</span>,
+              },
               {
                 key: "user",
                 header: "User",
-                cell: (a) => <span className="font-medium">{a.userName}</span>,
+                cell: (a) => <span className="font-medium">{a.user_name}</span>,
               },
               { key: "action", header: "Action", cell: (a) => a.action },
               { key: "entity", header: "Entity", cell: (a) => a.entity },
@@ -120,8 +149,8 @@ function AuditLogPage() {
                 key: "device",
                 header: "Device",
                 cell: (a) => (
-                  <span className="text-xs num text-muted-foreground">
-                    {a.device} · {a.ip}
+                  <span className="max-w-[16rem] truncate text-xs num text-muted-foreground" title={a.device ?? ""}>
+                    {a.device ?? "—"} · {a.ip ?? "—"}
                   </span>
                 ),
               },
@@ -132,7 +161,7 @@ function AuditLogPage() {
                   {a.action} · {a.entity}
                 </p>
                 <p className="text-xs text-muted-foreground num">
-                  {a.userName} · {a.at}
+                  {a.user_name} · {formatWhen(a.createdAt)}
                 </p>
                 <p className="text-xs">
                   <span className="text-muted-foreground line-through">{a.before}</span> →{" "}
@@ -142,7 +171,14 @@ function AuditLogPage() {
               </div>
             )}
           />
-          <TablePager {...paged} onPageChange={paged.setPage} />
+          <TablePager
+            page={page}
+            pageCount={totalPages}
+            total={total}
+            start={(page - 1) * 10}
+            end={Math.min(page * 10, total)}
+            onPageChange={setPage}
+          />
         </div>
       </SectionCard>
     </Page>

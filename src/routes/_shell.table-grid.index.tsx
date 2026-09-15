@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import {
   ArrowLeftRight,
+  Bell,
   Grid2X2,
   LayoutGrid,
   Merge,
@@ -11,11 +12,12 @@ import {
   UtensilsCrossed,
   Wallet,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Money, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
 import { PaymentSplitEditor, splitPaid } from "@/components/operations/payment-split-editor";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,6 +27,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { ApiError, qrOrderApi, type RawPendingQrOrder } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { elapsedFrom } from "@/mock/format";
 import { orderTotals, useStore } from "@/mock/store";
@@ -66,6 +71,62 @@ function TableGridPage() {
   const [transferFrom, setTransferFrom] = useState<RestaurantTable | null>(null);
   const [settleTable, setSettleTable] = useState<RestaurantTable | null>(null);
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
+  const [tip, setTip] = useState(0);
+  const [qrOrders, setQrOrders] = useState<RawPendingQrOrder[]>([]);
+  const [qrInboxOpen, setQrInboxOpen] = useState(false);
+  const [qrActionBusyId, setQrActionBusyId] = useState<number | null>(null);
+
+  // AppShell's own load only ever fires once per login, not on every visit
+  // to this page - a table status change that happens elsewhere (another
+  // terminal, or a reservation being booked/cancelled/edited - see
+  // billerpe-local-exe/services/reservationTableSync.js) never reached
+  // this screen without a manual reload, confirmed live. Scoped to this
+  // page rather than AppShell so idle screens elsewhere don't poll table
+  // data they aren't showing.
+  useEffect(() => {
+    const id = setInterval(() => void store.loadTablesFromServer(), 20000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pending QR Orders inbox (billerpe-local-exe/controller/qrOrder.js's
+  // local mirror). Polled faster than the table grid's own 20s tick
+  // (10s) specifically so a new order gets a sound+toast alert promptly -
+  // a silent badge alone was easy to miss, confirmed by report ("no any
+  // bugger or alarm to ring to notify"). seenIdsRef tracks what's already
+  // been alerted on so a resolved-then-reappearing id can't double-fire,
+  // and the very first load never alerts (nothing "new" about an inbox
+  // that already had orders before this tab opened).
+  const seenQrOrderIdsRef = useRef<Set<number> | null>(null);
+  useEffect(() => {
+    const load = () =>
+      void qrOrderApi
+        .getPending()
+        .then((r) => {
+          const seen = seenQrOrderIdsRef.current;
+          if (seen) {
+            const freshOnes = r.qrOrders.filter((o) => !seen.has(o.id));
+            if (freshOnes.length > 0) {
+              playQrOrderAlert();
+              freshOnes.forEach((o) => {
+                toast(`New QR order — ${o.table_name ?? "table"}`, {
+                  description: `${o.customer_name || "Guest"} · ${o.items.length} item${o.items.length === 1 ? "" : "s"}`,
+                  duration: 10000,
+                });
+              });
+            }
+          }
+          seenQrOrderIdsRef.current = new Set(r.qrOrders.map((o) => o.id));
+          setQrOrders(r.qrOrders);
+        })
+        .catch(() => {
+          // best-effort - a failed poll just leaves the previous list
+          // showing until the next tick succeeds
+        });
+    load();
+    const id = setInterval(load, 10000);
+    return () => clearInterval(id);
+  }, []);
 
   const filtered = useMemo(
     () =>
@@ -132,7 +193,15 @@ function TableGridPage() {
       openBiller(table.orderId);
       return;
     }
-    if (table.status !== "Free") {
+    // "Reserved" means a table has a future/held booking against it
+    // (services/reservationTableSync.js on the exe) - it never has an
+    // order of its own (the reservation itself creates one only later, at
+    // its own start time, on the cloud). Treated the same as "Free" here:
+    // clicking it starts a normal walk-in order, same as any other empty
+    // table - it must NOT fall into the "must already have an order"
+    // resync-and-error path below, confirmed live as an immediate
+    // "Could not open this table's order" toast on every single click.
+    if (table.status !== "Free" && table.status !== "Reserved") {
       // The table's own status can come back "occupied" from the server
       // a beat before the order that occupies it shows up in the active-
       // orders sync (e.g. a KOT just fired on another terminal) - resync
@@ -150,6 +219,49 @@ function TableGridPage() {
       return;
     }
     openBiller(store.startOrder(table.id));
+  };
+
+  const acceptQrOrder = async (qrOrder: RawPendingQrOrder) => {
+    setQrActionBusyId(qrOrder.id);
+    try {
+      const { orderId } = await qrOrderApi.accept(qrOrder.id);
+      setQrOrders((prev) => prev.filter((o) => o.id !== qrOrder.id));
+      toast.success(`Order accepted for ${qrOrder.table_name ?? "table"}`);
+      // loadTablesFromServer alone was NOT enough here - confirmed live,
+      // reported repeatedly: it only ever discovers an order this session
+      // didn't know about yet (see its own comment), so accepting a 2nd+
+      // round onto a table whose order was ALREADY open silently did
+      // nothing to that order's lines/total until a full page reload.
+      // refreshOrderFromServer is the one that actually re-fetches THIS
+      // order's current lines/kotRounds regardless of whether it was
+      // already known - run both: loadTablesFromServer for the
+      // brand-new-order/table-status case, refreshOrderFromServer for the
+      // already-open-order case this was actually missing.
+      await store.loadTablesFromServer();
+      const localOrder = store.orders.find((o) => o.backendId === orderId);
+      if (localOrder) await store.refreshOrderFromServer(localOrder.id);
+    } catch (err) {
+      toast.error("Could not accept this order", {
+        description: err instanceof ApiError ? err.message : "Please try again.",
+      });
+    } finally {
+      setQrActionBusyId(null);
+    }
+  };
+
+  const rejectQrOrder = async (qrOrder: RawPendingQrOrder) => {
+    setQrActionBusyId(qrOrder.id);
+    try {
+      await qrOrderApi.reject(qrOrder.id);
+      setQrOrders((prev) => prev.filter((o) => o.id !== qrOrder.id));
+      toast.success("Order declined");
+    } catch (err) {
+      toast.error("Could not decline this order", {
+        description: err instanceof ApiError ? err.message : "Please try again.",
+      });
+    } finally {
+      setQrActionBusyId(null);
+    }
   };
 
   const itemCountOf = (order: Order | undefined) =>
@@ -200,11 +312,17 @@ function TableGridPage() {
           {t.occupiedSince ? (
             <p className="text-[10px] opacity-75">{elapsedFrom(t.occupiedSince)}</p>
           ) : null}
+          {t.status === "Reserved" && t.reservedGuestName ? (
+            <p className="truncate text-[10px] opacity-75">
+              {t.reservedGuestName}
+              {t.reservedGuestPhone ? ` · ${t.reservedGuestPhone}` : ""}
+            </p>
+          ) : null}
           {order?.mergedFrom?.length ? (
             <p className="text-[10px] opacity-75">Merged · {order.mergedFrom.join(", ")}</p>
           ) : null}
         </div>
-        {t.status !== "Free" ? (
+        {t.orderId ? (
           <div className="mt-1.5 flex gap-1">
             {t.status === "Bill Generated" ? (
               <>
@@ -228,7 +346,19 @@ function TableGridPage() {
                     e.stopPropagation();
                     const paid = (order?.payments ?? []).reduce((s, p) => s + p.amount, 0);
                     const balance = Math.round((totals.grand - paid) * 100) / 100;
-                    setSplits([{ mode: "Cash", amount: Math.max(0, balance) }]);
+                    // This quick-settle icon seeds the first split row itself,
+                    // unlike PaymentSplitEditor's own "Add payment mode"
+                    // button (which the settle dialog below still uses for
+                    // any row after this one) - same default-resolution as
+                    // that button, just called directly here instead of
+                    // relying on the editor's own orderType/tableCategoryId
+                    // props for row zero.
+                    const defaultMode =
+                      order?.type === "Pickup"
+                        ? store.resolveDefaultPaymentMode("Pickup")
+                        : store.resolveDefaultPaymentMode("Dine-in", t.categoryId);
+                    setSplits([{ mode: defaultMode, amount: Math.max(0, balance) }]);
+                    setTip(0);
                     setSettleTable(t);
                   }}
                   className={cn(actionIconCls, "bg-black/20 hover:bg-black/30")}
@@ -237,30 +367,34 @@ function TableGridPage() {
                 </span>
               </>
             ) : null}
-            <span
-              role="button"
-              tabIndex={-1}
-              title="Merge into another table"
-              onClick={(e) => {
-                e.stopPropagation();
-                setMergeFrom(t);
-              }}
-              className={actionIconCls}
-            >
-              <Merge className="size-3.5" />
-            </span>
-            <span
-              role="button"
-              tabIndex={-1}
-              title="Transfer to another table"
-              onClick={(e) => {
-                e.stopPropagation();
-                setTransferFrom(t);
-              }}
-              className={actionIconCls}
-            >
-              <ArrowLeftRight className="size-3.5" />
-            </span>
+            {t.status !== "Bill Generated" ? (
+              <>
+                <span
+                  role="button"
+                  tabIndex={-1}
+                  title="Merge into another table"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMergeFrom(t);
+                  }}
+                  className={actionIconCls}
+                >
+                  <Merge className="size-3.5" />
+                </span>
+                <span
+                  role="button"
+                  tabIndex={-1}
+                  title="Transfer to another table"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setTransferFrom(t);
+                  }}
+                  className={actionIconCls}
+                >
+                  <ArrowLeftRight className="size-3.5" />
+                </span>
+              </>
+            ) : null}
           </div>
         ) : null}
       </motion.button>
@@ -275,6 +409,14 @@ function TableGridPage() {
         description="Tap a free table to start an order, or an occupied table to continue it."
         actions={
           <>
+            <Button variant="outline" className="relative" onClick={() => setQrInboxOpen(true)}>
+              <Bell className="size-4" /> QR Orders
+              {qrOrders.length > 0 ? (
+                <Badge className="absolute -right-2 -top-2 h-5 min-w-5 justify-center rounded-full px-1">
+                  {qrOrders.length}
+                </Badge>
+              ) : null}
+            </Button>
             <Button
               variant="outline"
               onClick={() => {
@@ -473,13 +615,31 @@ function TableGridPage() {
                         Single or split payment. Amounts must add up to the bill total.
                       </DialogDescription>
                     </DialogHeader>
-                    <PaymentSplitEditor splits={splits} onChange={setSplits} total={balance} />
+                    <PaymentSplitEditor
+                      splits={splits}
+                      onChange={setSplits}
+                      total={balance}
+                      orderType={order?.type === "Pickup" ? "Pickup" : "Dine-in"}
+                      tableCategoryId={settleTable.categoryId}
+                    />
+                    {order?.type === "Dine In" ? (
+                      <div className="space-y-1.5">
+                        <Label>Tip (optional)</Label>
+                        <Input
+                          type="number"
+                          className="num"
+                          value={tip || ""}
+                          placeholder="0"
+                          onChange={(e) => setTip(Math.max(0, Number(e.target.value) || 0))}
+                        />
+                      </div>
+                    ) : null}
                     <DialogFooter>
                       <Button
                         disabled={!order || Math.abs(due) > 0.5}
                         onClick={() => {
                           if (!order) return;
-                          store.settleOrder(order.id, splits);
+                          store.settleOrder(order.id, splits, tip || undefined);
                           setSettleTable(null);
                         }}
                       >
@@ -492,6 +652,142 @@ function TableGridPage() {
             : null}
         </DialogContent>
       </Dialog>
+
+      <Dialog open={qrInboxOpen} onOpenChange={setQrInboxOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Pending QR Orders</DialogTitle>
+            <DialogDescription>
+              Submitted from a table's own QR code. Nothing reaches the kitchen until you accept.
+            </DialogDescription>
+          </DialogHeader>
+          {qrOrders.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              No pending QR orders right now.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {qrOrders.map((o) => {
+                // Warn (never block) when the table this order targets
+                // doesn't currently look occupied - staff can always
+                // accept anyway (e.g. the guest just sat down), per the
+                // plan's own "warn but allow" call, since a leaked/
+                // reused link can otherwise submit a pending order for a
+                // table nobody is actually sitting at.
+                const suspicious = o.table_status !== null && o.table_status !== "R";
+                const busy = qrActionBusyId === o.id;
+                return (
+                  <div key={o.id} className="rounded-lg border border-border p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold">
+                          {o.table_name ?? `Table ${o.table_id}`}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {o.customer_name || "Guest"} · {o.customer_mobile}
+                        </p>
+                      </div>
+                      <span className="text-xs text-muted-foreground">
+                        {qrElapsed(o.submitted_at)} ago
+                      </span>
+                    </div>
+                    <ul className="mt-2 space-y-0.5 text-sm">
+                      {o.items.map((item, i) => (
+                        <li key={i} className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate">
+                            {item.qty} × {item.itemName}
+                            {item.variantName ? ` (${item.variantName})` : ""}
+                            {item.addonNames?.length ? ` + ${item.addonNames.join(", ")}` : ""}
+                          </span>
+                          {item.comment ? (
+                            <span className="shrink-0 truncate text-xs text-muted-foreground">
+                              {item.comment}
+                            </span>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ul>
+                    {suspicious ? (
+                      <p className="mt-2 text-xs text-amber-600">
+                        This table currently shows{" "}
+                        {o.table_status === "F"
+                          ? "Free"
+                          : o.table_status === "B"
+                            ? "Reserved"
+                            : o.table_status === "P"
+                              ? "Bill Generated"
+                              : o.table_status === "H"
+                                ? "Held"
+                                : "occupied"}{" "}
+                        — double-check before accepting.
+                      </p>
+                    ) : null}
+                    <div className="mt-3 flex gap-2">
+                      <Button
+                        size="sm"
+                        className="flex-1"
+                        disabled={busy}
+                        onClick={() => void acceptQrOrder(o)}
+                      >
+                        Accept
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1"
+                        disabled={busy}
+                        onClick={() => void rejectQrOrder(o)}
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </Page>
   );
+}
+
+function qrElapsed(iso: string) {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const minutes = Math.max(0, Math.round(diffMs / 60000));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+// A short double-beep via the Web Audio API - no external asset, so it
+// works the same in dev/build/packaged contexts. Browsers block audio
+// until the page has seen a user gesture; on a POS screen that's already
+// true almost immediately (staff clicking around), and this is a bonus
+// on top of the toast/badge, not the only signal, so a silent failure on
+// a truly idle tab is an acceptable miss - wrapped so it never throws
+// into the polling loop that calls it.
+function playQrOrderAlert() {
+  try {
+    const AudioCtxCtor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtxCtor) return;
+    const ctx = new AudioCtxCtor();
+    const beep = (startAt: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.001, ctx.currentTime + startAt);
+      gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + startAt + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startAt + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + startAt);
+      osc.stop(ctx.currentTime + startAt + 0.35);
+    };
+    beep(0);
+    beep(0.45);
+  } catch {
+    // ignore - the toast still shows regardless
+  }
 }

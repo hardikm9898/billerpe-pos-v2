@@ -1,11 +1,12 @@
 import { ChevronLeft, ChevronRight, TrendingDown, TrendingUp, X } from "lucide-react";
 import { motion } from "motion/react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { forwardRef, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
+import { Button, type ButtonProps } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 /* ---------------- page primitives ---------------- */
@@ -255,6 +256,7 @@ const statusTone: Record<string, string> = {
   Ready: "bg-success-soft text-success",
   Served: "bg-muted text-muted-foreground",
   Booked: "bg-status-held text-status-held-foreground",
+  Waiting: "bg-status-held text-status-held-foreground",
   Confirmed: "bg-status-reserved text-status-reserved-foreground",
   Seated: "bg-status-running text-status-running-foreground",
   Completed: "bg-success-soft text-success",
@@ -596,3 +598,26 @@ export function BulkActionsBar({
     </div>
   );
 }
+
+/* ---------------- icon button ---------------- */
+
+/**
+ * An icon-only Button with a real hover tooltip. Icon-only buttons across
+ * the app used to rely on the plain HTML `title` attribute (slow to
+ * appear, unstyled, and this is a touch/tablet-first POS where hover
+ * barely applies) - or had no label at all. Wraps AppShell's app-wide
+ * `TooltipProvider` (see AppShell.tsx), so this only needs using inside
+ * the shell, not its own provider per instance.
+ */
+export const IconButton = forwardRef<
+  HTMLButtonElement,
+  Omit<ButtonProps, "size"> & { label: string }
+>(({ label, variant = "ghost", ...props }, ref) => (
+  <Tooltip>
+    <TooltipTrigger asChild>
+      <Button ref={ref} size="icon" variant={variant} aria-label={label} {...props} />
+    </TooltipTrigger>
+    <TooltipContent>{label}</TooltipContent>
+  </Tooltip>
+));
+IconButton.displayName = "IconButton";

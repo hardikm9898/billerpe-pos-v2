@@ -25,14 +25,24 @@ import {
   BulkActionsBar,
   DataTable,
   EmptyState,
+  IconButton,
   Money,
   Page,
   PageHeader,
   SectionCard,
   StatusBadge,
   TablePager,
-  usePagedRows,
 } from "@/components/kit";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -46,7 +56,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ApiError, orderApi, type RawTimelineEntry } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { orderTotals, useStore } from "@/mock/store";
+import { displayBillNo, orderTotals, useStore } from "@/mock/store";
 import type { AuditLog, Order, OrderStatus } from "@/mock/types";
 
 // constant/const.js's ACTION enum (controller/kto.js) - real values this
@@ -153,7 +163,31 @@ function OrdersPage() {
   const [selected, setSelected] = useState<string[]>([]);
   const [timelineOrder, setTimelineOrder] = useState<Order | null>(null);
   const [sequenceOpen, setSequenceOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ ids: string[]; label: string } | null>(null);
 
+  // History is server-paginated (10/page) and server-searched now - see
+  // loadOrderHistoryFromServer's own comment. Debounced so every keystroke
+  // doesn't fire a request; resets to page 1 whenever the search text
+  // changes, since a stale page number from a previous search wouldn't
+  // mean anything under the new filter.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void store.loadOrderHistoryFromServer(1, q);
+    }, 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+
+  const goToHistoryPage = (page: number) => {
+    void store.loadOrderHistoryFromServer(page, q);
+  };
+
+  // Live orders (small, always fully in memory) stay filtered/searched
+  // client-side and shown unpaginated, ahead of the current history page -
+  // store.allOrders() already dedupes any live order that's also present
+  // in the loaded history page (see its own comment), so this merge just
+  // needs the status tab + search text applied to the live slice; the
+  // history slice arrives from the server already filtered/paginated.
   const rows = useMemo(
     () =>
       store
@@ -162,9 +196,11 @@ function OrdersPage() {
         .filter((o) => status === "All" || o.status === status)
         .filter((o) => {
           if (!q) return true;
+          if (store.orderHistory.some((h) => h.id === o.id)) return true; // already server-filtered
           const t = q.toLowerCase();
           return (
             String(o.orderNo).includes(q) ||
+            (o.billNo ?? "").toLowerCase().includes(t) ||
             o.tableLabel.toLowerCase().includes(t) ||
             (o.customerName ?? "").toLowerCase().includes(t) ||
             (o.customerPhone ?? "").includes(q)
@@ -173,7 +209,6 @@ function OrdersPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store.orders, store.orderHistory, status, q],
   );
-  const paged = usePagedRows(rows, 10);
   // Only while genuinely empty AND a request is still in flight - once
   // real rows show up, an unrelated in-flight request elsewhere shouldn't
   // ever replace them with a skeleton again.
@@ -186,7 +221,7 @@ function OrdersPage() {
   // history rows alike (same as the single-row delete button), so
   // selection isn't restricted by row type - just by the
   // orders.deleteOrder permission gating the bulk action itself below.
-  const pageIds = paged.pageRows.map((o) => o.id);
+  const pageIds = rows.map((o) => o.id);
   const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.includes(id));
   const toggleAllOnPage = () =>
     setSelected((prev) =>
@@ -283,10 +318,12 @@ function OrdersPage() {
               size="sm"
               variant="outline"
               className="text-primary"
-              onClick={() => {
-                store.removeOrders(selected);
-                setSelected([]);
-              }}
+              onClick={() =>
+                setDeleteTarget({
+                  ids: selected,
+                  label: `${selected.length} order${selected.length === 1 ? "" : "s"}`,
+                })
+              }
             >
               <Trash2 className="size-4" /> Delete selected
             </Button>
@@ -294,7 +331,7 @@ function OrdersPage() {
         </BulkActionsBar>
 
         <DataTable
-          rows={paged.pageRows}
+          rows={rows}
           loading={loading}
           keyFn={(o) => o.id}
           onRowClick={(o) => navigate({ to: "/orders/$orderId", params: { orderId: o.id } })}
@@ -321,8 +358,15 @@ function OrdersPage() {
             },
             {
               key: "no",
-              header: "Order",
-              cell: (o) => <span className="num font-medium">#{o.orderNo}</span>,
+              header: "Bill No",
+              // The real bill_no string, "OFF#" placeholder included -
+              // showing the parsed-numeric orderNo here instead (as this
+              // used to) could show the same number for two genuinely
+              // different orders (an unsynced local order and an unrelated
+              // already-real-numbered one both strip down to the same
+              // digits), and never matched what a printed bill showed for
+              // the same order.
+              cell: (o) => <span className="num font-medium">#{displayBillNo(o)}</span>,
             },
             { key: "table", header: "Table", cell: (o) => o.tableLabel },
             { key: "type", header: "Type", cell: (o) => o.type },
@@ -399,56 +443,77 @@ function OrdersPage() {
                 // orders.deleteOrder special permission (Owner by default)
                 // rather than hidden outright for settled/historical rows.
                 const canDelete = store.canSpecial("orders.deleteOrder");
+                const canEditSettled =
+                  o.status === "Settled" && store.canSpecial("orders.reopenSettled");
                 return (
                   <div className="flex items-center gap-1">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      title="Reprint bill"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void store.printBill(o.id);
-                      }}
-                    >
-                      <Printer className="size-4" />
-                    </Button>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      title="Timeline"
+                    {canEditSettled ? (
+                      <IconButton
+                        label="Edit order"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const draftId = store.startEditSettledOrder(o.id);
+                          if (draftId) {
+                            navigate({
+                              to: "/table-grid/order/$orderId",
+                              params: { orderId: draftId },
+                            });
+                          }
+                        }}
+                      >
+                        <Pencil className="size-4" />
+                      </IconButton>
+                    ) : null}
+                    <div className="relative">
+                      <IconButton
+                        label="Reprint bill"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void store.printBill(o.id);
+                        }}
+                      >
+                        <Printer className="size-4" />
+                      </IconButton>
+                      {store.currentUser.role === "Owner" && o.billPrintCount ? (
+                        <span
+                          className="pointer-events-none absolute -right-1 -top-1 min-w-4 rounded-full bg-warning-soft px-1 text-center text-[10px] font-bold leading-4 text-warning"
+                          title={`Reprinted ${o.billPrintCount} time${o.billPrintCount === 1 ? "" : "s"}`}
+                        >
+                          {o.billPrintCount}
+                        </span>
+                      ) : null}
+                    </div>
+                    <IconButton
+                      label="Timeline"
                       onClick={(e) => {
                         e.stopPropagation();
                         setTimelineOrder(o);
                       }}
                     >
                       <Clock className="size-4" />
-                    </Button>
+                    </IconButton>
                     {editable ? (
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        title="Continue order"
+                      <IconButton
+                        label="Continue order"
                         onClick={(e) => {
                           e.stopPropagation();
                           navigate({ to: "/table-grid/order/$orderId", params: { orderId: o.id } });
                         }}
                       >
                         <ArrowRight className="size-4" />
-                      </Button>
+                      </IconButton>
                     ) : null}
                     {canDelete ? (
-                      <Button
-                        size="icon"
-                        variant="ghost"
+                      <IconButton
+                        label="Delete order"
                         className="text-primary"
-                        title="Delete order"
                         onClick={(e) => {
                           e.stopPropagation();
-                          store.removeOrder(o.id);
+                          setDeleteTarget({ ids: [o.id], label: `Order #${o.orderNo}` });
                         }}
                       >
                         <Trash2 className="size-4" />
-                      </Button>
+                      </IconButton>
                     ) : null}
                   </div>
                 );
@@ -456,7 +521,14 @@ function OrdersPage() {
             },
           ]}
         />
-        <TablePager {...paged} onPageChange={paged.setPage} />
+        <TablePager
+          page={store.orderHistoryPage}
+          pageCount={store.orderHistoryTotalPages}
+          total={store.orderHistoryTotal}
+          start={(store.orderHistoryPage - 1) * 10}
+          end={Math.min(store.orderHistoryPage * 10, store.orderHistoryTotal)}
+          onPageChange={goToHistoryPage}
+        />
       </SectionCard>
 
       <Dialog open={!!timelineOrder} onOpenChange={(o) => !o && setTimelineOrder(null)}>
@@ -547,6 +619,36 @@ function OrdersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {deleteTarget?.label}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This is a real deletion and cannot be undone. The order will be removed from Orders
+              and its table (if any) freed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+              onClick={() => {
+                if (!deleteTarget) return;
+                if (deleteTarget.ids.length > 1) {
+                  store.removeOrders(deleteTarget.ids);
+                  setSelected([]);
+                } else {
+                  store.removeOrder(deleteTarget.ids[0]);
+                }
+                setDeleteTarget(null);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Page>
   );
 }

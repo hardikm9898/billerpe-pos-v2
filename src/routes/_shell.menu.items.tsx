@@ -1,5 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Download, FileUp, Plus, Search, Star, Trash2, UtensilsCrossed } from "lucide-react";
+import {
+  Download,
+  FileUp,
+  Image as ImageIcon,
+  Plus,
+  Search,
+  Star,
+  Trash2,
+  UtensilsCrossed,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -26,6 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import {
   Select,
   SelectContent,
@@ -35,6 +45,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { menuApi, type RawProductImage } from "@/lib/api";
 import { downloadTextFile, parseCsv, toCsv } from "@/lib/csv";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/mock/store";
@@ -125,6 +136,11 @@ function MenuItemsPage() {
   const [selected, setSelected] = useState<string[]>([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importRows, setImportRows] = useState<ImportRow[]>([]);
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number } | null>(
+    null,
+  );
+  const importing = importProgress !== null;
+  const [imagePickerOpen, setImagePickerOpen] = useState(false);
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
@@ -524,8 +540,9 @@ function MenuItemsPage() {
                   <Label>SKU (optional)</Label>
                   <Input
                     value={draft.sku ?? ""}
-                    onChange={(e) => setDraft({ ...draft, sku: e.target.value })}
-                    placeholder="e.g. PT-260"
+                    onChange={(e) => setDraft({ ...draft, sku: e.target.value.slice(0, 5) })}
+                    maxLength={5}
+                    placeholder="e.g. PT260"
                   />
                 </div>
                 <div className="space-y-1.5">
@@ -548,23 +565,30 @@ function MenuItemsPage() {
               </div>
 
               <div className="space-y-1.5">
-                <Label>Image URL (optional)</Label>
+                <Label>Image (optional)</Label>
                 <div className="flex items-center gap-3">
-                  <Input
-                    value={draft.imageUrl ?? ""}
-                    onChange={(e) => setDraft({ ...draft, imageUrl: e.target.value })}
-                    placeholder="https://…"
-                    className="flex-1"
-                  />
+                  <Button type="button" variant="outline" onClick={() => setImagePickerOpen(true)}>
+                    <ImageIcon className="size-4" /> Select image
+                  </Button>
                   {draft.imageUrl ? (
-                    <img
-                      src={draft.imageUrl}
-                      alt=""
-                      className="size-11 shrink-0 rounded-lg border border-border object-cover"
-                      onError={(e) => {
-                        e.currentTarget.style.visibility = "hidden";
-                      }}
-                    />
+                    <div className="relative">
+                      <img
+                        src={draft.imageUrl}
+                        alt=""
+                        className="size-11 shrink-0 rounded-lg border border-border object-cover"
+                        onError={(e) => {
+                          e.currentTarget.style.visibility = "hidden";
+                        }}
+                      />
+                      <button
+                        type="button"
+                        aria-label="Remove image"
+                        onClick={() => setDraft({ ...draft, imageUrl: undefined })}
+                        className="absolute -right-1.5 -top-1.5 grid size-4 place-items-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground"
+                      >
+                        ×
+                      </button>
+                    </div>
                   ) : null}
                 </div>
               </div>
@@ -744,8 +768,22 @@ function MenuItemsPage() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          if (importing) return; // block closing while an import is in flight
+          setImportOpen(open);
+        }}
+      >
+        <DialogContent
+          className="max-h-[85vh] max-w-3xl overflow-y-auto"
+          onInteractOutside={(e) => {
+            if (importing) e.preventDefault();
+          }}
+          onEscapeKeyDown={(e) => {
+            if (importing) e.preventDefault();
+          }}
+        >
           <DialogHeader>
             <DialogTitle>Import items into {viewMenu?.name ?? "this menu"}</DialogTitle>
             <DialogDescription>
@@ -758,6 +796,7 @@ function MenuItemsPage() {
             <Button
               variant="outline"
               size="sm"
+              disabled={importing}
               onClick={() =>
                 downloadTextFile(
                   "menu-items-template.csv",
@@ -771,6 +810,7 @@ function MenuItemsPage() {
               type="file"
               accept=".csv,text/csv"
               className="max-w-xs"
+              disabled={importing}
               onChange={(e) => {
                 const file = e.target.files?.[0];
                 if (!file) return;
@@ -785,7 +825,21 @@ function MenuItemsPage() {
             />
           </div>
 
-          {importRows.length ? (
+          {importProgress ? (
+            <div className="space-y-1.5">
+              <Progress
+                value={
+                  importProgress.total
+                    ? (importProgress.done / importProgress.total) * 100
+                    : 0
+                }
+              />
+              <p className="text-xs text-muted-foreground">
+                Importing {importProgress.done} of {importProgress.total} item(s)… keep this
+                dialog open until it finishes.
+              </p>
+            </div>
+          ) : importRows.length ? (
             <div className="space-y-2">
               <p className="text-xs text-muted-foreground">
                 {importRows.filter((r) => !r.error).length} of {importRows.length} row(s) ready to
@@ -836,23 +890,141 @@ function MenuItemsPage() {
           ) : null}
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setImportOpen(false)}>
+            <Button variant="outline" disabled={importing} onClick={() => setImportOpen(false)}>
               Cancel
             </Button>
             <Button
-              disabled={!importRows.some((r) => !r.error)}
-              onClick={() => {
+              disabled={importing || !importRows.some((r) => !r.error)}
+              onClick={async () => {
                 const valid = importRows.filter((r) => !r.error);
-                store.bulkImportMenuItems(valid, viewMenuId);
-                setImportOpen(false);
-                setImportRows([]);
+                setImportProgress({ done: 0, total: valid.length });
+                try {
+                  await store.bulkImportMenuItems(valid, viewMenuId, (done, total) =>
+                    setImportProgress({ done, total }),
+                  );
+                } finally {
+                  setImportProgress(null);
+                  setImportOpen(false);
+                  setImportRows([]);
+                }
               }}
             >
-              Import {importRows.filter((r) => !r.error).length || ""} item(s)
+              {importProgress
+                ? `Importing ${importProgress.done}/${importProgress.total}…`
+                : `Import ${importRows.filter((r) => !r.error).length || ""} item(s)`}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ImagePickerDialog
+        open={imagePickerOpen}
+        onOpenChange={setImagePickerOpen}
+        onSelect={(url) => {
+          if (!draft) return;
+          setDraft({ ...draft, imageUrl: url });
+        }}
+      />
     </Page>
+  );
+}
+
+// Same "search a shared photo library" facility the legacy system's own
+// Menu Item form had (uat-frontend's Menu.js) - GET /getProductImages/
+// reads a shared, cloud-curated stock-image catalogue (hms_image_mst, no
+// hotel_id), not a per-item file upload. There's no upload endpoint or
+// large-enough column anywhere in this backend for real device photo
+// upload (foodImage is a VARCHAR(255)) - this replicates the working
+// legacy facility rather than building a new upload feature.
+function ImagePickerDialog({
+  open,
+  onOpenChange,
+  onSelect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSelect: (url: string) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [images, setImages] = useState<RawProductImage[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    if (!open) {
+      setSearch("");
+      setDebounced("");
+      setImages([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    menuApi
+      .getProductImages(debounced)
+      .then(({ data }) => {
+        if (!cancelled) setImages(data);
+      })
+      .catch(() => {
+        if (!cancelled) setImages([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, debounced]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Select image</DialogTitle>
+          <DialogDescription>Search a shared photo library by dish name.</DialogDescription>
+        </DialogHeader>
+        <Input
+          autoFocus
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="e.g. Pizza, Burger, Sushi"
+        />
+        <div className="grid max-h-80 grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-5">
+          {loading ? (
+            <p className="col-span-full py-8 text-center text-sm text-muted-foreground">
+              Searching…
+            </p>
+          ) : images.length ? (
+            images.map((img) => (
+              <button
+                key={img.id}
+                type="button"
+                onClick={() => {
+                  onSelect(img.url);
+                  onOpenChange(false);
+                }}
+                title={img.name}
+                className="aspect-square overflow-hidden rounded-lg border border-border transition hover:border-primary"
+              >
+                <img
+                  src={img.url}
+                  alt={img.name}
+                  loading="lazy"
+                  className="size-full object-cover"
+                />
+              </button>
+            ))
+          ) : (
+            <p className="col-span-full py-8 text-center text-sm text-muted-foreground">
+              {search ? "No matching images found." : "Type a food name to see image suggestions."}
+            </p>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

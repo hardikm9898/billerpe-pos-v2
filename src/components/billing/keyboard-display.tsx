@@ -32,7 +32,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { StatusBadge } from "@/components/kit";
+import { IconButton, StatusBadge } from "@/components/kit";
 import { UpiQrPanel } from "@/components/operations/payment-split-editor";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { RESTAURANT } from "@/mock/data";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
@@ -269,6 +270,10 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const sentLines = order?.lines.filter((l) => l.kotRound <= (order?.kotRounds ?? 0)) ?? [];
   const newLines = order?.lines.filter((l) => l.kotRound > (order?.kotRounds ?? 0)) ?? [];
   const settled = order?.status === "Settled" || order?.status === "Cancelled";
+  // A generated bill is meant to be settled as-is, not moved to another
+  // table afterward - same rule table-grid's own Merge/Transfer icons and
+  // store.transferTable/mergeTables enforce.
+  const billed = order?.status === "Bill Generated";
 
   // Opening a table/pickup order starts it "Held" with zero items (see
   // startOrder's own comment). removeLine/changeQty already free it the
@@ -287,7 +292,16 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const doKot = () => {
     if (!order || settled) return;
     if (!newLines.length) {
-      toast.error("Nothing new to send", { description: "Add items before printing a KOT." });
+      toast.error("Nothing new to send", { description: "Add items before sending a KOT." });
+      return;
+    }
+    store.generateKot(order.id, { print: true });
+    moveToNewOrder();
+  };
+  const doKotOnly = () => {
+    if (!order || settled) return;
+    if (!newLines.length) {
+      toast.error("Nothing new to send", { description: "Add items before sending a KOT." });
       return;
     }
     store.generateKot(order.id);
@@ -313,10 +327,6 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
       return;
     }
     void store.generateBill(order.id, { print: true }).then(() => moveToNewOrder());
-  };
-  const doReprint = () => {
-    if (!order) return;
-    void store.printBill(order.id);
   };
   const openCustomItem = () => {
     if (!order || settled) return;
@@ -418,7 +428,10 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
             size="sm"
             variant="ghost"
             className="h-6 px-1.5 text-[11px]"
-            disabled={settled}
+            disabled={settled || billed}
+            title={
+              billed ? "Bill already generated — this order can no longer be moved" : undefined
+            }
             onClick={() => setMoveOpen(true)}
           >
             <ArrowLeftRight className="size-3" /> {order.tableId ? "Move" : "Assign table"}
@@ -536,7 +549,10 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                 size="sm"
                 variant="outline"
                 className="mt-2 h-7 w-full text-[11px]"
-                disabled={settled}
+                disabled={settled || billed}
+                title={
+                  billed ? "Bill already generated — this order can no longer be moved" : undefined
+                }
                 onClick={() => setMoveOpen(true)}
               >
                 <ArrowLeftRight className="size-3" />{" "}
@@ -815,11 +831,24 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
 
       {/* ================= action bar ================= */}
       <footer className="flex flex-wrap items-center gap-2 border-t border-border bg-surface px-3 py-2">
-        <Button variant="outline" className="h-10" disabled={settled} onClick={doHold}>
+        <Button
+          variant="outline"
+          className="h-10 border-warning/40 bg-warning-soft text-warning-foreground hover:bg-warning-soft/80"
+          disabled={settled}
+          onClick={doHold}
+        >
           <Keycap>F5</Keycap> <Pause className="size-4" /> Hold
         </Button>
-        <Button variant="outline" className="h-10" disabled={settled} onClick={doKot}>
+        <Button className="h-10" disabled={settled} onClick={doKot}>
           <Keycap>F3</Keycap> <ChefHat className="size-4" /> KOT & Print
+        </Button>
+        <Button
+          variant="outline"
+          className="h-10 border-primary/30 bg-primary-soft text-primary-soft-foreground hover:bg-primary-soft/80"
+          disabled={settled}
+          onClick={doKotOnly}
+        >
+          <ChefHat className="size-4" /> Only KOT
         </Button>
         <Button
           variant="outline"
@@ -832,14 +861,22 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
         <Button
           variant="outline"
           className="h-10"
-          disabled={settled || !order.customerPhone}
-          title={order.customerPhone ? undefined : "Attach a customer phone number first"}
-          onClick={() => void store.sendEBill(order.id)}
+          disabled={settled}
+          onClick={() => {
+            // A native `disabled` button swallows the click entirely, so a
+            // captain with no customer phone on file just sees an inert
+            // button and no path forward. Opening the same CustomerDialog
+            // used elsewhere on this screen (see the customer summary
+            // above) lets them add it right here instead of hunting for
+            // where to enter it.
+            if (!order.customerPhone) {
+              setCustomerOpen(true);
+              return;
+            }
+            void store.sendEBill(order.id);
+          }}
         >
           <Send className="size-4" /> E-Bill
-        </Button>
-        <Button variant="outline" className="h-10" onClick={doReprint}>
-          <Printer className="size-4" /> Reprint
         </Button>
         <div className="ml-auto flex items-center gap-2">
           <span className="hidden text-[11px] text-muted-foreground sm:block">
@@ -875,12 +912,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
         }}
       />
 
-      <DiscountDialog
-        open={discountOpen}
-        onOpenChange={setDiscountOpen}
-        order={order}
-        subtotal={totals.subtotal}
-      />
+      <DiscountDialog open={discountOpen} onOpenChange={setDiscountOpen} order={order} />
       <CustomerDialog open={customerOpen} onOpenChange={setCustomerOpen} order={order} />
       <MoveTableDialog open={moveOpen} onOpenChange={setMoveOpen} order={order} />
       <MoveKotDialog round={moveKotRound} order={order} onClose={() => setMoveKotRound(null)} />
@@ -1047,7 +1079,7 @@ function CartGroup({
               >
                 <Printer className="size-3" />
               </button>
-              {order.type === "Dine In" ? (
+              {order.type === "Dine In" && order.status !== "Bill Generated" ? (
                 <button
                   type="button"
                   className="rounded p-0.5 hover:bg-surface-muted hover:text-foreground"
@@ -1110,7 +1142,11 @@ function CartGroup({
                 {l.addons?.length ? ` · + ${l.addons.map((a) => a.name).join(", ")}` : ""}
                 {l.originTable ? ` · from ${l.originTable}` : ""}
               </p>
-              {l.note ? <p className="text-[11px] italic text-warning">“{l.note}”</p> : null}
+              {l.note ? (
+                <p className="whitespace-pre-wrap break-words text-[11px] italic text-warning">
+                  “{l.note}”
+                </p>
+              ) : null}
             </div>
 
             <div className="flex items-center gap-2">
@@ -1157,34 +1193,20 @@ function CartGroup({
               {editable ? (
                 <div className="flex items-center gap-1">
                   {store.menuItems.find((m) => m.id === l.itemId)?.addonGroupIds?.length ? (
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="size-8"
-                      onClick={() => onAddon(l)}
-                      aria-label="Edit addons"
-                    >
+                    <IconButton label="Edit addons" className="size-8" onClick={() => onAddon(l)}>
                       <Tags className="size-3.5" />
-                    </Button>
+                    </IconButton>
                   ) : null}
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="size-8"
-                    onClick={() => onNote(l)}
-                    aria-label="Add note"
-                  >
+                  <IconButton label="Add note" className="size-8" onClick={() => onNote(l)}>
                     <StickyNote className="size-3.5" />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
+                  </IconButton>
+                  <IconButton
+                    label="Remove line"
                     className="size-8 text-destructive"
                     onClick={() => store.removeLine(order.id, l.id, "keyboard-billing")}
-                    aria-label="Remove line"
                   >
                     <Trash2 className="size-3.5" />
-                  </Button>
+                  </IconButton>
                 </div>
               ) : (
                 <span className="w-[4.25rem] text-right text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -1293,19 +1315,17 @@ function DiscountDialog({
   open,
   onOpenChange,
   order,
-  subtotal,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   order: Order;
-  subtotal: number;
 }) {
   const store = useStore();
   const [mode, setMode] = useState<"percent" | "flat">("percent");
   const [value, setValue] = useState(10);
 
-  const apply = (label: string, amount: number) => {
-    store.applyDiscount(order.id, label, Math.round(amount * 100) / 100);
+  const apply = (label: string, type: "percent" | "flat", amountValue: number) => {
+    store.applyDiscount(order.id, label, type, amountValue);
     onOpenChange(false);
   };
 
@@ -1340,10 +1360,7 @@ function DiscountDialog({
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                apply(
-                  mode === "percent" ? `${value}% off` : "Flat discount",
-                  mode === "percent" ? (subtotal * value) / 100 : value,
-                );
+                apply(mode === "percent" ? `${value}% off` : "Flat discount", mode, value);
               }
             }}
             className={focusRing}
@@ -1361,7 +1378,7 @@ function DiscountDialog({
                     size="sm"
                     variant="outline"
                     onClick={() =>
-                      apply(p.code, p.type === "percent" ? (subtotal * p.value) / 100 : p.value)
+                      apply(p.code, p.type === "percent" ? "percent" : "flat", p.value)
                     }
                   >
                     {p.code}
@@ -1372,16 +1389,13 @@ function DiscountDialog({
         ) : null}
         <DialogFooter>
           {order.discount ? (
-            <Button variant="ghost" onClick={() => apply("", 0)}>
+            <Button variant="ghost" onClick={() => apply("", "flat", 0)}>
               Remove discount
             </Button>
           ) : null}
           <Button
             onClick={() =>
-              apply(
-                mode === "percent" ? `${value}% off` : "Flat discount",
-                mode === "percent" ? (subtotal * value) / 100 : value,
-              )
+              apply(mode === "percent" ? `${value}% off` : "Flat discount", mode, value)
             }
           >
             Apply
@@ -1660,18 +1674,24 @@ export function NoteDialog({
           <DialogTitle>Kitchen note</DialogTitle>
           <DialogDescription>{line?.name}</DialogDescription>
         </DialogHeader>
-        <Input
+        <Textarea
           autoFocus
+          rows={3}
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="Less spicy, no onion…"
           onKeyDown={(e) => {
-            if (e.key === "Enter" && line) {
+            // A single-line Input used to make a longer note hard to read
+            // while typing (horizontal scroll within the field) - Shift+Enter
+            // still inserts a real line break for anyone who wants one, plain
+            // Enter keeps saving as the visible "Enter" hint below promises.
+            if (e.key === "Enter" && !e.shiftKey && line) {
+              e.preventDefault();
               store.setLineNote(order.id, line.id, text.trim());
               onClose();
             }
           }}
-          className={focusRing}
+          className={cn("resize-none", focusRing)}
         />
         <DialogFooter>
           <Button
@@ -1704,9 +1724,37 @@ export function AddonPicker({
   value: SelectedAddon[];
   onChange: (next: SelectedAddon[]) => void;
 }) {
+  const [query, setQuery] = useState("");
+  // Only worth showing once there's enough to actually search through - a
+  // 3-option addon group doesn't need a search box above it. Counts across
+  // every group here, not per-group, since a customer request ("no, the
+  // other cheese") is just as often "which group was that even in" as it
+  // is "which option in this one group."
+  const totalOptions = groups.reduce((s, g) => s + g.options.length, 0);
+  const q = query.trim().toLowerCase();
+  const visibleGroups = q
+    ? groups
+        .map((g) => ({ ...g, options: g.options.filter((o) => o.name.toLowerCase().includes(q)) }))
+        .filter((g) => g.options.length > 0)
+    : groups;
+
   return (
     <>
-      {groups.map((group) => (
+      {totalOptions > 8 ? (
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="h-9 pl-8"
+            placeholder="Search addons…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+      ) : null}
+      {q && !visibleGroups.length ? (
+        <p className="text-xs text-muted-foreground">No addons match "{query}"</p>
+      ) : null}
+      {visibleGroups.map((group) => (
         <div key={group.id}>
           <Label>
             {group.name}{" "}
@@ -2068,12 +2116,16 @@ function SettleDialog({
   const store = useStore();
   const navigate = useNavigate();
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
+  const [tip, setTip] = useState(0);
   const paid = splits.reduce((s, p) => s + p.amount, 0);
   const due = Math.round((grand - paid) * 100) / 100;
   const upiAmount = splits.filter((p) => p.mode === "UPI").reduce((s, p) => s + p.amount, 0);
 
   useEffect(() => {
-    if (open) setSplits([]);
+    if (open) {
+      setSplits([]);
+      setTip(0);
+    }
   }, [open]);
 
   const add = (mode: PaymentSplit["mode"]) =>
@@ -2124,14 +2176,13 @@ function SettleDialog({
                 }
                 className={cn("num h-9 text-right", focusRing)}
               />
-              <Button
-                size="icon"
-                variant="ghost"
+              <IconButton
+                label="Remove split"
                 className="size-9"
                 onClick={() => setSplits((s) => s.filter((_, j) => j !== i))}
               >
                 <Trash2 className="size-4" />
-              </Button>
+              </IconButton>
             </li>
           ))}
         </ul>
@@ -2144,11 +2195,24 @@ function SettleDialog({
           />
         </div>
 
+        {order.type === "Dine In" ? (
+          <div className="space-y-1.5">
+            <Label>Tip (optional)</Label>
+            <Input
+              type="number"
+              className="num"
+              value={tip || ""}
+              placeholder="0"
+              onChange={(e) => setTip(Math.max(0, Number(e.target.value) || 0))}
+            />
+          </div>
+        ) : null}
+
         <DialogFooter>
           <Button
             disabled={splits.length === 0 || due > 0.5}
             onClick={() => {
-              store.settleOrder(order.id, splits);
+              store.settleOrder(order.id, splits, tip || undefined);
               onOpenChange(false);
               const nextId = store.startDefaultOrder();
               navigate({

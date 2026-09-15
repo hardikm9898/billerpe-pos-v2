@@ -1,15 +1,39 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
+import QRCode from "qrcode";
 
 import * as seed from "./data";
 import * as stockSeed from "./stock-seed";
 import * as opsSeed from "./ops-seed";
-import { nowStamp, todayLabel } from "./format";
+import { nowStamp, todayLabel, isoToDMY } from "./format";
 import {
   ApiError,
+  API_BASE_URL,
   tableApi,
   menuApi,
+  paymentModeApi,
+  type RawPaymentMode,
+  paymentModeDefaultApi,
+  type RawPaymentModeDefault,
+  invoiceFormateApi,
+  type RawInvoiceFormate,
+  kotFormatApi,
+  type RawKotFormate,
+  billChargeApi,
+  type RawBillChargeRule,
+  notificationSettingApi,
+  type RawNotificationSetting,
+  rolePermissionApi,
+  type RawRolePermissionDefault,
   userApi,
   orderApi,
   hotelApi,
@@ -22,6 +46,11 @@ import {
   rawMaterialApi,
   supplierApi,
   purchaseOrderApi,
+  requisitionApi,
+  type RawRequisition,
+  editSettledOrderApi,
+  refundDueApi,
+  type RawRefundDueOrder,
   stockInHandApi,
   wastageApi,
   semiFinishedApi,
@@ -30,7 +59,15 @@ import {
   expenseApi,
   cashSessionApi,
   orderHistoryApi,
+  reservationApi,
+  type RawReservation,
+  queueApi,
+  type RawQueueEntry,
+  auditLogApi,
   promoCodeApi,
+  localPrintApi,
+  localServerApi,
+  type RawLocalServerStatus,
   type RawOrderDetail,
   type RawCashSession,
   type RawCashMovement,
@@ -55,12 +92,14 @@ import {
   type RawTable,
   type RawTableCategory,
   type RawMenuCategory,
+  type RawMenuCatalog,
   type RawMenuItem,
   type RawMenuItemVariant,
   type RawMenuItemAddonGroup,
   type RawVariant,
   type RawAddonGroup,
   type RawHotelUser,
+  setStoredAuthToken,
 } from "@/lib/api";
 import type { KdsTicketPayload } from "@/lib/kdsSocket";
 import type {
@@ -68,9 +107,16 @@ import type {
   AppNotification,
   BillChargeRule,
   DueBill,
+  RefundDue,
   InvoiceFormat,
+  InvoiceLine,
+  InvoiceLineContent,
+  KotFormat,
+  KotLine,
+  KotLineContent,
   Kitchen,
   PaymentModeConfig,
+  PaymentModeDefaultRule,
   PromoCode,
   ServiceChargeRule,
   TaxRule,
@@ -82,13 +128,11 @@ import type {
   StockAdjustment,
   StockMovement,
   StockUnit,
-  ApprovalRule,
   AuditLog,
   CashMovement,
   CashSession,
   ConnectionState,
   Customer,
-  Device,
   Expense,
   ExpenseHead,
   Kot,
@@ -108,6 +152,8 @@ import type {
   Printer,
   PurchaseOrder,
   PurchaseLine,
+  QueueEntry,
+  QueueStatus,
   RawMaterial,
   Recipe,
   Reservation,
@@ -118,7 +164,6 @@ import type {
   SpecialPermission,
   StandardAction,
   Supplier,
-  SyncItem,
   TableCategory,
   TableStatus,
   TableGridView,
@@ -129,6 +174,19 @@ import type {
 
 let seq = 1000;
 const uid = (p: string) => `${p}-${++seq}`;
+
+// A line's kotRound used to be assigned at ADD time as `kotRounds + 1` -
+// "whichever round fires next gets this item." That worked as long as a
+// KOT send always meant "everything currently pending," but item-wise KOT
+// sending (generateKot's optional `lineIds`) breaks that: if only SOME of
+// the pending lines get sent, the rest need to stay recognizably "not sent
+// yet" under whatever round number actually ends up firing them later,
+// which isn't knowable at add time. UNSENT_ROUND sidesteps that by not
+// assigning a real round at all until a line is actually included in a
+// successful send - every existing `kotRound <= kotRounds` / `kotRound >
+// kotRounds` check elsewhere in this file keeps working unmodified, since
+// Infinity is always ">" any real round count and never "<=" one.
+const UNSENT_ROUND = Infinity;
 
 /** The two billing screens each carry their own permission grant - callers
  * that mutate a cart line pass which one they're on so the right module's
@@ -156,6 +214,12 @@ interface State {
    * replaced wholesale by a server reload. Dashboard/Reports read this
    * for historical sales figures instead of `orders`. */
   orderHistory: Order[];
+  /** Server pagination state for `orderHistory` - see
+   * loadOrderHistoryFromServer's own comment. `orderHistory` only ever
+   * holds the current page's rows, not the whole history. */
+  orderHistoryPage: number;
+  orderHistoryTotalPages: number;
+  orderHistoryTotal: number;
   kots: Kot[];
   menuItems: MenuItem[];
   menuCategories: MenuCategory[];
@@ -164,7 +228,24 @@ interface State {
   users: User[];
   customers: Customer[];
   reservations: Reservation[];
+  queue: QueueEntry[];
+  /** Full-range set (Dashboard/Expense Heads/the expense report all need
+   * every entry in whatever range they're looking at, not one page of it -
+   * loaded via expenseApi's own `all: true` mode, see loadExpensesFromServer). */
   expenses: Expense[];
+  /** The Expense Entries screen's own paginated view - a genuinely
+   * different concern from `expenses` above (one page of rows for
+   * whatever filters are currently set), populated by
+   * loadExpenseEntriesPage, not loadExpensesFromServer. */
+  expenseEntriesPageRows: Expense[];
+  expenseEntriesPage: number;
+  expenseEntriesTotalPages: number;
+  expenseEntriesTotal: number;
+  /** Aggregate totals for the CURRENT filters (not just the visible page) -
+   * same figures controller/expense.js's allEntry always computes over the
+   * full filtered set regardless of page. */
+  expenseEntriesTotalMoneyIn: number;
+  expenseEntriesTotalExpense: number;
   expenseHeads: ExpenseHead[];
   rawMaterials: RawMaterial[];
   recipes: Recipe[];
@@ -178,13 +259,18 @@ interface State {
   productionRuns: ProductionRun[];
   requisitions: FranchiseRequisition[];
   cashSessions: CashSession[];
-  devices: Device[];
   printers: Printer[];
-  syncItems: SyncItem[];
+  // Real local-server/sync status (billerpe-local-exe's GET
+  // /localServerStatus - see api.ts's RawLocalServerStatus) - null until
+  // loadServerStatusFromServer's first successful call. Replaced the old
+  // devices/syncItems mock arrays (seed-only, no backend of any kind ever
+  // existed for a per-device list or a per-record sync queue - the real
+  // architecture is one active server per hotel with a periodic full
+  // re-check, not either of those shapes).
+  localServerStatus: RawLocalServerStatus | null;
   notifications: AppNotification[];
   notificationSettings: NotificationSetting[];
   auditLogs: AuditLog[];
-  approvalRules: ApprovalRule[];
   connection: ConnectionState;
   maxOfflineDays: number;
   /* operations */
@@ -200,16 +286,22 @@ interface State {
   packagingChargeRule: BillChargeRule;
   taxRules: TaxRule[];
   invoiceFormat: InvoiceFormat;
+  /** Dynamic KOT format (Task 1) - same header/footer-lines shape as
+   * invoiceFormat, loaded/saved separately since it's a different backend
+   * table (hms_kot_formate_mst) with a different content vocabulary. */
+  kotFormat: KotFormat;
   /** RestaurantSetting.qr_code_open_on_settle - auto-shows a scannable UPI
    * QR in the settle dialog when UPI is selected. */
   qrOnSettle: boolean;
   promoCodes: PromoCode[];
   paymentModes: PaymentModeConfig[];
+  paymentModeDefaults: PaymentModeDefaultRule[];
   kitchens: Kitchen[];
   menus: Menu[];
   displayMode: "Keyboard" | "Touch";
   menuImages: boolean;
   dueBills: DueBill[];
+  refundDueOrders: RefundDue[];
   eBillCredit: number;
   tableGridView: TableGridView;
   keyboardOnly: boolean;
@@ -231,6 +323,9 @@ const initialState: State = {
   // means every order in this list, once loaded, is real.
   orders: [],
   orderHistory: [],
+  orderHistoryPage: 1,
+  orderHistoryTotalPages: 1,
+  orderHistoryTotal: 0,
   // Same seed-pollution issue as `orders` above: KDS was only ever wired
   // for real-time ticket receipt (a new KOT fired this session, or a
   // ticket pushed over the socket) - both paths only ever prepend onto
@@ -248,8 +343,15 @@ const initialState: State = {
   addonGroups: seed.addonGroups,
   users: seed.users,
   customers: seed.customers,
-  reservations: seed.reservations,
+  reservations: [],
+  queue: [],
   expenses: seed.expenses,
+  expenseEntriesPageRows: [],
+  expenseEntriesPage: 1,
+  expenseEntriesTotalPages: 1,
+  expenseEntriesTotal: 0,
+  expenseEntriesTotalMoneyIn: 0,
+  expenseEntriesTotalExpense: 0,
   expenseHeads: seed.expenseHeads,
   rawMaterials: seed.rawMaterials,
   recipes: stockSeed.recipes,
@@ -267,13 +369,11 @@ const initialState: State = {
   // real backend now that one exists, so starting empty means every
   // session shown, once loaded, is real.
   cashSessions: [],
-  devices: seed.devices,
   printers: seed.printers,
-  syncItems: seed.syncItems,
+  localServerStatus: null,
   notifications: seed.notifications,
   notificationSettings: seed.notificationSettings,
   auditLogs: seed.auditLogs,
-  approvalRules: seed.approvalRules,
   connection: "online",
   maxOfflineDays: seed.OFFLINE_SETTINGS.maxOfflineDays,
   serviceCharge: opsSeed.serviceCharge,
@@ -282,14 +382,17 @@ const initialState: State = {
   packagingChargeRule: opsSeed.packagingChargeRule,
   taxRules: opsSeed.taxRules,
   invoiceFormat: opsSeed.invoiceFormat,
+  kotFormat: opsSeed.kotFormat,
   qrOnSettle: false,
   promoCodes: opsSeed.promoCodes,
   paymentModes: opsSeed.paymentModes,
+  paymentModeDefaults: [],
   kitchens: opsSeed.kitchens,
   menus: opsSeed.menus,
   displayMode: "Touch",
   menuImages: true,
   dueBills: opsSeed.dueBills,
+  refundDueOrders: [],
   eBillCredit: seed.EBILL_SETTINGS.startingCredit,
   tableGridView: "Tabs",
   keyboardOnly: false,
@@ -357,7 +460,16 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
   const subtotal = order.itemised
     ? order.lines.reduce((s, l) => s + lineTotal(l), 0)
     : (order.fallbackTotal ?? 0);
-  const discount = order.discount?.amount ?? 0;
+  // A percent discount recomputes off the CURRENT subtotal every time
+  // instead of trusting the frozen `amount` from whenever it was applied -
+  // see Order["discount"]'s own comment for why (a live-reported bug: the
+  // discount amount stayed pinned at its pre-add value after adding another
+  // item post-discount). A flat discount, or one reloaded from the backend
+  // with no `type` at all, still just uses its resolved `amount` as-is.
+  const discount =
+    order.discount?.type === "percent"
+      ? Math.round(((subtotal * (order.discount.value ?? 0)) / 100) * 100) / 100
+      : (order.discount?.amount ?? 0);
 
   const rule = settings.serviceCharge;
   const serviceBase = rule.calculationOn === "core" ? subtotal : subtotal - discount;
@@ -374,10 +486,12 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
         ? Math.round(((serviceBase * rule.value) / 100) * 100) / 100
         : rule.value;
 
-  // a manual per-order override (set via `setCharges`) always wins over the computed rule
-  const delivery =
-    order.deliveryCharge ??
-    chargeAmount(settings.deliveryChargeRule, subtotal, discount, order.type);
+  // Delivery charge is switched off entirely (not needed right now, per
+  // explicit sign-off) - forced to 0 here regardless of deliveryChargeRule
+  // or any per-order override, rather than only hiding the settings UI, so
+  // a rule left active from before this change (or a stray setCharges
+  // call) can never sneak a delivery line back onto a bill.
+  const delivery = 0;
   const packaging =
     order.packagingCharge ??
     chargeAmount(settings.packagingChargeRule, subtotal, discount, order.type);
@@ -385,7 +499,6 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
   const taxBase =
     Math.max(0, subtotal - discount) +
     (rule.taxOnCharge ? service : 0) +
-    (settings.deliveryChargeRule.taxOnCharge ? delivery : 0) +
     (settings.packagingChargeRule.taxOnCharge ? packaging : 0);
   const gstOn = settings.invoiceFormat.gstCalculation;
   const taxLines = gstOn
@@ -403,6 +516,35 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
     Math.round((Math.max(0, subtotal - discount) + service + delivery + packaging + tax) * 100) /
     100;
   return { subtotal, discount, service, delivery, packaging, taxLines, tax, grand };
+}
+
+// The real `cart.taxes` payload holdOrder/kotOrder/adminOrder/AdminOrder
+// (uat-backend-v2/controller/kto.js) need to actually persist OrderTax
+// rows - every call site here used to hardcode `taxes: []` (api.ts's own
+// comment called this out: "empty until Tax Configuration is wired"), so
+// no tax ever got saved against an order at all, regardless of active tax
+// rules. That's invisible on a printed/PDF bill (doPrintBill recomputes
+// taxLines fresh from live tax-rule config, never reads persisted
+// OrderTax back), but the cloud-rendered customer e-bill webview
+// (getBillViewData) has no access to this app's tax-rule config and reads
+// only the persisted OrderTax rows - so this was the reason taxes never
+// showed there. `id` must be the real numeric TaxType id (TaxRule.id,
+// stringified from the server row) for the FK to resolve; `tax_type`/
+// `tax`/`tax_value` are inconsistently read between addOrderTax (new
+// order) and updateOrderTax (existing order) server-side - sending all
+// three covers either path without needing to fix that backend
+// inconsistency here.
+function buildCartTaxes(totals: BillTotals, taxRules: TaxRule[]) {
+  return totals.taxLines.map((tx) => {
+    const rule = taxRules.find((r) => r.id === tx.id);
+    return {
+      id: Number(tx.id),
+      amount: tx.amount,
+      tax_type: rule?.type === "percent" ? "pr" : "fix",
+      tax_value: rule?.value ?? tx.amount,
+      tax: rule?.value ?? tx.amount,
+    };
+  });
 }
 
 /** Category is the single source of truth for kitchen routing — falls back to the default kitchen. */
@@ -465,6 +607,13 @@ interface Ctx extends State {
   ) => void;
   /* auth */
   registerDevice: () => void;
+  /** Clears cached "this device is registered" state (both in-memory and
+   * `billerpe.session`) without a full page reload - for when the exe's own
+   * `/health` reports `registered:false` while this browser still thinks
+   * it's registered (a fresh install/reinstall wiped the exe's local DB -
+   * see login.tsx's boot-time reconciliation). Drops any cached userId too;
+   * re-registering is a fresh start, not a resume. */
+  resetDeviceRegistration: () => void;
   login: (userId?: string) => void;
   /** Resolves the real hotelUser the current session's cookie belongs to
    * (GET /getUserAccess), adds/updates it in `users`, and returns its id -
@@ -491,7 +640,9 @@ interface Ctx extends State {
   startDefaultOrder: () => string;
   setOrderType: (orderId: string, type: OrderType) => void;
   addLine: (orderId: string, input: AddLineInput) => void;
-  changeQty: (orderId: string, lineId: string, delta: number, module: BillingModule) => void;
+  /** Returns false if blocked by the already-sent-to-kitchen permission
+   * guard (see removeLine's own comment - same reasoning applies here). */
+  changeQty: (orderId: string, lineId: string, delta: number, module: BillingModule) => boolean;
   setLineQty: (orderId: string, lineId: string, qty: number, module: BillingModule) => void;
   setLineNote: (orderId: string, lineId: string, note: string) => void;
   setLinePrice: (orderId: string, lineId: string, price: number) => void;
@@ -500,39 +651,116 @@ interface Ctx extends State {
     lineId: string,
     addons: NonNullable<OrderLine["addons"]>,
   ) => void;
-  removeLine: (orderId: string, lineId: string, module: BillingModule) => void;
+  /** Returns false if blocked by the already-sent-to-kitchen permission
+   * guard (nothing removed), true otherwise - callers that need to react
+   * to the order becoming empty (e.g. navigating away) can't tell those
+   * two outcomes apart from a void return. */
+  removeLine: (orderId: string, lineId: string, module: BillingModule, reason?: string) => boolean;
 
   holdOrder: (orderId: string) => void;
   saveOrder: (orderId: string) => void;
-  cancelOrder: (orderId: string) => void;
+  /** Returns false if blocked by the orders.deleteOrder special permission
+   * - only actually gates when the order has at least one real fired KOT
+   * line; an empty/draft order cancels freely regardless of role. */
+  cancelOrder: (orderId: string, reason?: string) => boolean;
   /** Silently frees the table/drops the draft if it's still empty - see
    * freeEmptyDraft's own comment on why this stays quiet unlike cancelOrder. */
   freeIfEmpty: (orderId: string) => void;
   removeOrder: (id: string) => void;
   removeOrders: (ids: string[]) => void;
   remakeOrderSequence: () => void;
-  generateKot: (orderId: string) => void;
-  applyDiscount: (orderId: string, label: string, amount: number) => void;
+  generateKot: (orderId: string, options?: { print?: boolean; lineIds?: string[] }) => void;
+  /** `type`/`value` are the ORIGINAL input (e.g. "percent", 10) - stored so
+   * orderTotals can keep recomputing the discount amount as the order's
+   * subtotal changes, rather than freezing it at today's subtotal. Pass
+   * `type: "flat"` (value === the flat amount) for a flat discount or a
+   * promo code that isn't percent-based. */
+  applyDiscount: (orderId: string, label: string, type: "percent" | "flat", value: number) => void;
   setCustomer: (orderId: string, name: string, phone: string) => void;
-  setCharges: (orderId: string, delivery: number, packaging: number) => void;
-  generateBill: (orderId: string, options?: { print?: boolean }) => Promise<void>;
-  settleOrder: (orderId: string, payments: PaymentSplit[]) => void;
+  setCharges: (orderId: string, packaging: number) => void;
+  /** Resolves { ok: true, backendId } on success (ok:false on any failure/
+   * guard) - the backendId is handed back explicitly rather than read off
+   * `s.orders` afterward, since `s` is this render's stale snapshot and
+   * won't reflect the patch() this call itself just made (see doPrintBill's
+   * own comment on the same gotcha). Lets sendEBill auto-generate the bill
+   * first without a second, separately-stale order lookup. */
+  generateBill: (
+    orderId: string,
+    options?: { print?: boolean },
+  ) => Promise<{ ok: boolean; backendId?: number }>;
+  /** tip is Dine In only (settleBills' own contract - Pickup settles
+   * through adminOrder instead, a different call this doesn't carry tip
+   * into) and deliberately separate from `payments`: it's not part of the
+   * cash+upi+card+due split that must sum to the bill total, an extra
+   * amount on top instead. See model/order.js's own comment (uat-backend-v2)
+   * on why. */
+  settleOrder: (orderId: string, payments: PaymentSplit[], tip?: number) => void;
+  /** orders.reopenSettled - copies a settled order (from orderHistory) into
+   * a local, editable draft in `orders` and returns its local id, or
+   * undefined if the order/permission isn't there. Caller navigates to
+   * that id's order screen. */
+  startEditSettledOrder: (orderId: string) => string | undefined;
+  saveSettledOrderEdits: (localOrderId: string) => Promise<void>;
+  cancelEditSettledOrder: (localOrderId: string) => void;
+  loadRefundDueOrdersFromServer: () => Promise<void>;
+  settleRefundDue: (id: string) => void;
   mergeTables: (sourceTableId: string, destTableId: string) => void;
   moveKot: (orderId: string, round: number, destTableId: string) => Promise<void>;
   transferTable: (orderId: string, destTableId: string) => void;
   /* kds */
   setKotStatus: (kotId: string, status: Kot["status"]) => void;
+  /** Kitchen can't make an item (e.g. out of stock) - marks the KOT
+   * Cancelled and notifies front-of-house, who still has to separately
+   * remove it from the actual bill (KDS state is its own local board, not
+   * tied to real order/billing state - see setKotStatus's own comment). */
+  rejectKot: (kotId: string, reason?: string) => void;
   receiveKdsTicket: (payload: KdsTicketPayload) => void;
   receiveKdsOrderComplete: (backendOrderId: number) => void;
   /* reservations */
-  addReservation: (r: Omit<Reservation, "id">) => void;
-  setReservationStatus: (id: string, status: Reservation["status"]) => void;
-  setReleaseMode: (id: string, mode: "Manual" | "Auto") => void;
+  loadReservationsFromServer: () => Promise<void>;
+  createReservation: (r: {
+    customerName: string;
+    mobile: string;
+    email: string;
+    party: number;
+    tableIds: string[];
+    date: string;
+    startTime: string;
+    endTime: string;
+    totalAmount: number;
+    advance: number;
+    gstNo: string;
+  }) => Promise<void>;
+  updateReservation: (
+    id: string,
+    r: {
+      customerName: string;
+      mobile: string;
+      email: string;
+      party: number;
+      tableIds: string[];
+      date: string;
+      startTime: string;
+      endTime: string;
+      totalAmount: number;
+      advance: number;
+      gstNo: string;
+    },
+  ) => Promise<void>;
+  cancelReservation: (id: string) => Promise<void>;
+  /* waitlist queue */
+  loadQueueFromServer: () => Promise<void>;
+  addToQueue: (name: string, mobile: string, partySize: number) => Promise<void>;
+  seatQueueEntry: (id: string) => Promise<void>;
+  markQueueEntryNoShow: (id: string) => Promise<void>;
+  cancelQueueEntry: (id: string) => Promise<void>;
+  callQueueEntry: (id: string) => Promise<void>;
+  clearQueue: () => Promise<void>;
   /* cash */
   openSession: (float: number) => void;
   addCash: (amount: number, reason: string) => void;
   withdrawCash: (amount: number, reason: string) => boolean;
-  attachExpense: (headId: string, amount: number, note: string) => void;
+  attachExpense: (headId: string, amount: number, note: string, date?: string) => Promise<boolean>;
   closeSession: (counted: number, reason: string) => void;
   sessionBalance: () => number;
   openSessionRecord: () => CashSession | undefined;
@@ -552,9 +780,11 @@ interface Ctx extends State {
       active?: boolean;
     }[],
     menuId: string,
-  ) => void;
+    onProgress?: (done: number, total: number) => void,
+  ) => Promise<void>;
   upsertMenuCategory: (c: MenuCategory) => void;
   removeMenuCategory: (id: string) => void;
+  removeMenuCategories: (ids: string[]) => void;
   upsertVariant: (v: VariantOption) => void;
   removeVariant: (id: string) => void;
   upsertAddonGroup: (g: AddonGroup) => void;
@@ -567,29 +797,63 @@ interface Ctx extends State {
   upsertTableCategory: (c: TableCategory) => void;
   removeTableCategory: (id: string) => void;
   loadTablesFromServer: () => Promise<void>;
+  refreshOrderFromServer: (orderId: string) => Promise<void>;
   upsertUser: (u: User, newPassword?: string) => void;
   loadUsersFromServer: () => Promise<void>;
   loadInvoiceFormatFromServer: () => Promise<void>;
+  loadKotFormatFromServer: () => Promise<void>;
   loadDueBillsFromServer: () => Promise<void>;
   loadCustomersFromServer: () => Promise<void>;
   loadKitchensFromServer: () => Promise<void>;
   loadPrintersFromServer: () => Promise<void>;
   loadTaxRulesFromServer: () => Promise<void>;
+  loadPaymentModesFromServer: () => Promise<void>;
+  loadPaymentModeDefaultsFromServer: () => Promise<void>;
+  loadBillChargeRulesFromServer: () => Promise<void>;
+  loadNotificationSettingsFromServer: () => Promise<void>;
+  loadRolePermissionsFromServer: () => Promise<void>;
   loadServiceChargeFromServer: () => Promise<void>;
   loadUnitsFromServer: () => Promise<void>;
   loadRawMaterialsFromServer: () => Promise<void>;
   loadSuppliersFromServer: () => Promise<void>;
   loadPurchaseOrdersFromServer: () => Promise<void>;
+  loadRequisitionsFromServer: () => Promise<void>;
   loadWastageFromServer: () => Promise<void>;
   loadSemiFinishedFromServer: () => Promise<void>;
   loadRecipesFromServer: () => Promise<void>;
   loadExpenseHeadsFromServer: () => Promise<void>;
+  /** Full-range load for Dashboard/Expense Heads/the expense report - NOT
+   * the paginated entries screen, see loadExpenseEntriesPage for that. */
   loadExpensesFromServer: () => Promise<void>;
-  loadOrderHistoryFromServer: () => Promise<void>;
+  /** The Expense Entries screen's own paginated + filtered load - populates
+   * expenseEntriesPageRows/expenseEntriesPage/etc, not `expenses`. */
+  loadExpenseEntriesPage: (params: {
+    from: string;
+    to: string;
+    page: number;
+    limit: number;
+    expenseHeadId?: string;
+    paymentMode?: Expense["mode"];
+    userId?: string;
+  }) => Promise<void>;
+  /** Every entry matching the given filters, no pagination - for CSV
+   * export ONLY. Not stored in state; the caller builds the file directly
+   * from the returned array. */
+  loadAllExpensesForExport: (params: {
+    from: string;
+    to: string;
+    expenseHeadId?: string;
+    paymentMode?: Expense["mode"];
+    userId?: string;
+  }) => Promise<Expense[]>;
+  loadOrderHistoryFromServer: (page?: number, search?: string) => Promise<void>;
   loadPromoCodesFromServer: () => Promise<void>;
   loadEBillCreditFromServer: () => Promise<void>;
-  upsertExpense: (e: Expense) => void;
-  upsertExpenseHead: (h: ExpenseHead) => void;
+  upsertExpense: (e: Expense, date?: string) => Promise<boolean>;
+  deleteExpense: (id: string, reason?: string) => Promise<boolean>;
+  upsertExpenseHead: (h: ExpenseHead) => Promise<boolean>;
+  removeExpenseHead: (id: string) => Promise<void>;
+  removeExpenseHeads: (ids: string[]) => Promise<void>;
   upsertRawMaterial: (m: RawMaterial) => void;
   upsertSupplier: (s: Supplier) => void;
   upsertPurchaseOrder: (p: PurchaseOrder) => void;
@@ -628,18 +892,12 @@ interface Ctx extends State {
   fulfilRequisition: (id: string) => void;
   /* system */
   setConnection: (state: ConnectionState) => void;
-  syncNow: () => void;
-  retrySync: (id?: string) => void;
-  resolveConflict: (id: string) => void;
-  setDeviceStatus: (id: string, status: Device["status"]) => void;
-  renameDevice: (id: string, name: string) => void;
-  deregisterDevice: (id: string) => void;
+  loadServerStatusFromServer: () => Promise<void>;
+  forceSyncServer: () => Promise<void>;
   upsertPrinter: (p: Printer) => void;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   toggleNotificationSetting: (trigger: string, channel: "whatsapp" | "sms" | "inApp") => void;
-  toggleApprovalRule: (id: string) => void;
-  updateApprovalThreshold: (id: string, threshold: string, approver: Role) => void;
   /* operations */
   setDeliveryChargeRule: (rule: BillChargeRule) => void;
   setPackagingChargeRule: (rule: BillChargeRule) => void;
@@ -648,6 +906,11 @@ interface Ctx extends State {
   removeTaxRule: (id: string) => void;
   toggleTaxRule: (id: string) => void;
   setInvoiceFormat: (fmt: InvoiceFormat) => void;
+  setKotFormat: (fmt: KotFormat) => void;
+  /** Resolves to the new logoUrl (undefined on failure) - InvoiceFormatSection
+   * needs this back directly to refresh its own local draft copy of
+   * invoiceFormat, which this action's patch() alone doesn't reach. */
+  uploadHotelLogo: (file: File) => Promise<string | undefined>;
   setQrOnSettle: (on: boolean) => void;
   setGstCalculation: (on: boolean) => void;
   upsertPromo: (promo: PromoCode) => void;
@@ -662,6 +925,18 @@ interface Ctx extends State {
   upsertPaymentMode: (mode: PaymentModeConfig) => void;
   removePaymentMode: (id: string) => void;
   setPaymentModeActive: (id: string, active: boolean) => void;
+  saveDefaultPaymentMode: (
+    orderType: OpsOrderType,
+    tableCategoryId: string | undefined,
+    paymentModeId: string,
+  ) => void;
+  removeDefaultPaymentMode: (id: string) => void;
+  /** Table-category override (if one exists for `tableCategoryId`) wins over
+   * the order type's own base default, which wins over the first active
+   * mode - same fallback chain PaymentSplitEditor's "Add payment mode"
+   * button already had ("Cash" as the last resort), just with real
+   * defaults inserted ahead of it now. */
+  resolveDefaultPaymentMode: (orderType: OpsOrderType, tableCategoryId?: string) => string;
   upsertMenu: (menu: Menu) => void;
   removeMenu: (id: string) => void;
   setDefaultMenu: (id: string) => void;
@@ -703,6 +978,53 @@ function mapRawTable(t: RawTable): RestaurantTable {
     categoryId: String(t.table_catag_id),
     seats: t.capacity ?? 0,
     status: TABLE_STATUS_MAP[t.table_status],
+    reservedGuestName: t.reserved_name || undefined,
+    reservedGuestPhone: t.reserved_number || undefined,
+    qrVersion: t.qr_version,
+  };
+}
+
+// `table_name` entries can come back null if the join finds no matching
+// table row (e.g. one of the booked tables was since deleted) - filtered
+// out rather than rendering a blank row.
+function mapRawReservation(raw: RawReservation): Reservation {
+  return {
+    id: String(raw.booking_id),
+    customerName: raw.name,
+    mobile: raw.number,
+    email: raw.email || undefined,
+    party: raw.no_of_person,
+    tables: (raw.table_name || [])
+      .filter((t): t is { id: number; table_name: string } => !!t)
+      .map((t) => ({ id: String(t.id), label: t.table_name })),
+    date: raw.booking_date,
+    startTime: raw.start_time,
+    endTime: raw.end_time,
+    totalAmount: raw.totalAmount,
+    advance: raw.advance,
+    gstNo: raw.gst_no || undefined,
+  };
+}
+
+const QUEUE_STATUS_FROM_RAW: Record<RawQueueEntry["status"], QueueStatus> = {
+  waiting: "Waiting",
+  seated: "Seated",
+  no_show: "No Show",
+  cancelled: "Cancelled",
+};
+
+function mapRawQueueEntry(raw: RawQueueEntry): QueueEntry {
+  return {
+    id: `q-${raw.id}`,
+    backendId: raw.id,
+    name: raw.name,
+    mobile: raw.mobile,
+    partySize: raw.party_size,
+    status: QUEUE_STATUS_FROM_RAW[raw.status],
+    joinedAt: raw.joined_at,
+    calledAt: raw.called_at || undefined,
+    resolvedAt: raw.resolved_at || undefined,
+    notes: raw.notes || undefined,
   };
 }
 
@@ -714,13 +1036,256 @@ function mapRawTable(t: RawTable): RestaurantTable {
 // catalogue behind it.
 const DIETARY_VALUES: MenuDietary[] = ["Regular Veg", "Jain", "Non-Veg", "Vegan", "Swaminarayan"];
 
-function mapRawMenuCategory(c: RawMenuCategory, menuId: string): MenuCategory {
+// Defensive the same way mock/store.tsx's own kitchen-setting mapper is
+// (model/kitchen.js's JSON columns are confirmed live to sometimes come
+// back as JSON-encoded strings, not already-parsed arrays) - unlike that
+// mapper's order_type field, this one is a brand-new column with no other
+// consumer dictating its format, so it round-trips this app's own
+// OpsOrderType strings ("Dine-in"/"Pickup") verbatim rather than the
+// "dinin"/"pickup" convention kitchen.js happens to use.
+function parseJsonArray(v: unknown): string[] {
+  try {
+    const arr = typeof v === "string" ? JSON.parse(v || "[]") : Array.isArray(v) ? v : [];
+    return (arr as unknown[]).map((x) => String(x));
+  } catch {
+    return [];
+  }
+}
+
+function mapRawMenuCatalog(m: RawMenuCatalog): Menu {
+  return {
+    id: String(m.id),
+    name: m.name,
+    isDefault: m.is_default,
+    tableCategoryIds: parseJsonArray(m.table_category_ids),
+    orderTypes: parseJsonArray(m.order_types) as OpsOrderType[],
+  };
+}
+
+function mapRawPaymentMode(m: RawPaymentMode): PaymentModeConfig {
+  return {
+    id: String(m.id),
+    name: m.name,
+    active: m.active,
+    deletable: m.deletable,
+  };
+}
+
+const RAW_ORDER_TYPE_TO_OPS: Record<RawPaymentModeDefault["order_type"], OpsOrderType> = {
+  dinin: "Dine-in",
+  pickup: "Pickup",
+};
+const OPS_ORDER_TYPE_TO_RAW: Record<OpsOrderType, RawPaymentModeDefault["order_type"]> = {
+  "Dine-in": "dinin",
+  Pickup: "pickup",
+};
+
+function mapRawPaymentModeDefault(d: RawPaymentModeDefault): PaymentModeDefaultRule {
+  return {
+    id: String(d.id),
+    orderType: RAW_ORDER_TYPE_TO_OPS[d.order_type],
+    tableCategoryId: d.table_categ_id != null ? String(d.table_categ_id) : undefined,
+    paymentModeId: String(d.payment_mode_id),
+  };
+}
+
+// controller/kto.js#getHearderAndFooterDataBillView's own keyword
+// vocabulary for a headerLineN/footerLineN slot's stored value - anything
+// NOT in this map is treated as the literal text to print, matching that
+// function's own fallback branch (`else { data = el.value }`) exactly, so
+// a raw custom-text line round-trips correctly with no keyword collision.
+const INVOICE_CONTENT_TO_KEYWORD: Record<Exclude<InvoiceLineContent, "text">, string> = {
+  logo: "hotel_logo",
+  "outlet-name": "hotel_name",
+  address: "address",
+  gstin: "gst_no",
+  fssai: "fssai_no",
+  "upi-qr": "upiId",
+  marketing: "marketing_text",
+};
+const KEYWORD_TO_INVOICE_CONTENT: Partial<Record<string, InvoiceLineContent>> = Object.fromEntries(
+  Object.entries(INVOICE_CONTENT_TO_KEYWORD).map(([content, keyword]) => [keyword, content]),
+) as Partial<Record<string, InvoiceLineContent>>;
+
+// hms_invoice_formate_mst has exactly 10 fixed header/footer slots
+// (headerLine1..10/footerLine1..10, model/invoiceFormate.js) - not a
+// flexible list, so this app's own header/footer arrays have to be capped
+// here too (billing.tsx's "Add header/footer line" button enforces the
+// same cap on the way in, so this is a safety net, not the only guard).
+const INVOICE_LINE_SLOTS = 10;
+
+function mapRawInvoiceLines(raw: RawInvoiceFormate, slot: "header" | "footer"): InvoiceLine[] {
+  if (!raw) return [];
+  const linePrefix = slot === "header" ? "headerLine" : "footerLine";
+  const fontPrefix = slot === "header" ? "fontH" : "fontF";
+  const lines: InvoiceLine[] = [];
+  for (let i = 1; i <= INVOICE_LINE_SLOTS; i++) {
+    const rawValue = raw[`${linePrefix}${i}`];
+    const value = rawValue == null ? "" : String(rawValue).trim();
+    if (!value) continue;
+    const fontRaw = raw[`${fontPrefix}${i}`];
+    const fontSize = fontRaw ? parseInt(String(fontRaw), 10) || 12 : 12;
+    const content = KEYWORD_TO_INVOICE_CONTENT[value];
+    lines.push(
+      content
+        ? { id: `${slot}-${i}`, content, fontSize }
+        : { id: `${slot}-${i}`, content: "text", text: value, fontSize },
+    );
+  }
+  return lines;
+}
+
+// The inverse of mapRawInvoiceLines - always emits all 10 slots per side
+// (blank string for anything past the current line count), not just the
+// slots currently in use. POST /invoiceSetting only touches keys present
+// in its body (a partial Sequelize .update()), so omitting a now-empty
+// slot would leave whatever was PREVIOUSLY saved there untouched on the
+// backend instead of actually clearing it - confirmed by reading
+// controller/incoiceFormate.js's own `InvoiceFormate.update(req.body, ...)`.
+function toRawInvoiceFormatePayload(
+  header: InvoiceLine[],
+  footer: InvoiceLine[],
+): Record<string, string> {
+  const payload: Record<string, string> = {};
+  (["header", "footer"] as const).forEach((slot) => {
+    const lines = (slot === "header" ? header : footer).slice(0, INVOICE_LINE_SLOTS);
+    const linePrefix = slot === "header" ? "headerLine" : "footerLine";
+    const fontPrefix = slot === "header" ? "fontH" : "fontF";
+    for (let i = 1; i <= INVOICE_LINE_SLOTS; i++) {
+      const line = lines[i - 1];
+      const value = !line
+        ? ""
+        : line.content === "text"
+          ? (line.text ?? "")
+          : INVOICE_CONTENT_TO_KEYWORD[line.content];
+      payload[`${linePrefix}${i}`] = value;
+      payload[`${fontPrefix}${i}`] = `${line?.fontSize ?? 12}px`;
+    }
+  });
+  return payload;
+}
+
+// Dynamic KOT format (Task 1) - same headerLineN/footerLineN slot
+// convention as invoice format (hms_kot_formate_mst, model/kotFormate.js),
+// but this keyword vocabulary is purely a frontend convention: unlike the
+// invoice side (where controller/kto.js's own getHearderAndFooterDataBillView
+// re-renders these keywords server-side for the e-bill webview), nothing on
+// the backend interprets a KOT line's stored keyword - the configured
+// format is only ever rendered client-side (renderKotHeaderFooter, near
+// doPrintKot) into ready HTML strings, same as the invoice's own bonus-fix
+// print path. Kept as a keyword→content mapping anyway (not raw content
+// enums stored directly) so it round-trips through the same "unknown value
+// = literal custom text" fallback as the invoice mapping, for one
+// consistent convention across both format editors.
+const KOT_CONTENT_TO_KEYWORD: Record<Exclude<KotLineContent, "text">, string> = {
+  "outlet-name": "hotel_name",
+  address: "address",
+  "order-type": "order_type",
+  "customer-details": "customer_details",
+  "bill-no": "bill_no",
+  "token-number": "token_number",
+  "kot-number": "kot_number",
+  "billerpe-branding": "billerpe_branding",
+};
+const KEYWORD_TO_KOT_CONTENT: Partial<Record<string, KotLineContent>> = Object.fromEntries(
+  Object.entries(KOT_CONTENT_TO_KEYWORD).map(([content, keyword]) => [keyword, content]),
+) as Partial<Record<string, KotLineContent>>;
+
+const KOT_LINE_SLOTS = 10;
+
+function mapRawKotLines(raw: RawKotFormate, slot: "header" | "footer"): KotLine[] {
+  if (!raw) return [];
+  const linePrefix = slot === "header" ? "headerLine" : "footerLine";
+  const fontPrefix = slot === "header" ? "fontH" : "fontF";
+  const lines: KotLine[] = [];
+  for (let i = 1; i <= KOT_LINE_SLOTS; i++) {
+    const rawValue = raw[`${linePrefix}${i}`];
+    const value = rawValue == null ? "" : String(rawValue).trim();
+    if (!value) continue;
+    const fontRaw = raw[`${fontPrefix}${i}`];
+    const fontSize = fontRaw ? parseInt(String(fontRaw), 10) || 12 : 12;
+    const content = KEYWORD_TO_KOT_CONTENT[value];
+    lines.push(
+      content
+        ? { id: `${slot}-${i}`, content, fontSize }
+        : { id: `${slot}-${i}`, content: "text", text: value, fontSize },
+    );
+  }
+  return lines;
+}
+
+// The inverse of mapRawKotLines - see toRawInvoiceFormatePayload's own
+// comment for why every slot is always emitted (partial-update semantics
+// on POST /kotFormatSetting, controller/kotFormate.js).
+function toRawKotFormatePayload(header: KotLine[], footer: KotLine[]): Record<string, string> {
+  const payload: Record<string, string> = {};
+  (["header", "footer"] as const).forEach((slot) => {
+    const lines = (slot === "header" ? header : footer).slice(0, KOT_LINE_SLOTS);
+    const linePrefix = slot === "header" ? "headerLine" : "footerLine";
+    const fontPrefix = slot === "header" ? "fontH" : "fontF";
+    for (let i = 1; i <= KOT_LINE_SLOTS; i++) {
+      const line = lines[i - 1];
+      const value = !line
+        ? ""
+        : line.content === "text"
+          ? (line.text ?? "")
+          : KOT_CONTENT_TO_KEYWORD[line.content];
+      payload[`${linePrefix}${i}`] = value;
+      payload[`${fontPrefix}${i}`] = `${line?.fontSize ?? 12}px`;
+    }
+  });
+  return payload;
+}
+
+function mapRawNotificationSetting(n: RawNotificationSetting): NotificationSetting {
+  return {
+    trigger: n.trigger,
+    whatsapp: n.whatsapp,
+    sms: n.sms,
+    inApp: n.in_app,
+  };
+}
+
+// Folds the backend's (hotel, role) rows into the two Record<Role, ...>
+// shapes the rest of the app reads directly (store.rolePermissions /
+// store.roleSpecialPermissions). Missing roles/modules (a role that
+// hasn't been touched since a schema change, or before the migration
+// backfill has run against a given environment) fall back to the same
+// seed defaults the app always shipped with, rather than leaving a hole -
+// mirrors mapRawPurchaseOrder's own "carry forward, never drop to
+// undefined" caution.
+function mapRolePermissionDefaults(rows: RawRolePermissionDefault[]): {
+  rolePermissions: Record<Role, RolePermissions>;
+  roleSpecialPermissions: Record<Role, Partial<Record<SpecialPermission, boolean>>>;
+} {
+  const byRole = new Map(rows.map((r) => [r.role, r]));
+  const roles = Object.keys(seed.ROLE_PERMISSION_DEFAULTS) as Role[];
+  const rolePermissions = {} as Record<Role, RolePermissions>;
+  const roleSpecialPermissions = {} as Record<Role, Partial<Record<SpecialPermission, boolean>>>;
+  for (const role of roles) {
+    const row = byRole.get(role);
+    rolePermissions[role] = {
+      ...seed.ROLE_PERMISSION_DEFAULTS[role],
+      ...(row?.permissions as Partial<RolePermissions> | undefined),
+    };
+    roleSpecialPermissions[role] = {
+      ...seed.ROLE_SPECIAL_DEFAULTS[role],
+      ...(row?.special_permissions as Partial<Record<SpecialPermission, boolean>> | undefined),
+    };
+  }
+  return { rolePermissions, roleSpecialPermissions };
+}
+
+function mapRawMenuCategory(c: RawMenuCategory, fallbackMenuId: string): MenuCategory {
   return {
     id: String(c.id),
     name: c.menu_categ_nm,
     active: c.active,
     sortOrder: c.rank ?? c.id,
-    menuId,
+    // Real per-catalogue scope, not the single blanket id every row used
+    // to get stamped with - falls back only for a row somehow missing it
+    // (shouldn't happen post-backfill, but stays safe if it ever does).
+    menuId: c.menu_catalog_id != null ? String(c.menu_catalog_id) : fallbackMenuId,
   };
 }
 
@@ -763,16 +1328,21 @@ function mapRawMenuItem(
   } as MenuItem;
 }
 
-function mapRawVariant(v: RawVariant, menuId: string): VariantOption {
+function mapRawVariant(v: RawVariant, fallbackMenuId: string): VariantOption {
   // The Variants master (GET /variant) has no price field at all - only
-  // `id`/`variants_name`/`active` (confirmed live and in getAllVariant's
-  // own `attributes` allowlist). Real pricing only exists per-menu-item,
-  // on the MenuVariants join row (variant_price), set when a variant is
-  // attached to a specific item - out of scope here, no UI for it yet.
-  return { id: String(v.id), name: v.variants_name, price: 0, menuId };
+  // `id`/`variants_name`/`active`/`menu_catalog_id` (confirmed live and in
+  // getAllVariant's own `attributes` allowlist). Real pricing only exists
+  // per-menu-item, on the MenuVariants join row (variant_price), set when
+  // a variant is attached to a specific item.
+  return {
+    id: String(v.id),
+    name: v.variants_name,
+    price: 0,
+    menuId: v.menu_catalog_id != null ? String(v.menu_catalog_id) : fallbackMenuId,
+  };
 }
 
-function mapRawAddonGroup(g: RawAddonGroup, menuId: string): AddonGroup {
+function mapRawAddonGroup(g: RawAddonGroup, fallbackMenuId: string): AddonGroup {
   return {
     id: String(g.id),
     name: g.department_name,
@@ -784,7 +1354,7 @@ function mapRawAddonGroup(g: RawAddonGroup, menuId: string): AddonGroup {
       name: a.addon_name,
       price: a.price,
     })),
-    menuId,
+    menuId: g.menu_catalog_id != null ? String(g.menu_catalog_id) : fallbackMenuId,
   };
 }
 
@@ -803,15 +1373,7 @@ function mapRawUser(u: RawHotelUser): User {
   return {
     id: String(u.id),
     name: u.name,
-    // role_mst.role_name is only reliably one of the 7 new-design role
-    // names after migrations/20260824062338-extend-role-name-enum.js -
-    // older rows may still carry a legacy single-letter code (or, for rows
-    // created before that migration, an empty string the enum silently
-    // coerced invalid values to). Falling back to "Cashier" rather than
-    // leaving it blank/invalid in the UI.
-    role: (u.role_mst?.role_name && ROLE_VALUES.includes(u.role_mst.role_name as Role)
-      ? u.role_mst.role_name
-      : "Cashier") as Role,
+    role: resolveRole(u.role_mst?.role_name),
     mobile: u.number,
     email: u.email,
     status: u.active ? "Active" : "Inactive",
@@ -844,7 +1406,14 @@ function mapRawDueOrder(o: RawDueOrder): DueBill {
   return {
     id: `due-${o.id}`,
     backendOrderId: o.id,
-    billNo: `#${o.bill_no}`,
+    // parseBillNoAsOrderNo, not the raw bill_no - an exe-created order's
+    // bill_no carries the real, required "OFF" prefix (localBillNumber.js's
+    // own sync-contract comment) until it syncs to the cloud, so displaying
+    // it as-is here showed "#OFF4" verbatim instead of the plain "#4" every
+    // other screen already shows via this same stripping (mapRawLiveOrder's
+    // orderNo, mapRawOrderHistoryEntry's, etc.) - confirmed live as a real
+    // "why does my due bill say OFF4" report, not intended UI.
+    billNo: `#${parseBillNoAsOrderNo(o.bill_no, o.id)}`,
     customerName: o.hms_user_master?.name || "Guest",
     mobile: o.hms_user_master?.number || "",
     date: `${dd}/${mm}/${created.getFullYear()}`,
@@ -1041,21 +1610,33 @@ function mapRawExpenseHead(
     // - both are pure local classification, carried over across reloads.
     type: previous?.type ?? "Variable",
     active: previous?.active ?? true,
+    deleted: h.deleted,
   };
 }
 
 function mapRawExpenseEntry(e: RawExpenseEntry): Expense {
   const [y, m, d] = e.business_date.split("-");
+  // createdAt carries the real time-of-day (business_date is DATEONLY) -
+  // same "H:MM am/pm" style formatOrderTimestamp already uses for orders,
+  // kept as its own field rather than folded into `date` so every
+  // existing `date === X` day-bucket comparison keeps working unchanged.
+  const createdAtDate = new Date(e.createdAt);
+  const hh = createdAtDate.getHours() % 12 || 12;
+  const mm = `${createdAtDate.getMinutes()}`.padStart(2, "0");
+  const ap = createdAtDate.getHours() >= 12 ? "pm" : "am";
   return {
     id: `exp-${e.id}`,
     headId: `eh-${e.expense_head_id}`,
     amount: Number(e.amount),
     date: `${d}/${m}/${y}`,
+    time: `${`${hh}`.padStart(2, "0")}:${mm} ${ap}`,
     mode: e.paymentMode === "Cash" || e.paymentMode === "UPI" ? e.paymentMode : "Bank",
     note: e.reason,
-    // No user info comes back on this endpoint at all - see expenseApi's
-    // comment on why.
-    createdBy: "Staff",
+    // Was write-only before (user_id was saved but this endpoint never
+    // joined it back out) - now surfaces the real staff name, falling
+    // back to "Staff" only for a genuinely missing/deleted user.
+    createdBy: e.hms_hotelUser_master?.name ?? "Staff",
+    createdByUserId: e.user_id != null ? String(e.user_id) : undefined,
   };
 }
 
@@ -1078,7 +1659,7 @@ function formatOrderTimestamp(iso: string, businessDateDMY: string): string {
 // which is what the old BillerPe app that supported multi-qty addons wrote.
 // Also tolerates the flat {name, price} shape this app itself used to send
 // (qty defaults to 1) so previously-created rows still read back correctly.
-function parseOrderAddons(raw: string | null | undefined): NonNullable<OrderLine["addons"]> {
+export function parseOrderAddons(raw: string | null | undefined): NonNullable<OrderLine["addons"]> {
   if (!raw) return [];
   let parsed: unknown;
   try {
@@ -1115,6 +1696,54 @@ function parseOrderAddons(raw: string | null | undefined): NonNullable<OrderLine
   return out;
 }
 
+// bill_no is not always a plain number - offline/local-exe-created orders
+// use an "OFF"-prefixed scheme (see billerpe-local-exe/helpers/
+// localBillNumber.js; the "OFF" prefix is a required part of the real
+// sync contract, not cosmetic). `Number("OFF6")` is NaN, and the old
+// `Number(detail.bill_no) || detail.id` fallback silently substituted the
+// row's raw internal database id instead - confirmed live as the actual
+// cause of an order's displayed number changing (e.g. "#101" while still
+// the in-session live entry, then "#6" - its own unrelated internal id -
+// once a reload replaced it with the synced/historical entry). Stripping
+// any leading non-digit prefix before parsing keeps the number stable
+// and tied to the real bill_no on every reload, though it still won't
+// match a session-local live counter's starting value (see startOrder's
+// own comment on why that counter exists) - the two are inherently
+// different sequences.
+function parseBillNoAsOrderNo(bill_no: string, fallbackId: number): number {
+  const numeric = bill_no.replace(/^\D+/, "");
+  const parsed = Number(numeric);
+  return Number.isFinite(parsed) && numeric !== "" ? parsed : fallbackId;
+}
+
+// The one function every "Bill No" display should go through - never the
+// raw Order.billNo string directly. billerpe-local-exe now resolves the
+// real, final bill number synchronously against the cloud the instant an
+// order is created (controller/order.js/kot.js/holdOrder.js's own
+// pushPendingOrdersNow calls), so this exe's own "OFF#" local placeholder
+// is only ever actually visible for the few hundred ms of that one round
+// trip, or for as long as a genuine internet outage lasts - never a
+// permanent state a customer or staff member should be shown as if it
+// were a real bill number. Falls back to the already-stable, already-
+// prefix-stripped orderNo (parseBillNoAsOrderNo) in that case, exactly
+// matching what this same order will keep showing once reconciled.
+export function displayBillNo(o: { billNo?: string; orderNo: number }): string {
+  return o.billNo && !o.billNo.startsWith("OFF") ? o.billNo : String(o.orderNo);
+}
+
+// Real backend line items carry their own real kotNumber (billerpe-local-
+// exe's controller/kot.js: each round's rows are stamped with maxKotNumber
+// + 1 at the time it was fired) - this used to be thrown away and every
+// line hardcoded to round 1, which not only mis-displayed a 2nd+ round as
+// merged into "KOT 1" but, since order.kotRounds was ALSO hardcoded to 1,
+// meant a NEXT round fired locally (`o.kotRounds + 1`) would try to reuse
+// a round number a QR-accepted order had already used server-side.
+// Matches addKotRoundToOrder's own "next round = current max + 1" formula
+// exactly, not a guess at a different convention.
+function maxKotRound(details: { kotNumber: number }[]): number {
+  return details.reduce((max, d) => Math.max(max, d.kotNumber || 1), 1);
+}
+
 function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Order {
   const [y, m, d] = detail.business_date.split("-");
   const businessDate = `${d}/${m}/${y}`;
@@ -1128,7 +1757,7 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       price: l.price,
       variant: l.variant_name ?? undefined,
       addons: addons.length ? addons : undefined,
-      kotRound: 1,
+      kotRound: l.kotNumber || 1,
     };
   });
   const payments: PaymentSplit[] = (
@@ -1141,7 +1770,8 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
   ).filter((p) => p.amount > 0);
   return {
     id: `oh-${detail.id}`,
-    orderNo: Number(detail.bill_no) || detail.id,
+    orderNo: parseBillNoAsOrderNo(detail.bill_no, detail.id),
+    billNo: detail.bill_no,
     type: detail.order_type === "dinin" ? "Dine In" : "Pickup",
     tableLabel: detail.hms_table_mst?.table_name ?? "—",
     // Not tracked anywhere on the backend Order model - no guest-count
@@ -1150,7 +1780,7 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
     guests: 0,
     status: "Settled",
     lines,
-    kotRounds: 1,
+    kotRounds: maxKotRound(detail.hms_orderDetails),
     customerName: detail.hms_user_master?.name || undefined,
     customerPhone: detail.hms_user_master?.number || undefined,
     discount:
@@ -1165,6 +1795,9 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
     itemised: lines.length > 0,
     fallbackTotal: lines.length ? undefined : detail.grandAmount,
     backendId: detail.id,
+    tip: detail.tip ?? 0,
+    billPrintCount: detail.billPrintCount ?? 0,
+    token: detail.token ?? 0,
     backendTotals: {
       grand: detail.grandAmount,
       tax: detail.gst,
@@ -1210,10 +1843,11 @@ function mapRawCashSession(s: RawCashSession): CashSession {
 // For a table that's genuinely occupied on the real backend (getTable's
 // own query already filters to status in-progress/success/hold,
 // payment:pending, deleted:false) but this session never created the
-// order itself - GET /table only tells us an order id exists on that
-// table, not its line items with real names, so this always follows up
-// with a real getSingleOrder call (same one orderHistory uses) rather
-// than trusting the sparser embedded row.
+// order itself - e.g. an order accepted from a QR submission, or opened
+// on another terminal. Fed straight from getActiveOrders'/pickupOrder's
+// own bundled OrderDetails (loadTablesFromServer, below) - that endpoint
+// now includes both the Menu and User joins this needs, so no separate
+// getSingleOrder(/order/:id) follow-up call happens per table anymore.
 function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: string): Order {
   const [y, m, d] = detail.business_date.split("-");
   const businessDate = `${d}/${m}/${y}`;
@@ -1227,14 +1861,15 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
       price: l.price,
       variant: l.variant_name ?? undefined,
       addons: addons.length ? addons : undefined,
-      kotRound: 1,
+      kotRound: l.kotNumber || 1,
     };
   });
   const status: Order["status"] =
     detail.status === "hold" ? "Held" : detail.status === "success" ? "Bill Generated" : "Running";
   return {
     id: `o-live-${detail.id}`,
-    orderNo: Number(detail.bill_no) || detail.id,
+    orderNo: parseBillNoAsOrderNo(detail.bill_no, detail.id),
+    billNo: detail.bill_no,
     type: detail.order_type === "dinin" ? "Dine In" : "Pickup",
     tableId,
     tableLabel: detail.hms_table_mst?.table_name ?? "—",
@@ -1243,7 +1878,7 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
     guests: 0,
     status,
     lines,
-    kotRounds: 1,
+    kotRounds: maxKotRound(detail.hms_orderDetails),
     customerName: detail.hms_user_master?.name || undefined,
     customerPhone: detail.hms_user_master?.number || undefined,
     discount:
@@ -1256,6 +1891,9 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
     itemised: lines.length > 0,
     fallbackTotal: lines.length ? undefined : detail.grandAmount,
     backendId: detail.id,
+    tip: detail.tip ?? 0,
+    billPrintCount: detail.billPrintCount ?? 0,
+    token: detail.token ?? 0,
     // No backendTotals here, deliberately - this order is still being
     // built/settled, so orderTotals() recomputing live off the current
     // tax/service-charge config is exactly what's wanted, unlike a
@@ -1320,21 +1958,25 @@ function mapRawWastage(w: RawWastage, previous?: Wastage): Wastage {
 }
 
 function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): PurchaseOrder {
-  const lines: PurchaseLine[] = o.rawMaterials.map((l) => {
+  const lines: PurchaseLine[] = o.hms_purchase_rawMaterials.map((l) => {
     const taxAmount = (l.cgst || 0) + (l.sgst || 0) + (l.igst || 0);
     return {
       materialId: String(l.raw_material_id),
-      qty: l.quantity,
+      qty: l.qty,
       rate: l.price,
       taxPct: l.amount > 0 ? Math.round((taxAmount / l.amount) * 10000) / 100 : undefined,
       backendLineId: l.id,
     };
   });
-  const paid = o.payments;
+  // No plain "payments: number" field exists on the real response - see
+  // RawPurchaseOrder's own comment - sum the actual payment rows instead.
+  const paid = o.hms_purchase_payments
+    .filter((p) => !p.deleted_status)
+    .reduce((sum, p) => sum + p.amount, 0);
   return {
     id: previous?.id ?? `po-${o.id}`,
     poNo: `PO-2026-${String(o.Po_no).padStart(3, "0")}`,
-    supplierId: o.supplier ? String(o.supplier.id) : (previous?.supplierId ?? ""),
+    supplierId: o.hms_supplier ? String(o.hms_supplier.id) : (previous?.supplierId ?? ""),
     date: previous?.date ?? todayLabel,
     // No status column at all server-side (confirmed by reading the
     // model - the list endpoint's own response literally references
@@ -1355,6 +1997,24 @@ function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): Pur
     discountValue: o.discount_value,
     requisitionId: previous?.requisitionId,
     backendId: o.id,
+  };
+}
+
+function mapRawRequisition(r: RawRequisition): FranchiseRequisition {
+  return {
+    id: `req-${r.id}`,
+    reqNo: `REQ-2026-${String(r.req_no).padStart(3, "0")}`,
+    date: r.createdAt ? isoToDMY(r.createdAt.slice(0, 10)) : todayLabel,
+    status: r.status,
+    items: r.items.map((i) => ({
+      materialId: String(i.raw_material_id),
+      orderedQty: i.ordered_qty,
+      approvedQty: i.approved_qty ?? undefined,
+      unitPrice: i.unit_price,
+    })),
+    remarks: r.remarks || undefined,
+    purchaseOrderId: r.purchase_order_id ? `po-${r.purchase_order_id}` : undefined,
+    raisedBy: r.raised_by || "—",
   };
 }
 
@@ -1409,17 +2069,51 @@ const ROLE_VALUES: Role[] = [
   "Accountant",
 ];
 
-// Backend's UserAccess is a flat 10-area x (read/create/edit/delete) grid
-// with no per-user overrides and no concept of the frontend's 23 granular
-// modules or its 7 "special permissions" (orders.editAfterKot etc) at all -
-// wiring the full rich permission editor to it isn't a data-mapping problem,
-// it's a product/schema decision (does the backend even gain per-user
-// overrides? which of the 23 modules collapse into which of the 10 areas?)
-// that hasn't been made. This is a best-effort default mapping used only to
-// give a newly-created user *some* real, sensible starting permissions
-// (derived from their role's default grants) - it is not a live sync of the
-// permission editor, and per-user overrides in the UI are not persisted to
-// the backend at all.
+// role_msts.role_name is only reliably one of the 7 new-design role names
+// above after migrations/20260824062338-extend-role-name-enum.js - older or
+// still-live rows carry a legacy single-letter code instead (see
+// uat-backend-v2's USER_ROLE constant): every hotel's owner account is
+// auto-seeded at onboarding with role_name "A" (controller/hotel.js's
+// addHotelDetails), not the string "Owner", and stays "A" going forward -
+// it is not a one-time migration artifact. Mapping these explicitly rather
+// than lumping them into the "unrecognized" fallback below, which used to
+// silently turn every real owner login into a Cashier.
+const LEGACY_ROLE_MAP: Partial<Record<string, Role>> = {
+  A: "Owner", // legacy Admin code - roles.md confirms A = Admin = Owner/Manager
+  C: "Captain",
+  B: "Cashier", // legacy Biller code - roles.md confirms B = Biller = Cashier
+};
+
+// U (generic/normal staff) and S (Super Admin leftover, not a real
+// hotel-level role per roles.md) have no real equivalent among the 7
+// new-design roles, and a genuinely blank/invalid role_name (pre-migration
+// MySQL silently coerced unrecognized enum values to "") is truly unknown -
+// all three fall back to "Cashier" as the safest low-privilege default
+// rather than leaving the UI with a blank/invalid role.
+function resolveRole(roleName: string | undefined): Role {
+  if (!roleName) return "Cashier";
+  if (ROLE_VALUES.includes(roleName as Role)) return roleName as Role;
+  return LEGACY_ROLE_MAP[roleName] ?? "Cashier";
+}
+
+// Backend's UserAccess is a flat 10-area x (read/create/edit/delete) grid,
+// one full set of booleans per user (no separate role-default-vs-override
+// layering the way this app's own permission model has) and no concept of
+// the frontend's 23 granular modules or its 7 "special permissions"
+// (orders.editAfterKot etc) at all. resolveEffectiveGrants below merges a
+// user's role default with their permissionOverrides before this maps it
+// down to the 10 backend areas - previously this sent the role default
+// only, silently discarding any override the popup's "Permission
+// overrides" editor let you set (confirmed live: editing a user's
+// module grants and saving had no effect on their real access). The 13
+// modules with no backend-area equivalent (menu items, keyboard-billing,
+// kds, permissions, cash-session, stock-transactions/-recipes/-reports,
+// ops-*, system, audit-log) and all 7 special permissions still have
+// nowhere to persist - that's a real schema gap, not something this
+// mapping can paper over, and stays exactly as limited as before for
+// those. Not a live two-way sync either: a role-default change alone
+// (no override) doesn't retroactively update every existing user with
+// that role until each is individually re-saved.
 const MODULE_TO_ACCESS_AREA: Partial<Record<PermissionModule, string>> = {
   orders: "Order",
   tables: "Table",
@@ -1450,8 +2144,22 @@ const BACKEND_ACCESS_AREAS = [
   "Zomato",
 ];
 
-function buildAccessNameFromRole(role: Role, rolePermissions: Record<Role, RolePermissions>) {
-  const grants = rolePermissions[role];
+function resolveEffectiveGrants(
+  role: Role,
+  rolePermissions: Record<Role, RolePermissions>,
+  overrides: PermissionOverrides | undefined,
+): RolePermissions {
+  const base = rolePermissions[role];
+  if (!overrides?.modules) return base;
+  return Object.fromEntries(
+    (Object.keys(base) as PermissionModule[]).map((m) => [
+      m,
+      { ...base[m], ...(overrides.modules?.[m] ?? {}) },
+    ]),
+  ) as RolePermissions;
+}
+
+function buildAccessName(grants: RolePermissions) {
   const grantFor = (area: string) => {
     const permModule = (Object.entries(MODULE_TO_ACCESS_AREA) as [PermissionModule, string][]).find(
       ([, a]) => a === area,
@@ -1496,12 +2204,12 @@ function loadInitialState(): State {
   try {
     const saved = window.localStorage.getItem("billerpe.session");
     if (!saved) return initialState;
-    const parsed = JSON.parse(saved) as { userId: string; device: boolean };
+    const parsed = JSON.parse(saved) as { userId?: string; device: boolean; authed: boolean };
     return {
       ...initialState,
-      authed: true,
+      authed: parsed.authed,
       deviceRegistered: parsed.device,
-      currentUserId: parsed.userId,
+      currentUserId: parsed.userId ?? initialState.currentUserId,
     };
   } catch {
     return initialState;
@@ -1512,6 +2220,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [s, set] = useState<State>(loadInitialState);
 
   const patch = useCallback((fn: (p: State) => State) => set(fn), []);
+
+  // Chained table transfers (Table 2 -> Garden 1 -> Garden 3, back-to-back)
+  // each fire their own loadTablesFromServer() call. Those calls race - the
+  // second one can resolve before the first (or vice versa depending on
+  // response timing), and the LAST resolved response always wins the
+  // wholesale `tables:` patch below, regardless of which one was actually
+  // issued last. That let a stale mid-transition response clobber the
+  // correct final state, leaving a table looking permanently "stuck" in the
+  // UI even though the backend had already freed it. Guarded with a call
+  // sequence number - only the response to the most-recently-issued call is
+  // ever applied.
+  const tablesLoadSeq = useRef(0);
 
   const currentUser = useMemo(
     () => s.users.find((u) => u.id === s.currentUserId) ?? s.users[0],
@@ -1530,10 +2250,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const log = useCallback(
     (action: string, entity: string, before: string, after: string, reason?: string) => {
+      const userId = s.currentUserId;
+      const userName = currentUser?.name ?? "Taj";
       const entry: AuditLog = {
         id: uid("a"),
-        userId: s.currentUserId,
-        userName: currentUser?.name ?? "Taj",
+        userId,
+        userName,
         action,
         entity,
         before,
@@ -1544,6 +2266,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...(reason ? { reason } : {}),
       };
       patch((p) => ({ ...p, auditLogs: [entry, ...p.auditLogs] }));
+      // Persist for real - see auditLogApi's own comment. Fire-and-forget,
+      // no toast on failure: this runs alongside 43 other real actions,
+      // none of which should ever be blocked or interrupted by a logging
+      // write failing in the background.
+      void auditLogApi
+        .create({ user_id: userId, user_name: userName, action, entity, before, after, reason })
+        .catch(() => {});
     },
     [currentUser, patch, s.currentUserId],
   );
@@ -1706,16 +2435,76 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return [...byGroup.values()];
   };
 
+  // Renders a configured header/footer (store.invoiceFormat.header/footer,
+  // the same lines the Settings > Invoice Format preview shows) into the
+  // string[] of HTML fragments every print/PDF path expects - mirrors the
+  // backend's own getHearderAndFooterDataBillView keyword mapping and the
+  // InvoiceFormatSection preview's renderLine, so what's configured is
+  // exactly what prints. QR generation is best-effort: a failure there
+  // must never block the rest of the bill from printing.
+  const renderInvoiceHeaderFooter = async (
+    lines: InvoiceLine[],
+    ctx: {
+      hotelName: string;
+      address: string;
+      gstNo: string;
+      fssaiNo: string;
+      logoUrl?: string;
+      upiId: string;
+      amount: number;
+    },
+  ): Promise<string[]> => {
+    const out: string[] = [];
+    for (const l of lines) {
+      switch (l.content) {
+        case "logo":
+          if (ctx.logoUrl) {
+            out.push(
+              `<img style="display:block;margin:0 auto;max-height:80px;max-width:150px" src="${ctx.logoUrl}"/>`,
+            );
+          }
+          break;
+        case "upi-qr":
+          if (ctx.upiId) {
+            try {
+              const merchantName = encodeURIComponent(ctx.hotelName);
+              const transactionNote = encodeURIComponent(`Bill Payment - ${ctx.amount}`);
+              const upiUrl = `upi://pay?pa=${ctx.upiId}&pn=${merchantName}&tn=${transactionNote}&am=${ctx.amount}&cu=INR`;
+              const qr = await QRCode.toDataURL(upiUrl, { width: 150, margin: 2 });
+              out.push(
+                `<img style="display:block;margin:0 auto" width="120" height="120" src="${qr}"/>`,
+              );
+            } catch {
+              // Skip the QR line rather than failing the whole print.
+            }
+          }
+          break;
+        case "outlet-name":
+          out.push(`<p class="hotel-name">${ctx.hotelName}</p>`);
+          break;
+        case "address":
+          if (ctx.address) out.push(`<p class="hotel-address">${ctx.address}</p>`);
+          break;
+        case "gstin":
+          if (ctx.gstNo) out.push(`<p>GSTIN: ${ctx.gstNo}</p>`);
+          break;
+        case "fssai":
+          if (ctx.fssaiNo) out.push(`<p>FSSAI: ${ctx.fssaiNo}</p>`);
+          break;
+        default:
+          if (l.text) out.push(`<p>${l.text}</p>`);
+          break;
+      }
+    }
+    return out;
+  };
+
   // Shared by printBill and generateBill's print option - takes backendId
   // as an explicit argument rather than re-deriving it from `s`, since `s`
   // is this render's immutable snapshot and won't reflect a patch() that
   // just happened moments earlier in the same async flow.
-  const doPrintBill = async (o: Order, backendId: number) => {
+  const doPrintBill = async (o: Order, backendId: number): Promise<boolean> => {
     try {
-      // Real hotel_name/address/gst_no/fssai_no/invoiceFormate*Text -
-      // this app's own local invoiceFormat.header/footer are never
-      // synced from the server (see hotelApi.getSettings's comment), so
-      // they're mock text only and unusable for an actual printed bill.
       const hotel = await hotelApi.getSettings();
       const t = o.backendTotals
         ? {
@@ -1725,57 +2514,194 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             service: o.backendTotals.serviceCharge,
           }
         : orderTotals(o, s);
-      const headerText = [
-        `<p class="hotel-name">${hotel.hotel_name}</p>`,
-        ...([hotel.address1, hotel.address2].filter(Boolean).length
-          ? [
-              `<p class="hotel-address">${[hotel.address1, hotel.address2].filter(Boolean).join(", ")}</p>`,
-            ]
-          : []),
-        ...(hotel.gst_no ? [`<p>GSTIN: ${hotel.gst_no}</p>`] : []),
-        ...(hotel.fssai_no ? [`<p>FSSAI: ${hotel.fssai_no}</p>`] : []),
-        ...(hotel.invoiceFormateHeaderText ? [`<p>${hotel.invoiceFormateHeaderText}</p>`] : []),
-      ];
-      const footerText = hotel.invoiceFormateBottomText
-        ? [`<p>${hotel.invoiceFormateBottomText}</p>`]
-        : [];
+      const logoUrl =
+        hotel.hotel_logo && hotel.hotel_logo !== "placeholder.png"
+          ? `${API_BASE_URL}/images/${hotel.hotel_logo}`
+          : undefined;
+      const address = [hotel.address1, hotel.address2].filter(Boolean).join(", ");
+      const hfCtx = {
+        hotelName: hotel.hotel_name,
+        address,
+        gstNo: hotel.gst_no ?? "",
+        fssaiNo: hotel.fssai_no ?? "",
+        logoUrl,
+        upiId: hotel.upiId ?? "",
+        amount: t.grand,
+      };
+      // Uses the hotel's configured Invoice Format header/footer (Settings
+      // > Invoice Format) so the actual printed bill matches the e-bill
+      // webview and the settings preview. Falls back to the same plain
+      // hotel-name/address/GST/FSSAI content printed before this feature
+      // existed when the hotel hasn't configured a format yet (header
+      // comes back empty) - otherwise those hotels would suddenly print
+      // bills with no header at all.
+      const [headerText, footerText] = s.invoiceFormat.header.length
+        ? await Promise.all([
+            renderInvoiceHeaderFooter(s.invoiceFormat.header, hfCtx),
+            renderInvoiceHeaderFooter(s.invoiceFormat.footer, hfCtx),
+          ])
+        : [
+            [
+              `<p class="hotel-name">${hotel.hotel_name}</p>`,
+              ...(address ? [`<p class="hotel-address">${address}</p>`] : []),
+              ...(hotel.gst_no ? [`<p>GSTIN: ${hotel.gst_no}</p>`] : []),
+              ...(hotel.fssai_no ? [`<p>FSSAI: ${hotel.fssai_no}</p>`] : []),
+              ...(hotel.invoiceFormateHeaderText
+                ? [`<p>${hotel.invoiceFormateHeaderText}</p>`]
+                : []),
+            ],
+            hotel.invoiceFormateBottomText ? [`<p>${hotel.invoiceFormateBottomText}</p>`] : [],
+          ];
+      const items = o.lines.map((l) => ({
+        item_name: l.name,
+        qty: l.qty,
+        price: l.price,
+        totalAmount: lineTotal(l),
+        variantData: l.variant ? { variants_name: l.variant } : null,
+        addons: buildAddonsPayload(l.addons),
+      }));
+      // amount/tax_type here are the RATE (e.g. "@5%"), not the charged
+      // amount - services/pdfGenerator.js's own template reads
+      // `tax.amount` + `tax.tax_type === 'pr'` for that label and
+      // `tax.tax_value` separately for the actual charged number. Was
+      // previously hardcoded to amount:0/tax_type:"fix" (always printing
+      // "@0", no "%"), even though the real rate is right here on
+      // s.taxRules - a cosmetic-but-real inaccuracy on every printed bill.
+      const orderTax = t.taxLines.map((tx) => {
+        const rule = s.taxRules.find((r) => r.id === tx.id);
+        return {
+          hms_tax_type_mst: { tax_name: tx.name },
+          amount: rule?.value ?? 0,
+          tax_type: rule?.type === "percent" ? ("pr" as const) : ("fix" as const),
+          tax_value: tx.amount,
+        };
+      });
+      const totalQty = o.lines.reduce((sum, l) => sum + l.qty, 0);
+
+      // Direct silent print first (billerpe-local-exe prints straight to
+      // the configured Invoice printer, no browser dialog) - falls back to
+      // the old "open a PDF tab" flow only if that fails (e.g. no invoice
+      // printer configured yet, or the EXE can't be reached).
+      try {
+        const { printer } = await localPrintApi.printInvoice({
+          orderId: String(backendId),
+          // The actual bill number to print - see Order.billNo's own
+          // comment. orderId above is the internal order id, kept only for
+          // the API's own bookkeeping; printing it as "Bill No" (as this
+          // used to) is what caused a printed bill's number to not match
+          // the Orders list for the same order.
+          billNo: displayBillNo(o),
+          tableAndUserInfo: o.tableLabel,
+          dateAndTime: o.createdAt,
+          type: o.type === "Dine In" ? "dinin" : "pickup",
+          token: o.token ?? 0,
+          customerName: o.customerName,
+          customerNumber: o.customerPhone,
+          items,
+          totalQty,
+          subtotal: t.subtotal,
+          totalDiscount: t.discount,
+          service_charge: t.service,
+          delivery_charge: t.delivery,
+          packaging_charge: t.packaging,
+          tip: o.tip ?? 0,
+          orderTax,
+          totalBill: t.grand,
+          headerText,
+          footerText,
+        });
+        toast.success(`Bill sent to ${printer}`);
+        return true;
+      } catch {
+        // Fall through to the PDF-preview path below.
+      }
+
       const { pdf } = await orderApi.generateInvoicePdf({
         orderId: backendId,
+        // See localPrintApi.printInvoice's own call above for why this is
+        // separate from orderId.
+        billNo: o.billNo ?? String(backendId),
         printerSize: hotel.printerSize ?? "1",
         tableAndUserInfo: o.tableLabel,
         dateAndTime: o.createdAt,
         type: o.type === "Dine In" ? "dinin" : "pickup",
-        token: 0,
+        token: o.token ?? 0,
         customerName: o.customerName,
         customerNumber: o.customerPhone,
-        items: o.lines.map((l) => ({
-          item_name: l.name,
-          qty: l.qty,
-          price: l.price,
-          totalAmount: lineTotal(l),
-          variantData: l.variant ? { variants_name: l.variant } : null,
-          addons: buildAddonsPayload(l.addons),
-        })),
-        totalQty: o.lines.reduce((sum, l) => sum + l.qty, 0),
+        items,
+        totalQty,
         subtotal: t.subtotal,
         totalDiscount: t.discount,
         service_charge: t.service,
-        orderTax: t.taxLines.map((tx) => ({
-          hms_tax_type_mst: { tax_name: tx.name },
-          amount: 0,
-          tax_type: "fix" as const,
-          tax_value: tx.amount,
-        })),
+        delivery_charge: t.delivery,
+        packaging_charge: t.packaging,
+        tip: o.tip ?? 0,
+        orderTax,
         totalBill: t.grand,
         headerText,
         footerText,
       });
       const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
       window.open(URL.createObjectURL(blob), "_blank");
-      toast.success("Bill ready to print");
+      toast.success("Bill ready to print (no local printer configured - opened as a PDF instead)");
+      return true;
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
+      return false;
     }
+  };
+
+  // Renders a configured KOT header/footer (store.kotFormat.header/footer)
+  // into the string[] of HTML fragments both KOT print paths expect -
+  // mirrors renderInvoiceHeaderFooter's convention (see doPrintBill above),
+  // but synchronous (no logo/QR content types on the KOT side).
+  const renderKotHeaderFooter = (
+    lines: KotLine[],
+    ctx: {
+      hotelName: string;
+      address: string;
+      orderType: string;
+      customerDetails: string;
+      billNo: string;
+      tokenNumber: number;
+      kotNumber: number;
+    },
+  ): string[] => {
+    const out: string[] = [];
+    for (const l of lines) {
+      switch (l.content) {
+        case "outlet-name":
+          out.push(`<p class="hotel-name">${ctx.hotelName}</p>`);
+          break;
+        case "address":
+          if (ctx.address) out.push(`<p>${ctx.address}</p>`);
+          break;
+        case "order-type":
+          out.push(`<p><strong>${ctx.orderType}</strong></p>`);
+          break;
+        case "customer-details":
+          out.push(`<p><strong>${ctx.customerDetails}</strong></p>`);
+          break;
+        case "bill-no":
+          out.push(`<p>KOT - ${ctx.billNo}</p>`);
+          break;
+        case "token-number":
+          if (ctx.tokenNumber > 0) {
+            out.push(`<p class="token"><strong>Token No.:${ctx.tokenNumber}</strong></p>`);
+          }
+          break;
+        case "kot-number":
+          out.push(`<p>KOT #${ctx.kotNumber}</p>`);
+          break;
+        case "billerpe-branding":
+          out.push(`<p>Powered by BillerPe</p>`);
+          break;
+        default:
+          if (l.text) out.push(`<p>${l.text}</p>`);
+          break;
+      }
+    }
+    return out;
   };
 
   // Reprint KOT - renders just one already-sent round's ticket (items/qty/
@@ -1798,6 +2724,78 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           : o.customerName
             ? `Customer: ${o.customerName}`
             : "Pickup";
+      const items = lines.map((l) => {
+        const mi = s.menuItems.find((m) => m.id === l.itemId);
+        return {
+          item_name: l.name,
+          qty: l.qty,
+          comment: l.note ?? "",
+          // Was hardcoded null - the EXE's own printer routing
+          // (helpers/kotPrinterRouting.js#arranPrintersForKotWithTheseItems)
+          // treats a null category as "matches every configured printer
+          // regardless of its own category assignment", which broke
+          // per-station KOT routing entirely: a printer set up for only
+          // Bar/Beverages (say) still received every item off every ticket
+          // instead of just its own. generateKot (a few hundred lines up)
+          // already computes this correctly for the same lines - matched
+          // here.
+          menu_categ_id: mi ? Number(mi.categoryId) : null,
+          variantData: l.variant ? { variants_name: l.variant } : null,
+          addons: buildAddonsPayload(l.addons),
+        };
+      });
+      const tokenNumber = o.token ?? 0;
+      // Uses the hotel's configured KOT Format (Settings > KOT Format) so
+      // the actual printed ticket matches what's configured there. Falls
+      // back to the same plain layout printed before this feature existed
+      // when the hotel hasn't configured a format yet (header comes back
+      // empty).
+      const kotCtx = {
+        hotelName: hotel.hotel_name,
+        address: [hotel.address1, hotel.address2].filter(Boolean).join(", "),
+        orderType: o.type === "Dine In" ? "Dine In" : "Pickup",
+        customerDetails: userOrTableNo,
+        billNo: String(o.orderNo),
+        tokenNumber,
+        kotNumber: round,
+      };
+      const [headerText, footerText] = s.kotFormat.header.length
+        ? [
+            renderKotHeaderFooter(s.kotFormat.header, kotCtx),
+            renderKotHeaderFooter(s.kotFormat.footer, kotCtx),
+          ]
+        : [[], []];
+
+      // Direct silent print first (billerpe-local-exe resolves the
+      // configured KOT printer(s) itself and prints straight to them, no
+      // browser dialog) - falls back to the old "open a PDF tab" flow only
+      // if that fails (e.g. no KOT printer configured yet, or the EXE
+      // can't be reached), so this never leaves the user with nothing.
+      try {
+        const { results } = await localPrintApi.printKot({
+          order_type: o.type === "Dine In" ? "dinin" : "pickup",
+          order_id: String(o.orderNo),
+          restaurantName: hotel.hotel_name,
+          userOrTableNo,
+          timeAndDate: kot?.createdAt ?? o.createdAt,
+          kotNumber: round,
+          token: tokenNumber,
+          table_id: o.tableId,
+          headerText,
+          footerText,
+          items,
+        });
+        const failed = results.filter((r) => !r.ok);
+        if (failed.length) {
+          toast.error(`KOT failed to print on: ${failed.map((f) => f.printer).join(", ")}`);
+        } else {
+          toast.success(`KOT sent to ${results.map((r) => r.printer).join(", ")}`);
+        }
+        return;
+      } catch {
+        // Fall through to the PDF-preview path below.
+      }
+
       const { pdf } = await orderApi.printKot({
         order_type: o.type === "Dine In" ? "dinin" : "pickup",
         order_id: String(o.orderNo),
@@ -1806,18 +2804,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         timeAndDate: kot?.createdAt ?? o.createdAt,
         printerSize: hotel.printerSize ?? "1",
         kotNumber: round,
-        token: 0,
-        items: lines.map((l) => ({
-          item_name: l.name,
-          qty: l.qty,
-          comment: l.note ?? "",
-          variantData: l.variant ? { variants_name: l.variant } : null,
-          addons: buildAddonsPayload(l.addons),
-        })),
+        token: tokenNumber,
+        headerText,
+        footerText,
+        items,
       });
       const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
       window.open(URL.createObjectURL(blob), "_blank");
-      toast.success("KOT ready to print");
+      toast.success("KOT ready to print (no local printer configured - opened as a PDF instead)");
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate the KOT PDF");
     }
@@ -1860,6 +2854,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         createdAt: nowStamp(),
         createdBy: currentUser?.name ?? "Taj",
         itemised: true,
+        // Reserved table (mapRawTable, sourced from billerpe-local-exe's
+        // reserved_name/reserved_number) - pre-fill straight from the
+        // reservation rather than making staff retype the same name/
+        // number they already gave when booking. store.setCustomer can
+        // still overwrite this normally if the actual walk-in differs.
+        customerName: table.reservedGuestName,
+        customerPhone: table.reservedGuestPhone,
       };
     }
     if (id.startsWith("draft-pickup-")) {
@@ -1966,12 +2967,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     updateRoleDefaults: (role, permissions) => {
       if (guardForbidden("permissions", "edit")) return;
+      // Optimistic local patch for a snappy checkbox grid - reconciled by
+      // the reload below, same pattern as setRequisitionQty.
       patch((p) => ({
         ...p,
         rolePermissions: { ...p.rolePermissions, [role]: permissions },
       }));
       log("Role Permissions Updated", role, "", "", `updated module grants for ${role}`);
-      toast.success(`${role} permissions updated`);
+      const run = async () => {
+        try {
+          await rolePermissionApi.editPermissions(role, permissions);
+          await value.loadRolePermissionsFromServer();
+          toast.success(`${role} permissions updated`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not update role permissions");
+          await value.loadRolePermissionsFromServer();
+        }
+      };
+      void run();
     },
 
     updateRoleSpecialDefaults: (role, special) => {
@@ -1984,7 +2997,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         },
       }));
       log("Role Permissions Updated", role, "", "", `updated special permissions for ${role}`);
-      toast.success(`${role} permissions updated`);
+      const run = async () => {
+        try {
+          await rolePermissionApi.editSpecial(role, special);
+          await value.loadRolePermissionsFromServer();
+          toast.success(`${role} permissions updated`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not update role permissions");
+          await value.loadRolePermissionsFromServer();
+        }
+      };
+      void run();
     },
 
     updateUserPermissionOverrides: (userId, overrides) => {
@@ -2005,9 +3028,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success(`${u.name}'s permissions updated`);
     },
 
+    // Persisted immediately, not just in React state - a device that just
+    // registered but hasn't logged in yet still needs to survive a refresh
+    // as "registered, please sign in" rather than reverting to "please
+    // register" (confirmed live: this was missing, so any refresh between
+    // Register Device and the first staff login bounced back to the
+    // registration screen even though the exe already had the hotel's
+    // real data pulled down).
     registerDevice: () => {
       patch((p) => ({ ...p, deviceRegistered: true }));
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          "billerpe.session",
+          JSON.stringify({ device: true, authed: false }),
+        );
+      }
       toast.success("Device registered", { description: "Counter POS · 192.168.1.14" });
+    },
+    resetDeviceRegistration: () => {
+      patch((p) => ({ ...p, deviceRegistered: false, authed: false }));
+      setStoredAuthToken(null);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          "billerpe.session",
+          JSON.stringify({ device: false, authed: false }),
+        );
+      }
     },
     login: (userId) => {
       const id = userId ?? s.currentUserId;
@@ -2015,13 +3061,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (typeof window !== "undefined") {
         window.localStorage.setItem(
           "billerpe.session",
-          JSON.stringify({ userId: id, device: true }),
+          JSON.stringify({ userId: id, device: true, authed: true }),
         );
       }
     },
+    // Signing out a staff member doesn't un-register the device - the exe
+    // already has this hotel's real data either way - so this only clears
+    // `authed`, keeping `device: true` so the next load shows the sign-in
+    // tabs, not the registration screen again.
     logout: () => {
       patch((p) => ({ ...p, authed: false }));
-      if (typeof window !== "undefined") window.localStorage.removeItem("billerpe.session");
+      setStoredAuthToken(null);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(
+          "billerpe.session",
+          JSON.stringify({ device: true, authed: false }),
+        );
+      }
     },
     syncCurrentUser: async () => {
       try {
@@ -2120,11 +3176,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         orders: p.orders.map((o) => {
           if (o.id !== orderId) return o;
-          const round = o.kotRounds + 1;
           const existing = o.lines.find(
             (l) =>
               l.itemId === input.itemId &&
-              l.kotRound === round &&
+              l.kotRound === UNSENT_ROUND &&
               (l.variant ?? "") === (input.variant ?? "") &&
               JSON.stringify(l.addons ?? []) === JSON.stringify(input.addons ?? []),
           );
@@ -2142,7 +3197,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             name: mi.name,
             qty: input.qty ?? 1,
             price,
-            kotRound: round,
+            kotRound: UNSENT_ROUND,
             ...(input.variant ? { variant: input.variant } : {}),
             ...(input.addons?.length ? { addons: input.addons } : {}),
             ...(input.note ? { note: input.note } : {}),
@@ -2173,7 +3228,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         line.kotRound <= order.kotRounds &&
         guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
       ) {
-        return;
+        return false;
       }
       patch((p) => ({
         ...p,
@@ -2200,6 +3255,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // Held/Running with zero items blocking the table for everyone else.
         if (newQty <= 0 && order.lines.length === 1) freeEmptyDraft(order);
       }
+      return true;
     },
 
     setLineQty: (orderId, lineId, qty, module) => {
@@ -2306,7 +3362,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
-    removeLine: (orderId, lineId, module) => {
+    removeLine: (orderId, lineId, module, reason) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
       if (
@@ -2315,7 +3371,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         line.kotRound <= order.kotRounds &&
         guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
       ) {
-        return;
+        return false;
       }
       patch((p) => ({
         ...p,
@@ -2324,22 +3380,122 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       if (order && line) {
-        log("Item Removed", `Order #${order.orderNo}`, `${line.name} ×${line.qty}`, "Removed");
+        // reason is only ever passed for an already-fired line (the UI's
+        // own confirm dialog is the one place that collects it - a line
+        // still in the current draft cart needs no justification to edit).
+        // Was already tracked before this (entity/before already carried
+        // the bill number and item+qty), just never WITH a stated reason.
+        log(
+          "Item Removed",
+          `Order #${order.orderNo}`,
+          `${line.name} ×${line.qty}`,
+          "Removed",
+          reason,
+        );
         // Nothing left on this table/pickup order - don't leave it sitting
         // Held/Running with zero items blocking the table for everyone else.
         if (order.lines.length === 1) freeEmptyDraft(order);
       }
+      return true;
     },
 
+    // Used to be a pure local state.orders patch - flipped status to "Held"
+    // in memory only, never called the backend. POST /holdOrder already
+    // exists and already persists Order.status "hold"/Table.table_status
+    // "H" server-side (confirmed reading controller/kto.js#holdOrder) and
+    // loadTablesFromServer already knows how to reconstruct a "hold" order
+    // back into "Held" on reload (mapRawLiveOrder's status map) - so the
+    // fix is wiring this button to that endpoint, the same way generateKot
+    // wires Send KOT to /kotOrder, not adding new reload logic. Without
+    // this, a held-only order (never KOT'd/Saved) had no backendId, so
+    // getActiveOrders() never saw it and it vanished on refresh - exactly
+    // the reported bug.
     holdOrder: (orderId) => {
+      if (guardBlocked()) return;
       const o = s.orders.find((x) => x.id === orderId);
-      patch((p) => ({
-        ...p,
-        orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Held" } : x)),
-        tables: p.tables.map((t) => (t.id === o?.tableId ? { ...t, status: "Held" } : t)),
-      }));
-      log("Order Held", `Order #${o?.orderNo}`, o?.status ?? "", "Held");
-      toast.success(`Order #${o?.orderNo} held`, { description: o?.tableLabel });
+      if (!o) return;
+      // Same "not yet fired" set as generateKot's `pending` - hold's own
+      // destroy-then-recreate on the backend only targets OrderDetails rows
+      // still in "in-progress" status (i.e. never through a real KOT
+      // round), so anything already fired is left alone there and doesn't
+      // belong in this payload either.
+      const pending = o.lines.filter((l) => l.kotRound > o.kotRounds);
+      if (!pending.length) {
+        toast.info("Nothing to hold", { description: "Add items before holding this order." });
+        return;
+      }
+
+      const billSettings: BillSettings = {
+        serviceCharge: s.serviceCharge,
+        deliveryChargeRule: s.deliveryChargeRule,
+        packagingChargeRule: s.packagingChargeRule,
+        taxRules: s.taxRules,
+        invoiceFormat: s.invoiceFormat,
+      };
+      const totals = orderTotals(o, billSettings);
+      const menuItemsPayload = pending.map((l) => {
+        const mi = s.menuItems.find((m) => m.id === l.itemId);
+        return {
+          id: Number(l.itemId),
+          qty: l.qty,
+          price: l.price,
+          discount: 0,
+          addons: buildAddonsPayload(l.addons),
+          comment: l.note ?? "",
+          menu_categ_id: mi ? Number(mi.categoryId) : 0,
+        };
+      });
+      const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
+
+      const run = async () => {
+        try {
+          const res = await orderApi.holdOrder({
+            order_type: o.type === "Dine In" ? "dinin" : "pickup",
+            ...(o.backendId ? { order_id: o.backendId } : {}),
+            ...(o.type === "Dine In" && table
+              ? { table_id: Number(table.id), tableNumber: table.name }
+              : {}),
+            userName: o.customerName,
+            mobile: o.customerPhone,
+            cart: {
+              gst: totals.tax,
+              totalDiscount: totals.discount,
+              grandAmount: totals.grand,
+              myAmount: totals.subtotal,
+              service_charger: totals.service,
+              delivery_charge: totals.delivery,
+              packaging_charge: totals.packaging,
+              discount_reason: o.discount?.label ?? "",
+              discount_type: "fix",
+              discount_value: totals.discount,
+              taxes: buildCartTaxes(totals, s.taxRules),
+              items: [{ status: "H", menuItems: menuItemsPayload }],
+            },
+          });
+          const backendId = res.orderId;
+          // billNo is the real bill number to ever show a user (see its own
+          // comment on Order) - orderNo derived from it the same way a
+          // server-loaded order already is (parseBillNoAsOrderNo), instead
+          // of the raw backendId this used to fall back to, which is a
+          // completely different number from the actual bill_no and was
+          // confirmed live as a cause of the printed bill's number not
+          // matching the order list for the same order.
+          const billNo = res.bill_no;
+          const orderNo = billNo ? parseBillNoAsOrderNo(billNo, backendId) : backendId;
+          patch((p) => ({
+            ...p,
+            orders: p.orders.map((x) =>
+              x.id === orderId ? { ...x, status: "Held", backendId, orderNo, billNo } : x,
+            ),
+            tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Held" } : t)),
+          }));
+          log("Order Held", `Order #${backendId}`, o.status ?? "", "Held");
+          toast.success(`Order #${backendId} held`, { description: o.tableLabel });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not hold order");
+        }
+      };
+      void run();
     },
 
     saveOrder: (orderId) => {
@@ -2353,23 +3509,57 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success(`Order #${o?.orderNo} saved`, { description: o?.tableLabel });
     },
 
-    cancelOrder: (orderId) => {
+    cancelOrder: (orderId, reason) => {
       const o = s.orders.find((x) => x.id === orderId);
+      // Deleting a WHOLE order used to have no gate at all - any role could
+      // cancel/soft-delete an order with real, already-fired KOT lines
+      // (food already sent to the kitchen) with just a confirmation click,
+      // confirmed live: controller/order.js's deleteOrder itself does no
+      // status-transition check either, by its own comment. The
+      // "orders.deleteOrder" special permission already exists with real
+      // role defaults (mock/data.ts's ROLE_SPECIAL_DEFAULTS - Owner/
+      // Manager true, everyone else false) - it just was never actually
+      // wired to this flow. Only gates when the order has something real
+      // fired on it; an order with nothing sent yet (still a Held/empty
+      // draft) cancels freely regardless of role, same as before - this
+      // isn't about locking down every accidental "opened the wrong
+      // table" undo, just the case staff specifically flagged.
+      const hasFiredItems = (o?.lines ?? []).some((l) => l.kotRound <= (o?.kotRounds ?? 0));
+      if (
+        hasFiredItems &&
+        guardForbiddenSpecial(
+          "orders.deleteOrder",
+          "Cancel an order with items already sent to the kitchen",
+        )
+      ) {
+        return false;
+      }
       patch((p) => ({
         ...p,
-        orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Cancelled" } : x)),
+        // Same id-reuse fix as settleOrder's applySettlement - see its
+        // comment. cancelOrder is only ever called with a real backendId
+        // present (freeEmptyDraft's own comment: no backendId means no
+        // real order to cancel, it just frees the table directly), so
+        // there's always a stable id to rename to here.
+        orders: p.orders.map((x) =>
+          x.id === orderId ? { ...x, id: `o-final-${x.backendId}`, status: "Cancelled" } : x,
+        ),
         tables: p.tables.map((t) =>
           t.id === o?.tableId ? { ...t, status: "Free", guests: undefined, orderId: undefined } : t,
         ),
-        kots: p.kots.map((k) => (k.orderId === orderId ? { ...k, status: "Cancelled" } : k)),
+        kots: p.kots.map((k) =>
+          k.orderId === orderId
+            ? { ...k, orderId: `o-final-${o?.backendId}`, status: "Cancelled" }
+            : k,
+        ),
       }));
-      log("Order Cancelled", `Order #${o?.orderNo}`, o?.status ?? "", "Cancelled");
+      log("Order Cancelled", `Order #${o?.orderNo}`, o?.status ?? "", "Cancelled", reason);
       toast.success(`Order #${o?.orderNo} cancelled`);
       // The backend has no concept of "cancel" distinct from delete (see
       // orderApi.remove's comment) - this soft-deletes the order for
       // real, so it will not reappear anywhere, including under this
       // app's own "Cancelled" filter, once orders/orderHistory reload.
-      if (!o?.backendId) return;
+      if (!o?.backendId) return true;
       const run = async () => {
         try {
           await orderApi.remove(o.backendId!, { free: true });
@@ -2382,6 +3572,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
       };
       void run();
+      return true;
     },
     freeIfEmpty: (orderId) => {
       const o = s.orders.find((x) => x.id === orderId);
@@ -2465,12 +3656,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
 
-    generateKot: (orderId) => {
+    generateKot: (orderId, options) => {
       if (guardBlocked()) return;
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return;
       const round = o.kotRounds + 1;
-      const pending = o.lines.filter((l) => l.kotRound === round);
+      const shouldPrint = options?.print ?? false;
+      const allUnsent = o.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+      // A lineIds subset sends just those items this round, leaving
+      // whatever's left unchecked still unsent (UNSENT_ROUND) for a later
+      // round - see UNSENT_ROUND's own comment. No lineIds (or an empty
+      // list) keeps the original "send everything pending" behaviour.
+      const pending = options?.lineIds?.length
+        ? allUnsent.filter((l) => options.lineIds!.includes(l.id))
+        : allUnsent;
       if (!pending.length) {
         toast.info("Nothing new to send", { description: "Add items before generating a KOT." });
         return;
@@ -2506,20 +3705,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ...(o.type === "Dine In" && table
               ? { table_id: Number(table.id), tableNumber: table.name }
               : {}),
+            userName: o.customerName,
+            mobile: o.customerPhone,
             cart: {
               gst: totals.tax,
               totalDiscount: totals.discount,
               grandAmount: totals.grand,
               myAmount: totals.subtotal,
               service_charger: totals.service,
+              delivery_charge: totals.delivery,
+              packaging_charge: totals.packaging,
               discount_reason: o.discount?.label ?? "",
               discount_type: "fix",
               discount_value: totals.discount,
-              taxes: [],
+              taxes: buildCartTaxes(totals, s.taxRules),
               items: [{ status: "H", menuItems: menuItemsPayload }],
             },
           });
           const backendId = res.kotInfo.order_id;
+          const billNo = res.kotInfo.bill_no;
+          const orderNo = billNo ? parseBillNoAsOrderNo(billNo, backendId) : backendId;
 
           const byStation = new Map<string, OrderLine[]>();
           const fallbackKitchenName =
@@ -2552,21 +3757,44 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ...p,
             kots: [...newKots, ...p.kots],
             orders: p.orders.map((x) =>
-              x.id === orderId ? { ...x, kotRounds: round, status: "Running", backendId } : x,
+              x.id === orderId
+                ? {
+                    ...x,
+                    kotRounds: round,
+                    status: "Running",
+                    backendId,
+                    // startOrder's materialization (ensureRealOrder) gave
+                    // this a session-local placeholder number (101, 102,
+                    // ...) since no real order existed yet to derive one
+                    // from. Now that the real backend order exists, orderNo/
+                    // billNo are corrected to match it immediately, via the
+                    // exact same parseBillNoAsOrderNo a server reload
+                    // already uses - NOT the raw backendId this used to
+                    // fall back to (a different number from the real
+                    // bill_no entirely, confirmed live as the cause of a
+                    // printed bill's number not matching the Orders list
+                    // for the same order), so there's no more "#101 becomes
+                    // #6 [becomes something else again]" double-jump, and
+                    // the Orders list reads in real bill-number order
+                    // immediately, not just after some future reload.
+                    orderNo,
+                    billNo,
+                    // Every line used to get a real round number for free
+                    // at add time (kotRounds + 1, matching whichever round
+                    // fired next), so bumping kotRounds alone was enough to
+                    // make the fired-check true for them. Lines now stay at
+                    // UNSENT_ROUND until actually included in a send (see
+                    // its own comment) - this is the step that used to be
+                    // implicit, now done explicitly for just the lines that
+                    // were actually part of THIS send, so a line left
+                    // unchecked stays correctly unsent.
+                    lines: x.lines.map((l) =>
+                      pending.some((pl) => pl.id === l.id) ? { ...l, kotRound: round } : l,
+                    ),
+                  }
+                : x,
             ),
             tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Running" } : t)),
-            syncItems: [
-              {
-                id: uid("sy"),
-                entity: "KOT",
-                reference: `Round ${round} · ${o.tableLabel}`,
-                action: "Create",
-                status: p.connection === "online" ? "Synced" : "Pending",
-                queuedAt: nowStamp(),
-                device: "Counter POS",
-              },
-              ...p.syncItems,
-            ],
             notifications: [
               {
                 id: uid("n"),
@@ -2585,9 +3813,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             `Round ${round - 1}`,
             `Round ${round} · ${pending.length} item(s)`,
           );
-          toast.success(`KOT round ${round} sent`, {
-            description: `${newKots.length} station ticket(s) printed.`,
-          });
+          // Firing a KOT and physically printing it are separate backend
+          // calls (kotOrder never prints anything itself - it only returns
+          // print-job data the caller has to act on, and doPrintKot/
+          // localPrintApi.printKot is the only code path that actually
+          // does). This used to unconditionally claim "N ticket(s)
+          // printed" regardless of whether printing was even requested,
+          // which was simply false - "Only KOT" callers got a lying toast
+          // and nothing was ever sent to a printer.
+          if (shouldPrint) {
+            toast.success(`KOT round ${round} sent`, {
+              description: `Sending ${newKots.length} station ticket(s) to print…`,
+            });
+            await doPrintKot(o, round);
+          } else {
+            toast.success(`KOT round ${round} sent to kitchen`);
+          }
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not send KOT");
         }
@@ -2595,29 +3836,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
 
-    applyDiscount: (orderId, label, amount) => {
+    applyDiscount: (orderId, label, type, value) => {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
-      const rule = s.approvalRules.find((r) => r.domain === "Discount" && r.enabled);
-      const subtotal = orderTotals(o, s).subtotal;
-      const overThreshold = !!rule && (amount > 500 || (subtotal > 0 && amount / subtotal > 0.1));
+      // Same subtotal formula as orderTotals - kept in sync there for the
+      // toast/log's own preview amount, but the stored type/value (not this
+      // resolved amount) is what actually drives future recalculation.
+      const subtotal = o.itemised
+        ? o.lines.reduce((sum, l) => sum + lineTotal(l), 0)
+        : (o.fallbackTotal ?? 0);
+      const amount =
+        type === "percent" ? Math.round(((subtotal * value) / 100) * 100) / 100 : value;
       patch((p) => ({
         ...p,
         orders: p.orders.map((x) =>
           x.id === orderId
-            ? { ...x, discount: { label, amount, approvalFlagged: overThreshold } }
+            ? { ...x, discount: value ? { label, amount, type, value } : undefined }
             : x,
         ),
       }));
       log("Discount Applied", `Order #${o.orderNo}`, "₹0", `₹${amount} (${label})`);
-      if (overThreshold) {
-        toast.warning("Discount flagged for approval", {
-          description: `Above the Approval Matrix threshold (${rule?.threshold}). Sent to ${rule?.approver}.`,
-        });
-      } else {
-        toast.success(`Discount applied · ₹${amount}`);
-      }
+      toast.success(value ? `Discount applied · ₹${amount}` : "Discount removed");
     },
 
     setCustomer: (orderId, name, phone) => {
@@ -2637,29 +3877,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success("Customer details saved");
     },
 
-    setCharges: (orderId, delivery, packaging) => {
+    setCharges: (orderId, packaging) => {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
       patch((p) => ({
         ...p,
-        orders: p.orders.map((o) =>
-          o.id === orderId ? { ...o, deliveryCharge: delivery, packagingCharge: packaging } : o,
-        ),
+        orders: p.orders.map((o) => (o.id === orderId ? { ...o, packagingCharge: packaging } : o)),
       }));
-      log(
-        "Charges Updated",
-        `Order #${o?.orderNo}`,
-        "—",
-        `Delivery ₹${delivery} · Packaging ₹${packaging}`,
-      );
+      log("Charges Updated", `Order #${o?.orderNo}`, "—", `Packaging ₹${packaging}`);
       toast.success("Charges updated");
     },
 
     generateBill: async (orderId, options) => {
-      if (guardBlocked()) return;
+      if (guardBlocked()) return { ok: false };
       const o = s.orders.find((x) => x.id === orderId);
-      if (!o) return;
+      if (!o) return { ok: false };
 
       if (o.type !== "Dine In") {
         // Pickup has no backend-visible "bill generated" state -
@@ -2681,13 +3914,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             toast.error("Send a KOT first to print a pickup bill without settling");
           }
         }
-        return;
+        return { ok: true, backendId: o.backendId };
       }
 
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
       if (!table) {
         toast.error("Could not find this order's table");
-        return;
+        return { ok: false };
       }
 
       const billSettings: BillSettings = {
@@ -2711,10 +3944,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           addons: buildAddonsPayload(l.addons),
           comment: l.note ?? "",
           menu_categ_id: mi ? Number(mi.categoryId) : 0,
+          // finalizeExistingOrder (billerpe-local-exe/controller/order.js)
+          // destroys and rebuilds every OrderDetails row at bill-generation
+          // time - without this, that rebuild had no way to know which real
+          // KOT round each line came from and silently collapsed every
+          // round into one, confirmed live as "3 KOTs punched, order shows
+          // as 1 KOT once billed". This line already knows its own round.
+          kotNumber: l.kotRound,
         };
       });
 
-      const run = async () => {
+      const run = async (): Promise<{ ok: boolean; backendId?: number }> => {
         try {
           // No KOT fired yet (no backendId) - controller/kto.js#AdminOrder's
           // "no order_id" branch creates the Order fresh in this same call
@@ -2728,6 +3968,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             order_type: "dinin",
             ...(o.backendId ? { order_id: o.backendId } : {}),
             table_id: Number(table.id),
+            userName: o.customerName,
+            mobile: o.customerPhone,
             cart: {
               items: [{ status: "H", menuItems: allMenuItems }],
               gst: totals.tax,
@@ -2735,17 +3977,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               grandAmount: totals.grand,
               myAmount: totals.subtotal,
               service_charger: totals.service,
+              delivery_charge: totals.delivery,
+              packaging_charge: totals.packaging,
               discount_reason: o.discount?.label ?? "",
               discount_type: "fix",
               discount_value: totals.discount,
-              taxes: [],
+              taxes: buildCartTaxes(totals, s.taxRules),
             },
           });
           const backendId = o.backendId ?? res.orderId;
+          const billNo = res.bill_no;
+          const orderNo =
+            billNo && backendId != null
+              ? parseBillNoAsOrderNo(billNo, backendId)
+              : (backendId ?? o.orderNo);
           patch((p) => ({
             ...p,
             orders: p.orders.map((x) =>
-              x.id === orderId ? { ...x, status: "Bill Generated", backendId } : x,
+              // Same orderNo/billNo correction as generateKot's own patch -
+              // see its comment. This is the OTHER path an order first gets
+              // a real backendId through (billing without ever sending a
+              // KOT), so it needs the same fix.
+              x.id === orderId ? { ...x, status: "Bill Generated", backendId, orderNo, billNo } : x,
             ),
             tables: p.tables.map((t) =>
               t.id === o.tableId ? { ...t, status: "Bill Generated" } : t,
@@ -2756,14 +4009,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (options?.print && backendId) {
             await doPrintBill(o, backendId);
           }
+          return { ok: true, backendId };
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not generate bill");
+          return { ok: false };
         }
       };
-      await run();
+      return run();
     },
 
-    settleOrder: (orderId, payments) => {
+    settleOrder: (orderId, payments, tip) => {
       if (guardBlocked()) return;
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return;
@@ -2816,6 +4071,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               upi: upiAmt,
               card: cardAmt,
               due: dueAmt,
+              ...(tip ? { tip } : {}),
               ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
             });
           } else {
@@ -2852,7 +4108,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               upi: upiAmt,
               card: cardAmt,
               due: dueAmt,
-              ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
+              userName: o.customerName,
+              mobile: o.customerPhone,
               cart: {
                 items: [{ status: "H", menuItems: allMenuItems }],
                 gst: totals.tax,
@@ -2860,17 +4117,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 grandAmount: totals.grand,
                 myAmount: totals.subtotal,
                 service_charger: totals.service,
+                delivery_charge: totals.delivery,
+                packaging_charge: totals.packaging,
                 discount_reason: o.discount?.label ?? "",
                 discount_type: "fix",
                 discount_value: totals.discount,
-                taxes: [],
+                taxes: buildCartTaxes(totals, s.taxRules),
               },
             });
           }
           applySettlement();
           log("Bill Settled", `Order #${o.orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
           toast.success(`Order #${o.orderNo} settled`, {
-            description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
+            description:
+              payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") +
+              (tip ? ` · Tip ₹${tip}` : ""),
           });
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not settle order");
@@ -2884,6 +4145,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             x.id === orderId
               ? {
                   ...x,
+                  // startOrder hands back a DETERMINISTIC id
+                  // (`draft-table-<tableId>`) so re-clicking the same
+                  // table before any real content exists doesn't spawn
+                  // two different phantom drafts - but that means the
+                  // same id gets reused for every order ever started on
+                  // this table. Once an order is genuinely finished, it
+                  // needs a permanent identity of its own so the next
+                  // startOrder() on this table (same deterministic id)
+                  // doesn't resolve straight back to this settled one via
+                  // orderById's own s.orders lookup - confirmed live as
+                  // exactly that: reopening the table after settling
+                  // silently reopened the OLD settled bill (menu
+                  // disabled, since its status was already "Settled")
+                  // instead of starting a fresh order.
+                  id: `o-final-${x.backendId}`,
                   status: "Settled",
                   payments: [...(x.payments ?? []), ...payments],
                   paymentMode: mode,
@@ -2923,6 +4199,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 }
               : t,
           ),
+          // Keep KOT records pointed at the order's new permanent id (see
+          // the id-rename comment above) rather than the now-retired
+          // draft-table- id, so a later lookup like `kots.filter(k =>
+          // k.orderId === order.id)` still finds them.
+          kots: p.kots.map((k) =>
+            k.orderId === orderId ? { ...k, orderId: `o-final-${o.backendId}` } : k,
+          ),
           cashSessions: p.cashSessions.map((cs) =>
             cs.status === "Open" && cashPortion !== 0
               ? {
@@ -2944,30 +4227,145 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 }
               : cs,
           ),
-          syncItems: [
-            {
-              id: uid("sy"),
-              entity: "Bill",
-              reference: `#${o.orderNo}`,
-              action: "Settle",
-              status: p.connection === "online" ? "Synced" : "Pending",
-              queuedAt: nowStamp(),
-              device: "Counter POS",
-            },
-            ...p.syncItems,
-          ],
         }));
       void run();
     },
 
-    // reopenOrder was removed: confirmed by reading every order-mutating
-    // controller in this backend that there is no capability anywhere to
-    // reset a Settled order's payment back to "pending" (settleBills
-    // itself only ever operates on payment:"pending" rows) or to free its
-    // table server-side. A local-only "reopen" would desync from the
-    // backend's real state - the order stays Settled there regardless of
-    // what this app shows - so it's gone rather than left as a dead end
-    // that quietly corrupts local state.
+    // reopenOrder (the plain revert-to-pending version) stays gone - no
+    // backend capability exists for that (settleBills only ever operates
+    // on payment:"pending" rows). What editSettledOrder.js (both backends)
+    // now supports instead is narrower and safer: edit a settled order's
+    // items/discount in place, re-settling only the difference against
+    // what's already been collected - see AskUserQuestion decisions this
+    // was built against (re-settle for the difference; refund-due is
+    // lightweight, not a full reversal).
+    startEditSettledOrder: (orderId) => {
+      if (!canSpecial("orders.reopenSettled")) {
+        toast.error("You don't have permission to edit settled orders");
+        return undefined;
+      }
+      const original = s.orderHistory.find((o) => o.id === orderId);
+      if (!original || !original.backendId) {
+        toast.error("This order has no backend record to edit");
+        return undefined;
+      }
+      const draftId = `edit-${original.backendId}`;
+      if (!s.orders.some((o) => o.id === draftId)) {
+        patch((p) => ({
+          ...p,
+          orders: [
+            {
+              ...original,
+              id: draftId,
+              status: "Running",
+              editingSettledOrderId: original.backendId,
+            },
+            ...p.orders,
+          ],
+        }));
+      }
+      return draftId;
+    },
+
+    cancelEditSettledOrder: (localOrderId) => {
+      patch((p) => ({ ...p, orders: p.orders.filter((o) => o.id !== localOrderId) }));
+    },
+
+    saveSettledOrderEdits: async (localOrderId) => {
+      const o = s.orders.find((x) => x.id === localOrderId);
+      if (!o || !o.editingSettledOrderId) return;
+      if (!o.lines.length) {
+        toast.error("An order must have at least one item");
+        return;
+      }
+      const billSettings: BillSettings = {
+        serviceCharge: s.serviceCharge,
+        deliveryChargeRule: s.deliveryChargeRule,
+        packagingChargeRule: s.packagingChargeRule,
+        taxRules: s.taxRules,
+        invoiceFormat: s.invoiceFormat,
+      };
+      const totals = orderTotals(o, billSettings);
+      const items = o.lines.map((l) => {
+        const mi = s.menuItems.find((m) => m.id === l.itemId);
+        const variant = mi?.variants?.find((v) => v.name === l.variant);
+        return {
+          menuId: Number(l.itemId),
+          qty: l.qty,
+          price: l.price,
+          ...(variant ? { variantId: Number(variant.id) } : {}),
+          ...(l.variant ? { variantName: l.variant } : {}),
+          addons: buildAddonsPayload(l.addons),
+        };
+      });
+      try {
+        const { due } = await editSettledOrderApi.edit({
+          orderId: o.editingSettledOrderId,
+          items,
+          totalAmount: totals.subtotal,
+          gst: totals.tax,
+          grandAmount: totals.grand,
+          totalDiscount: totals.discount,
+          discount_reason: o.discount?.label ?? "",
+          discount_type: "fix",
+          discount_value: totals.discount,
+          service_charge: totals.service,
+        });
+        patch((p) => ({ ...p, orders: p.orders.filter((x) => x.id !== localOrderId) }));
+        await Promise.all([value.loadOrderHistoryFromServer(), value.loadRawMaterialsFromServer()]);
+        if (due < 0) {
+          await value.loadRefundDueOrdersFromServer();
+        } else if (due > 0) {
+          await value.loadDueBillsFromServer();
+        }
+        log("Order Edited", `Order #${o.orderNo}`, "Settled", `updated after settlement`);
+        toast.success(`Order #${o.orderNo} updated`, {
+          description:
+            due > 0
+              ? `₹${due} now due`
+              : due < 0
+                ? `₹${Math.abs(due)} refund owed to customer`
+                : "Fully settled, no balance",
+        });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not save changes to this order");
+      }
+    },
+
+    loadRefundDueOrdersFromServer: async () => {
+      try {
+        const { orders } = await refundDueApi.getAll();
+        patch((p) => ({
+          ...p,
+          refundDueOrders: orders.map((o) => ({
+            id: `refund-${o.id}`,
+            // Same OFF-prefix stripping as mapRawDueOrder's own billNo -
+            // see its comment.
+            billNo: `#${parseBillNoAsOrderNo(o.bill_no, o.id)}`,
+            amount: Math.abs(o.due),
+            date: isoToDMY(o.createdAt.slice(0, 10)),
+            backendOrderId: o.id,
+          })),
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load refunds due");
+      }
+    },
+
+    settleRefundDue: (id) => {
+      const target = s.refundDueOrders.find((r) => r.id === id);
+      if (!target) return;
+      const run = async () => {
+        try {
+          await refundDueApi.settle(target.backendOrderId);
+          await value.loadRefundDueOrdersFromServer();
+          toast.success("Refund recorded", { description: `${target.billNo} · ₹${target.amount}` });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not record refund");
+        }
+      };
+      void run();
+    },
 
     mergeTables: (sourceTableId, destTableId) => {
       if (guardBlocked()) return;
@@ -2985,6 +4383,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       );
       if (!srcOrder) {
         toast.error("Source table has no active order");
+        return;
+      }
+      // Once a bill is printed, that order is meant to be settled as-is -
+      // folding more items/another table's tab into it (or into it from the
+      // other side) after the guest has already seen a final total would
+      // silently change what they were billed. Blocks both directions:
+      // merging a billed table INTO another, and merging something INTO a
+      // table whose own bill is already generated.
+      if (srcOrder.status === "Bill Generated") {
+        toast.error("Bill already generated", {
+          description: `${sourceLabel}'s bill has already been generated — settle or reprint it instead of merging.`,
+        });
+        return;
+      }
+      if (dstOrder?.status === "Bill Generated") {
+        toast.error("Bill already generated", {
+          description: `${destLabel}'s bill has already been generated — settle or reprint it instead of merging into it.`,
+        });
         return;
       }
       if (dst?.status === "Reserved") {
@@ -3105,6 +4521,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const o = s.orders.find((x) => x.id === orderId);
       const dst = s.tables.find((t) => t.id === destTableId);
       if (!o || !dst) return;
+      // Same reasoning as mergeTables - a printed bill is meant to be
+      // settled as-is, not silently moved to a different table afterward.
+      if (o.status === "Bill Generated") {
+        toast.error("Bill already generated", {
+          description: "This order's bill has already been generated — it can no longer be moved.",
+        });
+        return;
+      }
       if (dst.status === "Reserved") {
         toast.error("Transfer blocked", { description: "The destination table is Reserved." });
         return;
@@ -3126,6 +4550,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               tableId2: Number(destTableId),
               orderId: o.backendId!,
             });
+            // moveTable only moves the table on the backend - the local
+            // order object still points at the source table until this
+            // patches it directly, same as the local-only branch below.
+            // loadTablesFromServer alone doesn't fix this: it only
+            // reconstructs orders it doesn't already know locally (matched
+            // by backendId), so an already-known order's own tableId/
+            // tableLabel was never refreshed here, leaving the destination
+            // table looking empty even though the transfer succeeded.
+            patch((p) => ({
+              ...p,
+              orders: p.orders.map((x) =>
+                x.id === orderId ? { ...x, tableId: destTableId, tableLabel: destLabel } : x,
+              ),
+              kots: p.kots.map((k) =>
+                k.orderId === orderId ? { ...k, tableLabel: destLabel } : k,
+              ),
+            }));
             await value.loadTablesFromServer();
             log("Table Transferred", `${sourceLabel} → ${destLabel}`, sourceLabel, destLabel);
             toast.success(`Order moved to ${destLabel}`, {
@@ -3185,6 +4626,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         kots: p.kots.map((k) => (k.id === kotId ? { ...k, status } : k)),
       }));
       toast.success(`KOT marked ${status}`);
+    },
+
+    rejectKot: (kotId, reason) => {
+      const k = s.kots.find((x) => x.id === kotId);
+      if (!k) return;
+      patch((p) => ({
+        ...p,
+        kots: p.kots.map((x) => (x.id === kotId ? { ...x, status: "Cancelled" } : x)),
+        notifications: [
+          {
+            id: uid("n"),
+            title: "Kitchen rejected an item",
+            body: `${k.tableLabel} · Round ${k.round} · ${k.items.map((i) => i.name).join(", ")}${reason ? ` — ${reason}` : ""}`,
+            at: nowStamp(),
+            read: false,
+            kind: "order",
+          },
+          ...p.notifications,
+        ],
+      }));
+      toast.success("KOT rejected", { description: reason || undefined });
     },
 
     // Live push from another device/tab's KDS socket connection (see
@@ -3253,53 +4715,169 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
     },
 
-    addReservation: (r) => {
-      const id = uid("r");
-      patch((p) => ({
-        ...p,
-        reservations: [{ ...r, id }, ...p.reservations],
-        tables: p.tables.map((t) =>
-          t.id === r.tableId && t.status === "Free"
-            ? { ...t, status: "Reserved", reservationId: id }
-            : t,
-        ),
-        customers: p.customers.some((c) => c.phone === r.mobile)
-          ? p.customers
-          : [
-              { id: uid("c"), name: r.customerName, phone: r.mobile, orders: 0, lastVisit: r.date },
-              ...p.customers,
-            ],
-      }));
-      toast.success("Reservation created", {
-        description: `${r.customerName} · ${r.party} guests · ${r.tableLabel} · ${r.time}`,
-      });
+    // Real cloud reservations (uat-backend-v2's TableBooking) - see
+    // reservationApi's own comment in api.ts for why this is cloud-routed
+    // rather than local-exe. Table status ("Reserved") is NOT set here on
+    // create - the real automation is a node-schedule job on the cloud
+    // that flips the table's own status at start_time, which the normal
+    // loadTablesFromServer poll already picks up on its own; setting it
+    // locally too would just be a redundant guess.
+    loadReservationsFromServer: async () => {
+      try {
+        const { bookings } = await reservationApi.getAll();
+        patch((p) => ({ ...p, reservations: bookings.map(mapRawReservation) }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load reservations");
+      }
     },
 
-    setReservationStatus: (id, status) => {
+    createReservation: async (r) => {
+      try {
+        await reservationApi.create({
+          name: r.customerName,
+          email: r.email,
+          number: r.mobile,
+          booking_date: r.date,
+          start_time: r.startTime,
+          end_time: r.endTime,
+          no_of_person: r.party,
+          totalAmount: r.totalAmount,
+          gst_no: r.gstNo,
+          advance: r.advance,
+          table_name: r.tableIds.map(Number),
+        });
+        await value.loadReservationsFromServer();
+        toast.success("Reservation created", {
+          description: `${r.customerName} · ${r.party} guests`,
+        });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not create reservation");
+      }
+    },
+
+    updateReservation: async (id, r) => {
+      try {
+        await reservationApi.update(Number(id), {
+          name: r.customerName,
+          email: r.email,
+          number: r.mobile,
+          booking_date: r.date,
+          start_time: r.startTime,
+          end_time: r.endTime,
+          no_of_person: r.party,
+          totalAmount: r.totalAmount,
+          gst_no: r.gstNo,
+          advance: r.advance,
+          table_name: r.tableIds.map(Number),
+        });
+        await value.loadReservationsFromServer();
+        toast.success("Reservation updated", {
+          description: `${r.customerName} · ${r.party} guests`,
+        });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not update reservation");
+      }
+    },
+
+    cancelReservation: async (id) => {
       const r = s.reservations.find((x) => x.id === id);
-      patch((p) => ({
-        ...p,
-        reservations: p.reservations.map((x) => (x.id === id ? { ...x, status } : x)),
-        tables: p.tables.map((t) => {
-          if (t.id !== r?.tableId) return t;
-          if (status === "Seated")
-            return { ...t, status: "Running", guests: r?.party, reservationId: undefined };
-          if (["Cancelled", "No Show", "Completed"].includes(status))
-            return { ...t, status: "Free", reservationId: undefined };
-          if (status === "Confirmed") return { ...t, status: "Reserved", reservationId: id };
-          return t;
-        }),
-      }));
-      toast.success(`Reservation ${status.toLowerCase()}`, { description: r?.customerName });
+      try {
+        await reservationApi.remove(Number(id));
+        patch((p) => ({ ...p, reservations: p.reservations.filter((x) => x.id !== id) }));
+        toast.success("Reservation cancelled", { description: r?.customerName });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not cancel reservation");
+      }
     },
 
-    setReleaseMode: (id, mode) =>
-      patch((p) => ({
-        ...p,
-        reservations: p.reservations.map((r) =>
-          r.id === id ? { ...r, releaseMode: mode, graceSeconds: mode === "Auto" ? 60 : 900 } : r,
-        ),
-      })),
+    // Walk-in waitlist - see model/queueEntry.js's own comment (exe-only,
+    // no cloud sync at all, unlike reservations above).
+    loadQueueFromServer: async () => {
+      try {
+        const { queue } = await queueApi.getAll();
+        patch((p) => ({ ...p, queue: queue.map(mapRawQueueEntry) }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load the waitlist queue");
+      }
+    },
+
+    addToQueue: async (name, mobile, partySize) => {
+      try {
+        const { queue } = await queueApi.add({ name, mobile, party_size: partySize });
+        patch((p) => ({ ...p, queue: queue.map(mapRawQueueEntry) }));
+        toast.success(`${name} added to the waitlist`, { description: `Party of ${partySize}` });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not add to the waitlist");
+      }
+    },
+
+    seatQueueEntry: async (id) => {
+      const entry = s.queue.find((x) => x.id === id);
+      if (!entry) return;
+      try {
+        const { entry: raw } = await queueApi.updateStatus(entry.backendId, "seated");
+        const updated = mapRawQueueEntry(raw);
+        patch((p) => ({ ...p, queue: p.queue.map((x) => (x.id === id ? updated : x)) }));
+        toast.success(`${entry.name} seated`);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not update the waitlist entry");
+      }
+    },
+
+    markQueueEntryNoShow: async (id) => {
+      const entry = s.queue.find((x) => x.id === id);
+      if (!entry) return;
+      try {
+        const { entry: raw } = await queueApi.updateStatus(entry.backendId, "no_show");
+        const updated = mapRawQueueEntry(raw);
+        patch((p) => ({ ...p, queue: p.queue.map((x) => (x.id === id ? updated : x)) }));
+        toast.success(`${entry.name} marked as no-show`);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not update the waitlist entry");
+      }
+    },
+
+    cancelQueueEntry: async (id) => {
+      const entry = s.queue.find((x) => x.id === id);
+      if (!entry) return;
+      try {
+        const { entry: raw } = await queueApi.updateStatus(entry.backendId, "cancelled");
+        const updated = mapRawQueueEntry(raw);
+        patch((p) => ({ ...p, queue: p.queue.map((x) => (x.id === id ? updated : x)) }));
+        toast.success(`${entry.name} removed from the waitlist`);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not update the waitlist entry");
+      }
+    },
+
+    // The call itself is a plain tel: link (browsers hand this off to the
+    // OS's own default calling app - there's no telephony backend to place
+    // a real call from, see controller/queue.js's own comment). Fires
+    // regardless of whether the "mark called" write below succeeds, since
+    // the actual call doesn't depend on that bookkeeping.
+    callQueueEntry: async (id) => {
+      const entry = s.queue.find((x) => x.id === id);
+      if (!entry) return;
+      try {
+        const { entry: raw } = await queueApi.markCalled(entry.backendId);
+        const updated = mapRawQueueEntry(raw);
+        patch((p) => ({ ...p, queue: p.queue.map((x) => (x.id === id ? updated : x)) }));
+      } catch {
+        // Best-effort - a failed "mark called" write should never block
+        // actually placing the call below.
+      }
+      window.location.href = `tel:${entry.mobile}`;
+    },
+
+    clearQueue: async () => {
+      try {
+        const { queue } = await queueApi.clear();
+        patch((p) => ({ ...p, queue: queue.map(mapRawQueueEntry) }));
+        toast.success("Waitlist cleared");
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not clear the waitlist");
+      }
+    },
 
     openSession: (float) => {
       const run = async () => {
@@ -3353,7 +4931,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return true;
     },
 
-    attachExpense: (headId, amount, note) => {
+    attachExpense: (headId, amount, note, date) => {
       const head = s.expenseHeads.find((h) => h.id === headId);
       const headBackendId = headId.startsWith("eh-")
         ? Number(headId.replace("eh-", ""))
@@ -3367,6 +4945,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               paymentMode: "Cash",
               reason: note,
               addExpense: true,
+              date,
             });
             await value.loadExpensesFromServer();
           }
@@ -3376,16 +4955,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             reason: `${head?.name ?? "Expense"} — ${note}`,
           });
           await value.loadCashSessionsFromServer();
+          log("Expense Added", head?.name ?? "Expense", "—", `₹${amount} · Cash · ${note}`);
           toast.success("Expense attached to session", {
             description: `${head?.name} · ₹${amount}`,
           });
+          return true;
         } catch (err) {
           toast.error(
             err instanceof ApiError ? err.message : "Could not attach expense to cash session",
           );
+          return false;
         }
       };
-      void run();
+      return run();
     },
 
     closeSession: (counted, reason) => {
@@ -3425,11 +5007,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     openSessionRecord: () => s.cashSessions.find((c) => c.status === "Open"),
 
+    // Cash Sessions is confirmed out of scope for the Local EXE (no local
+    // model) - this will always fail while working through it, so unlike
+    // every other load*FromServer here, a failure here does NOT toast.
+    // Confirmed live: toasting on every mount of a screen that will never
+    // succeed offline is pure noise, not an actionable error - the
+    // distinction from a genuine transient failure (which should and does
+    // still toast elsewhere) matters here.
     loadCashSessionsFromServer: async () => {
       try {
         const { sessions } = await cashSessionApi.getSessions();
         patch((p) => ({ ...p, cashSessions: sessions.map(mapRawCashSession) }));
       } catch (err) {
+        // Phase F: ported to the Local EXE - a failure here is now a real
+        // error worth surfacing, not the expected 401 it used to be.
         toast.error(
           err instanceof ApiError ? err.message : "Could not load cash sessions from server",
         );
@@ -3437,20 +5028,33 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
 
     loadMenuFromServer: async () => {
-      const menuId = s.menus.find((m) => m.isDefault)?.id ?? s.menus[0]?.id ?? "menu-default";
       try {
-        const [{ catagories }, { menu }, { variants }, { addons }] = await Promise.all([
-          menuApi.getCategories(),
-          menuApi.getItemsWithVariants(),
-          menuApi.getVariants(),
-          menuApi.getAddonGroups(),
-        ]);
+        const [{ menuCatalogs }, { catagories }, { menu }, { variants }, { addons }] =
+          await Promise.all([
+            menuApi.getMenuCatalogs(),
+            menuApi.getCategories(),
+            menuApi.getItemsWithVariants(),
+            menuApi.getVariants(),
+            menuApi.getAddonGroups(),
+          ]);
+        const mappedMenus = menuCatalogs.map(mapRawMenuCatalog);
+        // Every hotel always has a real default catalogue, so this only
+        // ever matters for a category/variant/addon-group row that somehow
+        // has no menu_catalog_id of its own (see the mappers' own comment).
+        const fallbackMenuId =
+          mappedMenus.find((m) => m.isDefault)?.id ?? mappedMenus[0]?.id ?? "menu-default";
         patch((p) => ({
           ...p,
-          menuCategories: catagories.map((c) => mapRawMenuCategory(c, menuId)),
-          menuItems: menu.map((m) => mapRawMenuItem(m, menuId)),
-          variantMasters: variants.filter((v) => v.active).map((v) => mapRawVariant(v, menuId)),
-          addonGroups: addons.map((g) => mapRawAddonGroup(g, menuId)),
+          // Keep the local list on an empty fetch (shouldn't happen given
+          // every hotel always has one, but avoids the "Viewing menu"
+          // selector going empty for a moment on a transient race).
+          menus: mappedMenus.length ? mappedMenus : p.menus,
+          menuCategories: catagories.map((c) => mapRawMenuCategory(c, fallbackMenuId)),
+          menuItems: menu.map((m) => mapRawMenuItem(m, fallbackMenuId)),
+          variantMasters: variants
+            .filter((v) => v.active)
+            .map((v) => mapRawVariant(v, fallbackMenuId)),
+          addonGroups: addons.map((g) => mapRawAddonGroup(g, fallbackMenuId)),
         }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load menu from server");
@@ -3524,51 +5128,150 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       void run();
     },
-    // Not yet wired to the real backend - would mean looping create-category
-    // and create-item calls per row, a bigger separate piece of work than
-    // the rest of this pass. Still mock-only.
-    bulkImportMenuItems: (rows, menuId) => {
-      patch((p) => {
-        let categories = p.menuCategories;
-        const newItems: MenuItem[] = rows.map((r) => {
-          const name = r.categoryName.trim();
-          let cat = categories.find(
-            (c) => c.menuId === menuId && c.name.toLowerCase() === name.toLowerCase(),
+    // Wired to the real backend: resolves/creates each row's category then
+    // creates-or-edits the item, looping sequentially (not Promise.all) so
+    // two rows sharing a brand-new category name can't both race the
+    // backend's create-category call and collide on its duplicate-name
+    // check. An existing item is matched by name (case-insensitive, same
+    // rule as the backend's own duplicate-category check) and updated in
+    // place instead of always inserting - re-importing the same CSV twice
+    // used to duplicate every item.
+    bulkImportMenuItems: (rows, menuId, onProgress) => {
+      const run = async () => {
+        let createdCount = 0;
+        let updatedCount = 0;
+        try {
+          const categoryIdByName = new Map(
+            s.menuCategories
+              .filter((c) => c.menuId === menuId)
+              .map((c) => [c.name.trim().toLowerCase(), c.id] as const),
           );
-          if (!cat) {
-            cat = {
-              id: uid("mc"),
-              name,
-              active: true,
-              sortOrder: categories.filter((c) => c.menuId === menuId).length + 1,
-              menuId,
+          const itemIdByName = new Map(
+            s.menuItems.map((i) => [i.name.trim().toLowerCase(), i.id] as const),
+          );
+          const seed = String(Date.now()).slice(-6);
+
+          for (let i = 0; i < rows.length; i++) {
+            const r = rows[i];
+            const catKey = r.categoryName.trim().toLowerCase();
+            let categoryId = categoryIdByName.get(catKey);
+            if (!categoryId) {
+              try {
+                await menuApi.createCategory(r.categoryName.trim(), Number(menuId));
+              } catch {
+                // May already exist server-side (this session's local
+                // category list is stale) - fall through to the lookup
+                // below regardless of why the create call failed.
+              }
+              const { catagories } = await menuApi.getCategories();
+              const found = catagories.find((x) => x.menu_categ_nm.trim().toLowerCase() === catKey);
+              if (!found) throw new Error(`Could not create category "${r.categoryName}"`);
+              categoryId = String(found.id);
+              categoryIdByName.set(catKey, categoryId);
+            }
+
+            const payload = {
+              item_name: r.name.trim(),
+              menu_categ_id: Number(categoryId),
+              price: r.price,
+              shortCode: toShortCode(r.sku, r.name, `${seed}${i}`),
+              favorite: false,
+              gst_type: "S" as const,
+              barcode_value: "",
+              addons: [] as number[],
+              variants: [] as { id: number; variant_price: number }[],
             };
-            categories = [...categories, cat];
+            const nameKey = r.name.trim().toLowerCase();
+            const existingItemId = itemIdByName.get(nameKey);
+            if (existingItemId) {
+              await menuApi.editItem({ ...payload, id: Number(existingItemId) });
+              updatedCount++;
+            } else {
+              await menuApi.createItem(payload);
+              createdCount++;
+            }
+            onProgress?.(i + 1, rows.length);
           }
-          return {
-            id: uid("m"),
-            name: r.name.trim(),
-            categoryId: cat.id,
-            price: r.price,
-            favourite: false,
-            active: r.active ?? true,
-            veg: r.veg ?? true,
-            sku: r.sku,
-          };
-        });
-        return { ...p, menuCategories: categories, menuItems: [...newItems, ...p.menuItems] };
-      });
-      toast.success(`${rows.length} item(s) imported`);
+          await value.loadMenuFromServer();
+          toast.success(`${rows.length} row(s) imported`, {
+            description: `${createdCount} created, ${updatedCount} updated`,
+          });
+        } catch (err) {
+          await value.loadMenuFromServer();
+          toast.error(err instanceof ApiError ? err.message : "Could not import all menu items", {
+            description:
+              createdCount || updatedCount
+                ? `${createdCount + updatedCount} of ${rows.length} row(s) completed before this failed.`
+                : undefined,
+          });
+        }
+      };
+      return run();
     },
     upsertMenuCategory: (c) => {
       const isNew = !s.menuCategories.some((x) => x.id === c.id);
+      // Both bugs below trace back to the same root cause: uat-backend-v2's
+      // create-category endpoint has no rank field at all - it always
+      // auto-assigns rank = current-max + 1 and ignores anything sent -
+      // while its edit endpoint blindly overwrites one row's rank with
+      // whatever number it's given, never touching siblings. Neither path
+      // keeps ranks unique/contiguous, so two categories can end up with
+      // the same rank; the *next* reload's re-sort (a stable sort, so ties
+      // fall back to whatever order the server happened to return rows in)
+      // can then show categories in a different relative order than
+      // before - which reads as "other categories' sort order changed on
+      // their own" even though no other row's rank value actually moved.
+      // The fix treats "Sort order" as "move to this position" and
+      // reflows every category in view to a clean 1..N ranking, only
+      // pushing an edit for rows whose rank actually needs to change.
       const run = async () => {
         try {
+          const inView = s.menuCategories.filter((x) => x.menuId === c.menuId);
+          let ordered: MenuCategory[];
           if (isNew) {
-            await menuApi.createCategory(c.name);
+            await menuApi.createCategory(c.name, Number(c.menuId));
+            // Need the backend-assigned id before this new row can be
+            // repositioned - loadMenuFromServer's own patch() wouldn't be
+            // visible through this closure's stale `s` snapshot, so fetch
+            // directly instead of relying on a reload here.
+            const { catagories } = await menuApi.getCategories();
+            const created = catagories.find(
+              (x) => x.menu_categ_nm.toLowerCase() === c.name.trim().toLowerCase(),
+            );
+            if (!created) throw new Error("Category was created but could not be found again");
+            const newCat: MenuCategory = {
+              id: String(created.id),
+              name: c.name,
+              active: c.active,
+              sortOrder: created.rank ?? created.id,
+              menuId: c.menuId,
+            };
+            ordered = [...inView, newCat];
           } else {
-            await menuApi.editCategory(Number(c.id), c.name, c.sortOrder);
+            ordered = inView.map((x) => (x.id === c.id ? { ...x, name: c.name } : x));
           }
+          const targetId = isNew ? ordered[ordered.length - 1].id : c.id;
+          const withoutTarget = ordered
+            .filter((x) => x.id !== targetId)
+            .sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+          const target = ordered.find((x) => x.id === targetId)!;
+          const clampedPosition = Math.max(
+            1,
+            Math.min(c.sortOrder ?? ordered.length, ordered.length),
+          );
+          withoutTarget.splice(clampedPosition - 1, 0, target);
+          const reflowed = withoutTarget.map((x, i) => ({ ...x, sortOrder: i + 1 }));
+
+          await Promise.all(
+            reflowed
+              .filter((x) => {
+                const before = ordered.find((o) => o.id === x.id);
+                return !before || before.sortOrder !== x.sortOrder || x.id === targetId;
+              })
+              .map((x) =>
+                menuApi.editCategory(Number(x.id), x.name, x.sortOrder, Number(c.menuId)),
+              ),
+          );
           await value.loadMenuFromServer();
           toast.success("Category saved", { description: c.name });
         } catch (err) {
@@ -3578,9 +5281,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     removeMenuCategory: (id) => {
-      if (s.menuItems.some((i) => i.categoryId === id)) {
+      if (s.menuItems.some((i) => i.categoryId === id && i.active)) {
         toast.error("Category is in use", {
-          description: "Move or delete its items first.",
+          description: "Deactivate or move its active items first.",
         });
         return;
       }
@@ -3595,14 +5298,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       void run();
     },
+    removeMenuCategories: (ids) => {
+      const blocked = ids.filter((id) => s.menuItems.some((i) => i.categoryId === id && i.active));
+      const removable = ids.filter((id) => !blocked.includes(id));
+      if (!removable.length) {
+        toast.error("Selected categories are in use", {
+          description: "Deactivate or move their active items first.",
+        });
+        return;
+      }
+      const run = async () => {
+        try {
+          await menuApi.removeCategories(removable.map(Number));
+          await value.loadMenuFromServer();
+          toast.success(
+            `${removable.length} categor${removable.length === 1 ? "y" : "ies"} removed`,
+            {
+              description: blocked.length
+                ? `${blocked.length} skipped — still has active item(s).`
+                : undefined,
+            },
+          );
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove categories");
+        }
+      };
+      void run();
+    },
     upsertVariant: (v) => {
       const isNew = !s.variantMasters.some((x) => x.id === v.id);
       const run = async () => {
         try {
           if (isNew) {
-            await menuApi.createVariant(v.name, true);
+            await menuApi.createVariant(v.name, true, Number(v.menuId));
           } else {
-            await menuApi.editVariant(Number(v.id), v.name, true);
+            await menuApi.editVariant(Number(v.id), v.name, true, Number(v.menuId));
           }
           await value.loadMenuFromServer();
           toast.success("Variant saved", { description: v.name });
@@ -3622,7 +5352,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!v) return;
       const run = async () => {
         try {
-          await menuApi.editVariant(Number(id), v.name, false);
+          await menuApi.editVariant(Number(id), v.name, false, Number(v.menuId));
           await value.loadMenuFromServer();
           toast.success("Variant removed");
         } catch (err) {
@@ -3641,6 +5371,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // No veg/non-veg/egg field in the UI yet - backend requires one per
         // option, so every option defaults to "veg" until that's added.
         addons: g.options.map((o) => ({ addon_name: o.name, price: o.price, attributes: "veg" })),
+        menu_catalog_id: Number(g.menuId),
       };
       const run = async () => {
         try {
@@ -3664,12 +5395,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.error("Removing addon groups isn't supported by the backend yet");
     },
     loadTablesFromServer: async () => {
+      const callId = ++tablesLoadSeq.current;
       try {
         const [{ tables }, { tableCatagories }, { order: activeOrders }] = await Promise.all([
           tableApi.getTables(),
           tableApi.getCategories(),
           orderApi.getActiveOrders(),
         ]);
+        if (callId !== tablesLoadSeq.current) return;
         const mappedTables = tables.map(mapRawTable);
         // Any currently-active order (dine-in or pickup, table or no
         // table - see orderApi.getActiveOrders's own comment) this
@@ -3684,35 +5417,111 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const knownBackendIds = new Set(
           s.orders.map((o) => o.backendId).filter((id): id is number => id !== undefined),
         );
+        // getActiveOrders now bundles OrderDetails directly (see its own
+        // comment in api.ts) - no more per-row getDetail follow-up needed
+        // to reconstruct a full local Order from an unresolved active one.
         const toResolve = activeOrders.filter((o) => !knownBackendIds.has(o.id));
-        const resolved = (
-          await Promise.all(
-            toResolve.map(async (raw) => {
-              try {
-                const { order: detail } = await orderHistoryApi.getDetail(raw.id);
-                const staffName = detail.hotelUserId
-                  ? (s.users.find((u) => u.id === String(detail.hotelUserId))?.name ?? "Staff")
-                  : "Staff";
-                const tableId = detail.TableId ? String(detail.TableId) : undefined;
-                return mapRawLiveOrder(detail, staffName, tableId);
-              } catch {
-                return null;
-              }
-            }),
-          )
-        ).filter((o): o is Order => o !== null);
-        const tablesWithOrders = mappedTables.map((t) => {
-          const match = resolved.find((o) => o.tableId === t.id);
-          return match ? { ...t, orderId: match.id } : t;
+        const resolved = toResolve.map((raw) => {
+          const staffName = raw.hotelUserId
+            ? (s.users.find((u) => u.id === String(raw.hotelUserId))?.name ?? "Staff")
+            : "Staff";
+          const tableId = raw.TableId ? String(raw.TableId) : undefined;
+          return mapRawLiveOrder(raw, staffName, tableId);
         });
-        patch((p) => ({
-          ...p,
-          tables: tablesWithOrders,
-          tableCategories: tableCatagories.map(mapRawCategory),
-          orders: [...p.orders, ...resolved],
-        }));
+        if (callId !== tablesLoadSeq.current) return;
+        patch((p) => {
+          // Re-check against `p` (guaranteed current as of THIS patch),
+          // not the `s`/`knownBackendIds` snapshot `resolved` was built
+          // from above, before the network round-trip. A local action that
+          // gives an order its backendId (holdOrder/generateKot/
+          // generateBill - all patch locally, no forced refresh after) can
+          // land in the gap between that snapshot and here: this same poll
+          // started before it, so `resolved` still treated that order as
+          // "unknown" and reconstructed it - without re-checking here, that
+          // becomes a second, duplicate Order object for the same backend
+          // order (confirmed live: a just-held order briefly showing twice
+          // in the Running Orders list, no server-side duplication - both
+          // objects pointed at the exact same real order id underneath).
+          // Re-filtering with `p` instead of `s` closes the race
+          // regardless of timing, rather than trying to shrink the window.
+          const currentKnownIds = new Set(
+            p.orders.map((o) => o.backendId).filter((id): id is number => id !== undefined),
+          );
+          const trulyNew = resolved.filter(
+            (o) => o.backendId === undefined || !currentKnownIds.has(o.backendId),
+          );
+          // Prefer a freshly-resolved order for this table (a genuinely new
+          // discovery this call). Otherwise, if the server's activeOrders
+          // list still includes an order for this table, keep pointing at
+          // whatever local order already represents it (matched by
+          // backendId) - the old version here only ever set orderId for
+          // NEWLY-resolved orders, silently dropping it for any order this
+          // app already knew about on every repeat call (this function
+          // reruns on every table-grid mount) - confirmed as the mechanism
+          // behind a table losing its own orderId (and, via openOrder's own
+          // resync branch, becoming unopenable with a "Could not open this
+          // table's order" toast) after nothing more than revisiting the
+          // table grid a second time. Reads `p.orders` here too (not
+          // `s.orders`) for the same freshness reason as trulyNew above.
+          const tablesWithOrders = mappedTables.map((t) => {
+            const freshMatch = trulyNew.find((o) => o.tableId === t.id);
+            if (freshMatch) return { ...t, orderId: freshMatch.id };
+            const stillActiveBackendId = activeOrders.find(
+              (o) => o.TableId !== null && String(o.TableId) === t.id,
+            )?.id;
+            const knownLocal =
+              stillActiveBackendId !== undefined
+                ? p.orders.find((o) => o.backendId === stillActiveBackendId)
+                : undefined;
+            return knownLocal ? { ...t, orderId: knownLocal.id } : t;
+          });
+          return {
+            ...p,
+            tables: tablesWithOrders,
+            tableCategories: tableCatagories.map(mapRawCategory),
+            orders: [...p.orders, ...trulyNew],
+          };
+        });
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load tables from server");
+      }
+    },
+    // Fills the other gap loadTablesFromServer deliberately leaves open
+    // (see its own comment: it only ever discovers orders this session
+    // didn't know about yet, never refreshes one it already has) - without
+    // this, an order already open on screen never learns about a KOT
+    // round added elsewhere (another terminal, or a QR order accepted in
+    // the background) until a full page reload. Confirmed live: staff
+    // reported needing to refresh to see a 2nd QR round at all.
+    //
+    // Only refreshes when there's nothing local to lose: if every line on
+    // this order is already fired (kotRound <= kotRounds), the fresh
+    // server copy is unambiguously correct and safe to replace wholesale.
+    // If a draft/not-yet-fired round is being built locally (a line with
+    // kotRound > kotRounds - see addToCart's own "next round" comment),
+    // skip this tick rather than risk merging it wrong; the next poll
+    // after that round is sent (making the order draft-free again) will
+    // pick up whatever changed in the meantime.
+    refreshOrderFromServer: async (orderId) => {
+      const order = s.orders.find((o) => o.id === orderId);
+      if (!order?.backendId) return;
+      if (order.lines.some((l) => l.kotRound > order.kotRounds)) return;
+      try {
+        const { order: raw } = await orderHistoryApi.getDetail(order.backendId);
+        if (!raw) return;
+        const staffName = raw.hotelUserId
+          ? (s.users.find((u) => u.id === String(raw.hotelUserId))?.name ?? "Staff")
+          : "Staff";
+        const fresh = mapRawLiveOrder(raw, staffName, order.tableId);
+        patch((p) => ({
+          ...p,
+          orders: p.orders.map((o) =>
+            o.id === orderId ? { ...o, lines: fresh.lines, kotRounds: fresh.kotRounds } : o,
+          ),
+        }));
+      } catch {
+        // best-effort - a failed background refresh just leaves the
+        // current view as-is until the next tick
       }
     },
     upsertTable: (t) => {
@@ -3865,19 +5674,61 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     },
 
-    // Only pulls upiId - see hotelApi's own comment for why the rest of
-    // this app's InvoiceFormat stays local-only.
+    // Pulls upiId plus invoiceFormateIncGst - see hotelApi's own comment for
+    // why the rest of this app's InvoiceFormat stays local-only.
+    // invoiceFormateIncGst is the one exception: it's a real, load-bearing
+    // Hotel column (controller/kto.js reads it server-side when computing
+    // an order's own gst/grandAmount), not just a display setting, so this
+    // app's local gstCalculation toggle must be hydrated from - and, in
+    // setGstCalculation, written back to - this same value rather than
+    // silently drifting from what the backend actually bills.
     loadInvoiceFormatFromServer: async () => {
       try {
-        const { upiId, hms_res_setting } = await hotelApi.getSettings();
+        const [settings, { headerFooterData }] = await Promise.all([
+          hotelApi.getSettings(),
+          invoiceFormateApi.getHeaderFooter(),
+        ]);
+        const { upiId, hotel_logo, hms_res_setting, invoiceFormateIncGst } = settings;
         patch((p) => ({
           ...p,
-          invoiceFormat: { ...p.invoiceFormat, upiId: upiId ?? "" },
+          invoiceFormat: {
+            ...p.invoiceFormat,
+            upiId: upiId ?? "",
+            gstCalculation: invoiceFormateIncGst,
+            // Same filename-only convention as hotel_logo everywhere else
+            // on the backend - "placeholder.png"/empty/unset all mean "no
+            // real logo uploaded yet", not a literal image to fetch.
+            logoUrl:
+              hotel_logo && hotel_logo !== "placeholder.png"
+                ? `${API_BASE_URL}/images/${hotel_logo}`
+                : undefined,
+            header: mapRawInvoiceLines(headerFooterData, "header"),
+            footer: mapRawInvoiceLines(headerFooterData, "footer"),
+          },
           qrOnSettle: hms_res_setting?.qr_code_open_on_settle ?? false,
         }));
       } catch (err) {
         toast.error(
           err instanceof ApiError ? err.message : "Could not load billing settings from server",
+        );
+      }
+    },
+
+    // Dynamic KOT format (Task 1) - same idea as loadInvoiceFormatFromServer
+    // above, against the separate hms_kot_formate_mst table.
+    loadKotFormatFromServer: async () => {
+      try {
+        const { headerFooterData } = await kotFormatApi.getHeaderFooter();
+        patch((p) => ({
+          ...p,
+          kotFormat: {
+            header: mapRawKotLines(headerFooterData, "header"),
+            footer: mapRawKotLines(headerFooterData, "footer"),
+          },
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load KOT format settings from server",
         );
       }
     },
@@ -4049,6 +5900,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    // Suppliers, Purchase Orders, and Wastage are confirmed out of scope
+    // for the Local EXE (no local model) - see loadCashSessionsFromServer's
+    // comment on why these stay silent on failure rather than toasting.
     loadSuppliersFromServer: async () => {
       try {
         const { suppliers } = await supplierApi.getAll();
@@ -4058,6 +5912,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           suppliers: suppliers.map((x) => mapRawSupplier(x, previousById.get(String(x.id)))),
         }));
       } catch (err) {
+        // Phase F: ported to the Local EXE - a failure here is now a real
+        // error worth surfacing, not the expected 401 it used to be.
         toast.error(err instanceof ApiError ? err.message : "Could not load suppliers from server");
       }
     },
@@ -4082,8 +5938,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ],
         }));
       } catch (err) {
+        // Phase F: ported to the Local EXE - a failure here is now a real
+        // error worth surfacing, not the expected 401 it used to be.
         toast.error(
           err instanceof ApiError ? err.message : "Could not load purchase orders from server",
+        );
+      }
+    },
+    loadRequisitionsFromServer: async () => {
+      try {
+        const { requisitions } = await requisitionApi.getAll();
+        patch((p) => ({ ...p, requisitions: requisitions.map(mapRawRequisition) }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load requisitions from server",
         );
       }
     },
@@ -4098,7 +5966,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           wastages: data.map((w) => mapRawWastage(w, previousByBackendId.get(w.id))),
         }));
       } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : "Could not load wastage from server");
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load wastage records from server",
+        );
       }
     },
     // Units are fetched fresh here rather than read off s.units - this is
@@ -4130,6 +6000,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
         patch((p) => ({ ...p, semiFinished: mapped }));
       } catch (err) {
+        // Phase F: ported to the Local EXE - a failure here is now a real
+        // error worth surfacing, not the expected 401 it used to be.
         toast.error(
           err instanceof ApiError ? err.message : "Could not load semi-finished items from server",
         );
@@ -4156,9 +6028,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ).filter((r): r is Recipe => r !== null);
         patch((p) => ({ ...p, recipes: mapped }));
       } catch (err) {
+        // Phase F: ported to the Local EXE - a failure here is now a real
+        // error worth surfacing, not the expected 401 it used to be.
         toast.error(err instanceof ApiError ? err.message : "Could not load recipes from server");
       }
     },
+    // Expense Heads/Expenses: ported to the Local EXE (Phase F) - a
+    // failure here is now a real error worth surfacing.
     loadExpenseHeadsFromServer: async () => {
       try {
         const { expenseHeads } = await expenseHeadApi.getAll();
@@ -4179,55 +6055,103 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     loadExpensesFromServer: async () => {
       try {
-        const { entry } = await expenseApi.getAll("2000-01-01", "2100-01-01");
+        const { entry } = await expenseApi.getAll("2000-01-01", "2100-01-01", { all: true });
         patch((p) => ({ ...p, expenses: entry.map(mapRawExpenseEntry) }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load expenses from server");
       }
     },
-    loadOrderHistoryFromServer: async () => {
+    loadExpenseEntriesPage: async (params) => {
       try {
-        const { order: headers } = await orderHistoryApi.getAllHeaders();
-        // Real settled orders only - unsettled ones are already visible
-        // live via `orders`, and reconstructing this app's full
-        // Held/Running/Bill Generated workflow state for them isn't
-        // needed for the historical reporting this feeds. `business_date`
-        // is real-world dated, unlike this app's frozen local "today" -
-        // no window bound exists on the backend side of this endpoint, so
-        // it's applied here, capped at 300 orders as a sanity bound (see
-        // orderHistoryApi's own comment on why there's no cheaper way to
-        // get this).
-        const windowStart = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
-        const inWindow = headers
-          .filter((h) => h.payment === "success" && h.business_date >= windowStart)
-          .slice(0, 300);
-        const mapped = (
-          await Promise.all(
-            inWindow.map(async (h) => {
-              try {
-                const { order: detail } = await orderHistoryApi.getDetail(h.id);
-                const staffName = h.hotelUserId
-                  ? (s.users.find((u) => u.id === String(h.hotelUserId))?.name ?? "Staff")
-                  : "Staff";
-                return mapRawOrderHistoryEntry(detail, staffName);
-              } catch {
-                return null;
-              }
-            }),
-          )
-        ).filter((o): o is Order => o !== null);
-        patch((p) => ({ ...p, orderHistory: mapped }));
+        const expenseHeadBackendId = params.expenseHeadId?.startsWith("eh-")
+          ? Number(params.expenseHeadId.replace("eh-", ""))
+          : undefined;
+        const userBackendId = params.userId ? Number(params.userId) : undefined;
+        const { entry, page, totalPages, total, totalMoneyIn, totalExpense } =
+          await expenseApi.getAll(params.from, params.to, {
+            page: params.page,
+            limit: params.limit,
+            expense_head_id: expenseHeadBackendId,
+            paymentMode: params.paymentMode,
+            user_id: userBackendId,
+          });
+        patch((p) => ({
+          ...p,
+          expenseEntriesPageRows: entry.map(mapRawExpenseEntry),
+          expenseEntriesPage: page,
+          expenseEntriesTotalPages: totalPages,
+          expenseEntriesTotal: total,
+          expenseEntriesTotalMoneyIn: totalMoneyIn,
+          expenseEntriesTotalExpense: totalExpense,
+        }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load expense entries");
+      }
+    },
+    loadAllExpensesForExport: async (params) => {
+      const expenseHeadBackendId = params.expenseHeadId?.startsWith("eh-")
+        ? Number(params.expenseHeadId.replace("eh-", ""))
+        : undefined;
+      const userBackendId = params.userId ? Number(params.userId) : undefined;
+      try {
+        const { entry } = await expenseApi.getAll(params.from, params.to, {
+          all: true,
+          expense_head_id: expenseHeadBackendId,
+          paymentMode: params.paymentMode,
+          user_id: userBackendId,
+        });
+        return entry.map(mapRawExpenseEntry);
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not export expenses");
+        return [];
+      }
+    },
+    // page/limit/search now do real work server-side (see
+    // orderHistoryApi.getAllHeaders's own comment) - settled-only
+    // filtering and the LIMIT/OFFSET both happen in the query itself, so
+    // there's no client-side re-filter or per-row detail follow-up left
+    // here at all, just a straight map from already-complete rows.
+    loadOrderHistoryFromServer: async (page = 1, search = "") => {
+      try {
+        const {
+          order: rows,
+          page: gotPage,
+          totalPages,
+          total,
+        } = await orderHistoryApi.getAllHeaders(page, 10, search);
+        const mapped = rows.map((h) =>
+          mapRawOrderHistoryEntry(
+            h,
+            h.hotelUserId
+              ? (s.users.find((u) => u.id === String(h.hotelUserId))?.name ?? "Staff")
+              : "Staff",
+          ),
+        );
+        patch((p) => ({
+          ...p,
+          orderHistory: mapped,
+          orderHistoryPage: gotPage,
+          orderHistoryTotalPages: totalPages,
+          orderHistoryTotal: total,
+        }));
       } catch (err) {
         toast.error(
           err instanceof ApiError ? err.message : "Could not load order history from server",
         );
       }
     },
+    // Promo Codes and E-Bill Credit are confirmed out of scope for the
+    // Local EXE - see loadCashSessionsFromServer's comment. Promo Codes
+    // in particular loads on every billing-screen visit (see its own
+    // useEffect in _shell.table-grid.order.$orderId.tsx), so toasting on
+    // failure there was especially noisy - confirmed live.
     loadPromoCodesFromServer: async () => {
       try {
         const { promoCodes } = await promoCodeApi.getAll();
         patch((p) => ({ ...p, promoCodes: promoCodes.map(mapRawPromoCode) }));
       } catch (err) {
+        // Phase F: ported to the Local EXE - a failure here is now a real
+        // error worth surfacing, not the expected 401 it used to be.
         toast.error(
           err instanceof ApiError ? err.message : "Could not load promo codes from server",
         );
@@ -4238,6 +6162,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const { credit } = await orderApi.getEBillCredit();
         patch((p) => ({ ...p, eBillCredit: credit }));
       } catch (err) {
+        // Phase F: getEbillCredit ported to the Local EXE (a locally-cached
+        // read - see controller/ebillCredit.js) - a failure here is now a
+        // real error worth surfacing.
         toast.error(
           err instanceof ApiError ? err.message : "Could not load e-bill credit from server",
         );
@@ -4264,9 +6191,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ? { password: newPassword }
             : {}),
         ...(u.pin ? { pin: u.pin } : {}),
-        // Best-effort role-default permissions, not a live sync of the
-        // permission editor - see buildAccessNameFromRole's own comment.
-        access_name: buildAccessNameFromRole(u.role, s.rolePermissions),
+        // Role default merged with this user's own permissionOverrides -
+        // see resolveEffectiveGrants's own comment for exactly what does
+        // and doesn't survive the trip to the backend's 10-area grid.
+        access_name: buildAccessName(
+          resolveEffectiveGrants(u.role, s.rolePermissions, u.permissionOverrides),
+        ),
       };
       const run = async () => {
         try {
@@ -4274,6 +6204,37 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             await userApi.createUser(payload);
           } else {
             await userApi.editUser({ ...payload, id: Number(u.id) });
+          }
+          // permissionOverrides is a purely local concept - the backend's
+          // flat UserAccess grid has no "this is a custom override, not
+          // just the role default" flag of its own (see
+          // resolveEffectiveGrants's comment), so nothing about the API
+          // call above persists it. loadUsersFromServer only ever carries
+          // an override forward from whatever's ALREADY in local state;
+          // without patching it in here first, an edited existing user's
+          // override had nothing to carry forward and silently reverted
+          // to "Role default" the moment this save completed - confirmed
+          // live as "override a permission, save, reopen the popup - the
+          // override is gone." Skipped for a brand-new user: its draft id
+          // is a local placeholder, not the real backend id the reload
+          // will assign, so there's no row to patch by id yet.
+          if (!isNew) {
+            // Same "nothing to carry forward without patching it in first"
+            // problem as permissionOverrides just above, for the same
+            // reason: the real PIN is never returned by the backend (only
+            // its hash - see mapRawUser's own comment), so
+            // loadUsersFromServer always resets pin to "" unless the
+            // just-saved value is patched in here first. Confirmed live as
+            // "set your PIN in Profile, navigate away and back - it's
+            // blank again."
+            patch((p) => ({
+              ...p,
+              users: p.users.map((x) =>
+                x.id === u.id
+                  ? { ...x, permissionOverrides: u.permissionOverrides, pin: u.pin }
+                  : x,
+              ),
+            }));
           }
           await value.loadUsersFromServer();
           log("User Saved", u.name, "—", `${u.role} · ${u.status}`);
@@ -4284,41 +6245,101 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       void run();
     },
-    upsertExpense: (e) => {
+    upsertExpense: (e, date) => {
       const headBackendId = e.headId.startsWith("eh-")
         ? Number(e.headId.replace("eh-", ""))
         : undefined;
       if (!headBackendId) {
         toast.error("Select a valid expense head");
-        return;
+        return Promise.resolve(false);
       }
       const backendId = e.id.startsWith("exp-") ? Number(e.id.replace("exp-", "")) : undefined;
+      const headName = s.expenseHeads.find((h) => h.id === e.headId)?.name ?? "Expense";
+      // Snapshot of what this row looked like before the edit, for the audit
+      // log's before/after - taken from whichever loaded list currently has
+      // it (the paginated Entries screen is the only place an edit can be
+      // started from, but the full-range `expenses` is a safe fallback).
+      const before = backendId
+        ? (s.expenseEntriesPageRows.find((x) => x.id === e.id) ??
+          s.expenses.find((x) => x.id === e.id))
+        : undefined;
       const payload = {
         expense_head_id: headBackendId,
         amount: e.amount,
         paymentMode: e.mode,
         reason: e.note,
         addExpense: true,
+        date,
       };
       const run = async () => {
         try {
           if (!backendId) {
             await expenseApi.create(payload);
+            log("Expense Added", headName, "—", `₹${e.amount} · ${e.mode} · ${e.note}`);
           } else {
             await expenseApi.update({ ...payload, id: backendId });
+            log(
+              "Expense Edited",
+              headName,
+              before ? `₹${before.amount} · ${before.mode} · ${before.note}` : "—",
+              `₹${e.amount} · ${e.mode} · ${e.note}`,
+            );
           }
           await value.loadExpensesFromServer();
           toast.success("Expense saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save expense");
+          return false;
         }
       };
-      void run();
+      return run();
+    },
+    deleteExpense: (id, reason) => {
+      const backendId = id.startsWith("exp-") ? Number(id.replace("exp-", "")) : undefined;
+      if (!backendId) {
+        toast.error("Could not delete this expense entry");
+        return Promise.resolve(false);
+      }
+      const existing =
+        s.expenseEntriesPageRows.find((x) => x.id === id) ?? s.expenses.find((x) => x.id === id);
+      const headName = existing
+        ? (s.expenseHeads.find((h) => h.id === existing.headId)?.name ?? "Expense")
+        : "Expense";
+      const run = async () => {
+        try {
+          await expenseApi.remove(backendId);
+          await value.loadExpensesFromServer();
+          log(
+            "Expense Deleted",
+            headName,
+            existing ? `₹${existing.amount} · ${existing.mode} · ${existing.note}` : "—",
+            "—",
+            reason,
+          );
+          toast.success("Expense entry deleted");
+          return true;
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not delete this expense entry",
+          );
+          return false;
+        }
+      };
+      return run();
     },
     upsertExpenseHead: (h) => {
       if (!h.name.trim()) {
         toast.error("Enter a head name");
-        return;
+        return Promise.resolve(false);
+      }
+      // Client-side duplicate-name guard (case-insensitive) so a mistaken
+      // resubmit fails fast with a clear message instead of round-tripping
+      // to the backend's own (case-sensitive) uniqueness check.
+      const nameKey = h.name.trim().toLowerCase();
+      if (s.expenseHeads.some((x) => x.id !== h.id && x.name.trim().toLowerCase() === nameKey)) {
+        toast.error("A head with this name already exists");
+        return Promise.resolve(false);
       }
       // type/active have no backend field at all (see mapRawExpenseHead) -
       // a reload's previous-value lookup can't see an edit made in this
@@ -4341,7 +6362,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const resolvedId = backendId ?? expenseHeads.find((x) => !knownIds.has(x.id))?.id;
           if (!resolvedId) {
             toast.error("Saved on the server but could not resolve its id");
-            return;
+            return false;
           }
           const mapped: ExpenseHead = {
             id: `eh-${resolvedId}`,
@@ -4356,11 +6377,38 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               : [...p.expenseHeads, mapped],
           }));
           toast.success("Expense head saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save expense head");
+          return false;
         }
       };
-      void run();
+      return run();
+    },
+    removeExpenseHead: (id) => value.removeExpenseHeads([id]),
+    removeExpenseHeads: (ids) => {
+      const backendIds = ids
+        .map((id) => (id.startsWith("eh-") ? Number(id.replace("eh-", "")) : undefined))
+        .filter((id): id is number => id !== undefined);
+      if (!backendIds.length) return Promise.resolve();
+      const run = async () => {
+        try {
+          const { expenseHeads } = await expenseHeadApi.remove(backendIds);
+          const previousById = new Map(
+            s.expenseHeads.map((h) => [h.id, { type: h.type, active: h.active }]),
+          );
+          patch((p) => ({
+            ...p,
+            expenseHeads: expenseHeads.map((h) =>
+              mapRawExpenseHead(h, previousById.get(`eh-${h.id}`)),
+            ),
+          }));
+          toast.success(`${ids.length} expense head${ids.length === 1 ? "" : "s"} deleted`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not delete expense head(s)");
+        }
+      };
+      return run();
     },
     upsertRawMaterial: (m) => {
       const purchaseUnitId = s.units.find((u) => u.shortName === m.purchaseUnit)?.id;
@@ -5122,39 +7170,38 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Add at least one material");
         return;
       }
-      const no = `REQ-2026-${String(
-        Math.max(
-          ...s.requisitions
-            .map((r) => Number(r.reqNo.split("-").pop()))
-            .filter((n) => !Number.isNaN(n)),
-          0,
-        ) + 1,
-      ).padStart(3, "0")}`;
-      patch((p) => ({
-        ...p,
-        requisitions: [
-          {
-            id: uid("fr"),
-            reqNo: no,
-            date: todayLabel,
-            status: "Pending",
-            raisedBy: currentUser?.name ?? "Taj",
-            items: valid,
-            ...(remarks ? { remarks } : {}),
-          },
-          ...p.requisitions,
-        ],
-      }));
-      toast.success("Requisition placed", { description: `${no} · awaiting merchant approval` });
+      const run = async () => {
+        try {
+          const { req_no } = await requisitionApi.create(valid, remarks);
+          await value.loadRequisitionsFromServer();
+          toast.success("Requisition placed", {
+            description: `REQ-2026-${String(req_no).padStart(3, "0")} · awaiting merchant approval`,
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not place requisition");
+        }
+      };
+      void run();
     },
     setRequisitionStatus: (id, status) => {
-      patch((p) => ({
-        ...p,
-        requisitions: p.requisitions.map((r) => (r.id === id ? { ...r, status } : r)),
-      }));
-      toast.success(`Requisition ${status.toLowerCase()}`);
+      const req = s.requisitions.find((r) => r.id === id);
+      if (!req) return;
+      const run = async () => {
+        try {
+          await requisitionApi.setStatus(Number(id.replace("req-", "")), status);
+          await value.loadRequisitionsFromServer();
+          toast.success(`Requisition ${status.toLowerCase()}`);
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not update requisition status",
+          );
+        }
+      };
+      void run();
     },
-    setRequisitionQty: (id, materialId, qty) =>
+    setRequisitionQty: (id, materialId, qty) => {
+      // Optimistic local patch for snappy +/- clicks in the sheet, same
+      // pattern as elsewhere - reconciled by the reload below.
       patch((p) => ({
         ...p,
         requisitions: p.requisitions.map((r) =>
@@ -5167,65 +7214,53 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               }
             : r,
         ),
-      })),
+      }));
+      const run = async () => {
+        try {
+          await requisitionApi.setItemQty(
+            Number(id.replace("req-", "")),
+            materialId,
+            Math.max(0, qty),
+          );
+          await value.loadRequisitionsFromServer();
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not update quantity");
+          await value.loadRequisitionsFromServer();
+        }
+      };
+      void run();
+    },
     removeRequisition: (id) => {
-      patch((p) => ({ ...p, requisitions: p.requisitions.filter((r) => r.id !== id) }));
-      toast.success("Requisition deleted");
+      const run = async () => {
+        try {
+          await requisitionApi.remove(Number(id.replace("req-", "")));
+          await value.loadRequisitionsFromServer();
+          toast.success("Requisition deleted");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not delete requisition");
+        }
+      };
+      void run();
     },
     fulfilRequisition: (id) => {
       const req = s.requisitions.find((r) => r.id === id);
       if (!req || req.purchaseOrderId) return;
-      const poId = uid("po");
-      const poNo = `PO-2026-${String(
-        Math.max(
-          ...s.purchaseOrders
-            .map((x) => Number(x.poNo.split("-").pop()))
-            .filter((n) => !Number.isNaN(n)),
-          0,
-        ) + 1,
-      ).padStart(3, "0")}`;
-      const who = currentUser?.name ?? "Taj";
-      const supplierId = s.suppliers[0]?.id ?? "s1";
-      const po: PurchaseOrder = {
-        id: poId,
-        poNo,
-        supplierId,
-        date: todayLabel,
-        status: "Received",
-        paymentStatus: "Unpaid",
-        paidAmount: 0,
-        requisitionId: req.id,
-        lines: req.items.map((i) => ({
-          materialId: i.materialId,
-          qty: i.approvedQty ?? i.orderedQty,
-          rate: i.unitPrice,
-          taxPct: 5,
-        })),
+      const run = async () => {
+        try {
+          const { po_no } = await requisitionApi.fulfil(Number(id.replace("req-", "")));
+          await Promise.all([
+            value.loadRequisitionsFromServer(),
+            value.loadPurchaseOrdersFromServer(),
+          ]);
+          await value.loadRawMaterialsFromServer();
+          toast.success("Requisition fulfilled", {
+            description: `PO-2026-${String(po_no).padStart(3, "0")} created and stock received`,
+          });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not fulfil requisition");
+        }
       };
-      const due = poTotals(po).grand;
-      patch((p) => {
-        const moves: StockMovement[] = [];
-        const rawMaterials = p.rawMaterials.map((m) => {
-          const l = po.lines.find((x) => x.materialId === m.id);
-          if (!l) return m;
-          const inQty = l.qty * m.conversion;
-          moves.push(movement("Purchase", "raw", m.id, inQty, l.qty * l.rate, poNo, who));
-          return { ...m, stock: m.stock + inQty };
-        });
-        return {
-          ...p,
-          rawMaterials,
-          purchaseOrders: [po, ...p.purchaseOrders],
-          stockMovements: [...moves, ...p.stockMovements],
-          requisitions: p.requisitions.map((r) =>
-            r.id === id ? { ...r, status: "Delivered", purchaseOrderId: poId } : r,
-          ),
-          suppliers: p.suppliers.map((sup) =>
-            sup.id === supplierId ? { ...sup, outstanding: sup.outstanding + due } : sup,
-          ),
-        };
-      });
-      toast.success("Requisition fulfilled", { description: `${poNo} created and stock received` });
+      void run();
     },
 
     setConnection: (state) => {
@@ -5233,61 +7268,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (state === "online") {
         patch((p) => ({ ...p, connection: "syncing" }));
         setTimeout(() => {
-          set((p) => ({
-            ...p,
-            connection: "online",
-            syncItems: p.syncItems.map((i) =>
-              i.status === "Pending" ? { ...i, status: "Synced" } : i,
-            ),
-          }));
+          set((p) => ({ ...p, connection: "online" }));
           toast.success("All changes synced");
         }, 1600);
       }
     },
-    syncNow: () => {
-      patch((p) => ({ ...p, connection: "syncing" }));
-      setTimeout(() => {
-        set((p) => ({
-          ...p,
-          connection: "online",
-          syncItems: p.syncItems.map((i) =>
-            i.status === "Pending" ? { ...i, status: "Synced" } : i,
-          ),
-        }));
+    // Real status from billerpe-local-exe's GET /localServerStatus (see
+    // api.ts's RawLocalServerStatus) - backs the System page. Silent on
+    // failure (no toast) since this is called on a poll/interval, not a
+    // deliberate user action - a transient blip shouldn't spam toasts.
+    loadServerStatusFromServer: async () => {
+      const result = await localServerApi.getStatus();
+      if (result) patch((p) => ({ ...p, localServerStatus: result }));
+    },
+    // Real POST /localServerForceSync, then reload status so the page
+    // reflects the result immediately rather than waiting for the next
+    // poll.
+    forceSyncServer: async () => {
+      try {
+        await localServerApi.forceSync();
+        await value.loadServerStatusFromServer();
         toast.success("Sync complete", { description: "Local server is up to date." });
-      }, 1600);
-    },
-    retrySync: (id) => {
-      setTimeout(() => {
-        set((p) => ({
-          ...p,
-          syncItems: p.syncItems.map((i) =>
-            (id ? i.id === id : i.status === "Failed") && i.status !== "Conflict"
-              ? { ...i, status: "Synced" }
-              : i,
-          ),
-        }));
-        toast.success(id ? "Record synced" : "All failed records retried");
-      }, 900);
-    },
-    resolveConflict: (id) => {
-      patch((p) => ({
-        ...p,
-        syncItems: p.syncItems.map((i) => (i.id === id ? { ...i, status: "Synced" } : i)),
-      }));
-      toast.success("Conflict resolved", { description: "Local version kept and pushed." });
-    },
-    setDeviceStatus: (id, status) => {
-      patch((p) => ({ ...p, devices: p.devices.map((d) => (d.id === id ? { ...d, status } : d)) }));
-      toast.success(`Device ${status.toLowerCase()}`);
-    },
-    renameDevice: (id, name) => {
-      patch((p) => ({ ...p, devices: p.devices.map((d) => (d.id === id ? { ...d, name } : d)) }));
-      toast.success("Device renamed");
-    },
-    deregisterDevice: (id) => {
-      patch((p) => ({ ...p, devices: p.devices.filter((d) => d.id !== id) }));
-      toast.success("Device deregistered");
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Sync failed - check the logs");
+      }
     },
     upsertPrinter: (pr) => {
       const print_type: "K" | "I" = pr.printType === "Invoice" ? "I" : "K";
@@ -5364,36 +7368,140 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         notifications: p.notifications.map((n) => ({ ...n, read: true })),
       })),
-    toggleNotificationSetting: (trigger, channel) =>
-      patch((p) => ({
-        ...p,
-        notificationSettings: p.notificationSettings.map((n) =>
-          n.trigger === trigger ? { ...n, [channel]: !n[channel] } : n,
-        ),
-      })),
-    toggleApprovalRule: (id) =>
-      patch((p) => ({
-        ...p,
-        approvalRules: p.approvalRules.map((r) =>
-          r.id === id && !r.locked ? { ...r, enabled: !r.enabled } : r,
-        ),
-      })),
-    updateApprovalThreshold: (id, threshold, approver) => {
-      patch((p) => ({
-        ...p,
-        approvalRules: p.approvalRules.map((r) =>
-          r.id === id ? { ...r, threshold, approver } : r,
-        ),
-      }));
-      toast.success("Approval rule updated");
+    loadNotificationSettingsFromServer: async () => {
+      try {
+        const { settings } = await notificationSettingApi.getAll();
+        patch((p) => ({ ...p, notificationSettings: settings.map(mapRawNotificationSetting) }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError
+            ? err.message
+            : "Could not load notification settings from server",
+        );
+      }
+    },
+    loadRolePermissionsFromServer: async () => {
+      try {
+        const { defaults } = await rolePermissionApi.getAll();
+        const { rolePermissions, roleSpecialPermissions } = mapRolePermissionDefaults(defaults);
+        patch((p) => ({ ...p, rolePermissions, roleSpecialPermissions }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load role permissions from server",
+        );
+      }
+    },
+    toggleNotificationSetting: (trigger, channel) => {
+      const backendChannel = channel === "inApp" ? "in_app" : channel;
+      const run = async () => {
+        try {
+          await notificationSettingApi.toggle(trigger, backendChannel);
+          await value.loadNotificationSettingsFromServer();
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not update notification setting",
+          );
+        }
+      };
+      void run();
+    },
+    loadBillChargeRulesFromServer: async () => {
+      try {
+        const { rules } = await billChargeApi.getAll();
+        const greaterLessMap: Record<
+          RawBillChargeRule["greater_less"],
+          "always" | "greater" | "less"
+        > = { "1": "greater", "2": "less", "3": "always" };
+        const mapRule = (r: RawBillChargeRule): BillChargeRule => ({
+          active: r.active,
+          type: r.charge_type === "fixed" ? "fixed" : "percent",
+          value: r.charge_value,
+          calculationOn: r.calculation_on,
+          autoApply: (parseBackendArray(r.charge_automatic) as string[]).map((t) =>
+            t === "dinin" ? "Dine-in" : "Pickup",
+          ) as OpsOrderType[],
+          taxOnCharge: r.calculation_on_tax,
+          condition: greaterLessMap[r.greater_less] ?? "always",
+          threshold: r.greater_less_amount,
+        });
+        const delivery = rules.find((r) => r.rule_for === "delivery");
+        const packaging = rules.find((r) => r.rule_for === "packaging");
+        patch((p) => ({
+          ...p,
+          ...(delivery ? { deliveryChargeRule: mapRule(delivery) } : {}),
+          ...(packaging ? { packagingChargeRule: mapRule(packaging) } : {}),
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load charge rules from server",
+        );
+      }
     },
     setDeliveryChargeRule: (rule) => {
-      patch((p) => ({ ...p, deliveryChargeRule: rule }));
-      toast.success("Delivery charge rule saved");
+      const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
+        "Dine-in": "dinin",
+        Pickup: "pickup",
+      };
+      const greaterLessMap: Record<"always" | "greater" | "less", "1" | "2" | "3"> = {
+        greater: "1",
+        less: "2",
+        always: "3",
+      };
+      const run = async () => {
+        try {
+          await billChargeApi.update({
+            rule_for: "delivery",
+            active: rule.active,
+            charge_type: rule.type === "percent" ? "percentage" : "fixed",
+            charge_value: rule.value,
+            calculation_on: rule.calculationOn,
+            charge_automatic: rule.autoApply.map((t) => orderTypeMap[t]),
+            calculation_on_tax: rule.taxOnCharge,
+            greater_less: greaterLessMap[rule.condition],
+            greater_less_amount: rule.threshold,
+          });
+          await value.loadBillChargeRulesFromServer();
+          toast.success("Delivery charge rule saved");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not save delivery charge rule",
+          );
+        }
+      };
+      void run();
     },
     setPackagingChargeRule: (rule) => {
-      patch((p) => ({ ...p, packagingChargeRule: rule }));
-      toast.success("Packaging charge rule saved");
+      const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
+        "Dine-in": "dinin",
+        Pickup: "pickup",
+      };
+      const greaterLessMap: Record<"always" | "greater" | "less", "1" | "2" | "3"> = {
+        greater: "1",
+        less: "2",
+        always: "3",
+      };
+      const run = async () => {
+        try {
+          await billChargeApi.update({
+            rule_for: "packaging",
+            active: rule.active,
+            charge_type: rule.type === "percent" ? "percentage" : "fixed",
+            charge_value: rule.value,
+            calculation_on: rule.calculationOn,
+            charge_automatic: rule.autoApply.map((t) => orderTypeMap[t]),
+            calculation_on_tax: rule.taxOnCharge,
+            greater_less: greaterLessMap[rule.condition],
+            greater_less_amount: rule.threshold,
+          });
+          await value.loadBillChargeRulesFromServer();
+          toast.success("Packaging charge rule saved");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not save packaging charge rule",
+          );
+        }
+      };
+      void run();
     },
     setServiceCharge: (rule) => {
       const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
@@ -5476,27 +7584,75 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         description: "Prototype only — the live delete endpoint needs a backend fix.",
       });
     },
-    toggleTaxRule: (id) =>
-      patch((p) => ({
-        ...p,
-        taxRules: p.taxRules.map((t) => (t.id === id ? { ...t, active: !t.active } : t)),
-      })),
+    // Used to be local-only (just flipping `active` in state, no API call)
+    // - it looked like it worked, but the backend's own copy never changed,
+    // so the tax rule kept applying to real orders regardless, and the
+    // switch itself reverted to its server value on the next
+    // loadTaxRulesFromServer (e.g. a page refresh). Delegates to
+    // upsertTaxRule for the actual persist + reload, same as the full edit
+    // form's own Save button.
+    toggleTaxRule: (id) => {
+      const rule = s.taxRules.find((t) => t.id === id);
+      if (!rule) return;
+      value.upsertTaxRule({ ...rule, active: !rule.active });
+    },
     setInvoiceFormat: (fmt) => {
       patch((p) => ({ ...p, invoiceFormat: fmt }));
-      // Only upiId has anywhere real to go on the backend right now (see
-      // hotelApi's comment) - everything else this form manages is saved
-      // locally above and nowhere else, same as before this was wired.
-      const upiChanged = fmt.upiId !== s.invoiceFormat.upiId;
-      if (upiChanged) {
-        void hotelApi
-          .updateUpiId(fmt.upiId)
-          .catch((err) =>
-            toast.error(
-              err instanceof ApiError ? err.message : "Saved locally, but the UPI ID didn't sync",
-            ),
+      const run = async () => {
+        try {
+          // marketing_text lives on Hotel itself, not on
+          // hms_invoice_formate_mst with the rest of these lines - see
+          // hotelApi.updateIdentity's own comment. Reads whichever line
+          // (header or footer) actually has content:"marketing" right
+          // now; if neither side uses it, sends "" to clear a
+          // previously-set value rather than leaving a stale one behind.
+          await Promise.all([
+            hotelApi.updateIdentity({
+              upiId: fmt.upiId,
+              invoiceFormateHeaderText:
+                fmt.header.find((l) => l.content === "marketing")?.text ?? "",
+              invoiceFormateBottomText:
+                fmt.footer.find((l) => l.content === "marketing")?.text ?? "",
+            }),
+            invoiceFormateApi.saveHeaderFooter(toRawInvoiceFormatePayload(fmt.header, fmt.footer)),
+          ]);
+          toast.success("Invoice format saved");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Saved locally, but didn't sync to the server",
           );
+        }
+      };
+      void run();
+    },
+    setKotFormat: (fmt) => {
+      patch((p) => ({ ...p, kotFormat: fmt }));
+      const run = async () => {
+        try {
+          await kotFormatApi.saveHeaderFooter(toRawKotFormatePayload(fmt.header, fmt.footer));
+          toast.success("KOT format saved");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Saved locally, but didn't sync to the server",
+          );
+        }
+      };
+      void run();
+    },
+    uploadHotelLogo: async (file) => {
+      try {
+        const { hotel_logo } = await hotelApi.uploadLogo(file);
+        const logoUrl = hotel_logo ? `${API_BASE_URL}/images/${hotel_logo}` : undefined;
+        patch((p) => ({
+          ...p,
+          invoiceFormat: { ...p.invoiceFormat, logoUrl },
+        }));
+        toast.success("Logo uploaded");
+        return logoUrl;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not upload logo");
+        return undefined;
       }
-      toast.success("Invoice format saved");
     },
     setQrOnSettle: (on) => {
       patch((p) => ({ ...p, qrOnSettle: on }));
@@ -5514,14 +7670,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     setGstCalculation: (on) => {
       patch((p) => ({ ...p, invoiceFormat: { ...p.invoiceFormat, gstCalculation: on } }));
-      toast[on ? "success" : "warning"](
-        on ? "GST calculation enabled" : "GST calculation disabled",
-        {
-          description: on
-            ? "Active tax rules now calculate on bills."
-            : "Configured tax rules will not calculate on bills.",
-        },
-      );
+      const run = async () => {
+        try {
+          // Real Hotel column, not a local-only display flag - see
+          // loadInvoiceFormatFromServer's own comment. Without this write,
+          // the toggle reverted to whatever the backend still had on the
+          // next reload, and the backend kept billing GST regardless of
+          // what this screen showed in the meantime.
+          await hotelApi.updateIdentity({ invoiceFormateIncGst: on });
+          toast[on ? "success" : "warning"](
+            on ? "GST calculation enabled" : "GST calculation disabled",
+            {
+              description: on
+                ? "Active tax rules now calculate on bills."
+                : "Configured tax rules will not calculate on bills.",
+            },
+          );
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Saved locally, but didn't sync to the server",
+          );
+        }
+      };
+      void run();
     },
     upsertPromo: (promo) => {
       if (!promo.name.trim() || !promo.code.trim()) {
@@ -5688,14 +7859,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const name = s.menuCategories.find((c) => c.id === categoryId)?.name;
       return resolveKotPrinter(s.printers, name);
     },
+    loadPaymentModesFromServer: async () => {
+      try {
+        const { paymentModes } = await paymentModeApi.getAll();
+        patch((p) => ({ ...p, paymentModes: paymentModes.map(mapRawPaymentMode) }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError ? err.message : "Could not load payment modes from server",
+        );
+      }
+    },
     upsertPaymentMode: (mode) => {
-      patch((p) => ({
-        ...p,
-        paymentModes: p.paymentModes.some((m) => m.id === mode.id)
-          ? p.paymentModes.map((m) => (m.id === mode.id ? mode : m))
-          : [...p.paymentModes, { ...mode, id: mode.id || uid("pm") }],
-      }));
-      toast.success("Payment mode saved", { description: mode.name });
+      const isNew = !s.paymentModes.some((m) => m.id === mode.id);
+      const run = async () => {
+        try {
+          if (isNew) {
+            await paymentModeApi.create(mode.name);
+          } else {
+            await paymentModeApi.edit(Number(mode.id), mode.name, mode.active);
+          }
+          await value.loadPaymentModesFromServer();
+          toast.success("Payment mode saved", { description: mode.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save payment mode");
+        }
+      };
+      void run();
     },
     removePaymentMode: (id) => {
       const target = s.paymentModes.find((m) => m.id === id);
@@ -5706,29 +7895,113 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      patch((p) => ({ ...p, paymentModes: p.paymentModes.filter((m) => m.id !== id) }));
-      toast.success("Payment mode removed");
+      const run = async () => {
+        try {
+          await paymentModeApi.remove(Number(id));
+          await value.loadPaymentModesFromServer();
+          toast.success("Payment mode removed");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove payment mode");
+        }
+      };
+      void run();
     },
     setPaymentModeActive: (id, active) => {
-      patch((p) => ({
-        ...p,
-        paymentModes: p.paymentModes.map((m) => (m.id === id ? { ...m, active } : m)),
-      }));
+      const target = s.paymentModes.find((m) => m.id === id);
+      if (!target) return;
+      const run = async () => {
+        try {
+          await paymentModeApi.edit(Number(id), target.name, active);
+          await value.loadPaymentModesFromServer();
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not update payment mode");
+        }
+      };
+      void run();
+    },
+    loadPaymentModeDefaultsFromServer: async () => {
+      try {
+        const { paymentModeDefaults } = await paymentModeDefaultApi.getAll();
+        patch((p) => ({
+          ...p,
+          paymentModeDefaults: paymentModeDefaults.map(mapRawPaymentModeDefault),
+        }));
+      } catch (err) {
+        toast.error(
+          err instanceof ApiError
+            ? err.message
+            : "Could not load default payment modes from server",
+        );
+      }
+    },
+    saveDefaultPaymentMode: (orderType, tableCategoryId, paymentModeId) => {
+      const run = async () => {
+        try {
+          await paymentModeDefaultApi.save({
+            order_type: OPS_ORDER_TYPE_TO_RAW[orderType],
+            table_categ_id: tableCategoryId ? Number(tableCategoryId) : null,
+            payment_mode_id: Number(paymentModeId),
+          });
+          await value.loadPaymentModeDefaultsFromServer();
+          toast.success("Default payment mode saved");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not save default payment mode",
+          );
+        }
+      };
+      void run();
+    },
+    removeDefaultPaymentMode: (id) => {
+      const run = async () => {
+        try {
+          await paymentModeDefaultApi.remove(Number(id));
+          await value.loadPaymentModeDefaultsFromServer();
+          toast.success("Default removed");
+        } catch (err) {
+          toast.error(
+            err instanceof ApiError ? err.message : "Could not remove default payment mode",
+          );
+        }
+      };
+      void run();
+    },
+    resolveDefaultPaymentMode: (orderType, tableCategoryId) => {
+      const activeModes = s.paymentModes.filter((m) => m.active);
+      const override = tableCategoryId
+        ? s.paymentModeDefaults.find(
+            (d) => d.orderType === orderType && d.tableCategoryId === tableCategoryId,
+          )
+        : undefined;
+      const base = s.paymentModeDefaults.find(
+        (d) => d.orderType === orderType && !d.tableCategoryId,
+      );
+      const resolvedId = override?.paymentModeId ?? base?.paymentModeId;
+      const resolved = resolvedId ? activeModes.find((m) => m.id === resolvedId) : undefined;
+      return resolved?.name ?? activeModes[0]?.name ?? "Cash";
     },
     upsertMenu: (menu) => {
-      patch((p) => {
-        const saved = { ...menu, id: menu.id || uid("menu") };
-        const menus = p.menus.some((m) => m.id === saved.id)
-          ? p.menus.map((m) => (m.id === saved.id ? saved : m))
-          : [...p.menus, saved];
-        return {
-          ...p,
-          menus: saved.isDefault
-            ? menus.map((m) => (m.id === saved.id ? m : { ...m, isDefault: false }))
-            : menus,
-        };
-      });
-      toast.success("Menu saved", { description: menu.name });
+      const isNew = !s.menus.some((m) => m.id === menu.id);
+      const run = async () => {
+        try {
+          if (isNew) {
+            await menuApi.createMenuCatalog(menu.name, menu.tableCategoryIds, menu.orderTypes);
+          } else {
+            await menuApi.editMenuCatalog(
+              Number(menu.id),
+              menu.name,
+              !!menu.isDefault,
+              menu.tableCategoryIds,
+              menu.orderTypes,
+            );
+          }
+          await value.loadMenuFromServer();
+          toast.success("Menu saved", { description: menu.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save menu");
+        }
+      };
+      void run();
     },
     removeMenu: (id) => {
       const target = s.menus.find((m) => m.id === id);
@@ -5745,28 +8018,50 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      patch((p) => {
-        const removedCategoryIds = new Set(
-          p.menuCategories.filter((c) => c.menuId === id).map((c) => c.id),
-        );
-        return {
-          ...p,
-          menus: p.menus.filter((m) => m.id !== id),
-          menuCategories: p.menuCategories.filter((c) => c.menuId !== id),
-          menuItems: p.menuItems.filter((m) => !removedCategoryIds.has(m.categoryId)),
-          addonGroups: p.addonGroups.filter((a) => a.menuId !== id),
-          variantMasters: p.variantMasters.filter((v) => v.menuId !== id),
-          orders: p.orders.map((o) => (o.menuId === id ? { ...o, menuId: undefined } : o)),
-        };
-      });
-      toast.success("Menu removed");
+      // The real backend rejects removal outright while anything still
+      // references this catalogue (same "reject deletion in use" guard as
+      // removeMenuCategory below) - checked locally first to avoid a round
+      // trip for the common case.
+      if (
+        s.menuCategories.some((c) => c.menuId === id) ||
+        s.variantMasters.some((v) => v.menuId === id) ||
+        s.addonGroups.some((a) => a.menuId === id)
+      ) {
+        toast.error("Menu is in use", {
+          description: "Move or delete its categories, variants and addon groups first.",
+        });
+        return;
+      }
+      const run = async () => {
+        try {
+          await menuApi.removeMenuCatalog(Number(id));
+          await value.loadMenuFromServer();
+          toast.success("Menu removed");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not remove menu");
+        }
+      };
+      void run();
     },
     setDefaultMenu: (id) => {
-      patch((p) => ({
-        ...p,
-        menus: p.menus.map((m) => ({ ...m, isDefault: m.id === id })),
-      }));
-      toast.success("Default menu updated");
+      const target = s.menus.find((m) => m.id === id);
+      if (!target) return;
+      const run = async () => {
+        try {
+          await menuApi.editMenuCatalog(
+            Number(id),
+            target.name,
+            true,
+            target.tableCategoryIds,
+            target.orderTypes,
+          );
+          await value.loadMenuFromServer();
+          toast.success("Default menu updated");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not update default menu");
+        }
+      };
+      void run();
     },
     setOrderMenu: (orderId, menuId) => {
       const draft = ensureRealOrder(orderId);
@@ -5822,14 +8117,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
-      const round = o.kotRounds + 1;
       const newLine: OrderLine = {
         id: uid("custom"),
         itemId: uid("custom-item"),
         name: name.trim(),
         qty,
         price,
-        kotRound: round,
+        kotRound: UNSENT_ROUND,
       };
       patch((p) => ({
         ...p,
@@ -5982,22 +8276,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("No customer phone number attached to this order");
         return false;
       }
-      if (!o.backendId) {
-        toast.error("Order isn't synced with the server yet");
-        return false;
-      }
       // Local credit check for instant feedback before round-tripping -
       // the real gate is server-side too (sentEbill 400s once credit hits
-      // 0), so this is just avoiding an unnecessary request, not the
-      // source of truth.
+      // 0), so this is just avoiding an unnecessary request (and, now,
+      // avoiding an unnecessary auto-generate below), not the source of
+      // truth.
       if (s.eBillCredit <= 0) {
         toast.error("E-bill credits exhausted", {
           description: "Top up e-bill credits from Operations to send digital bills again.",
         });
         return false;
       }
+      let backendId = o.backendId;
+      // "Send e-bill" now behaves as save-then-send: an order whose bill
+      // hasn't been generated yet gets generated here first (the same
+      // effect as pressing "Save"/"Generate Bill"), instead of erroring
+      // out and making the staff do that separately first. A previously
+      // held/still-open order can reach here with no backendId at all -
+      // generateBill's dine-in branch creates the real backend order in
+      // that same call (see its own comment), so nothing needs to exist
+      // yet for this to work. Only live s.orders entries reach this
+      // branch; orderHistory entries are already "Settled"
+      // (mapRawOrderHistoryEntry), so they never do.
+      if (o.status !== "Bill Generated" && o.status !== "Settled") {
+        const result = await value.generateBill(orderId);
+        if (!result.ok) return false; // generateBill already toasted why
+        backendId = result.backendId;
+      }
+      if (!backendId) {
+        toast.error("Order isn't synced with the server yet");
+        return false;
+      }
       try {
-        await orderApi.sendEBill({ orderId: o.backendId, mobile: o.customerPhone });
+        await orderApi.sendEBill({ orderId: backendId, mobile: o.customerPhone });
         await value.loadEBillCreditFromServer();
         log(
           "E-Bill Sent",
@@ -6022,7 +8333,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Order isn't synced with the server yet");
         return;
       }
-      await doPrintBill(o, o.backendId);
+      const printed = await doPrintBill(o, o.backendId);
+      if (!printed) return;
+      // Owner-visible reprint counter (Task 5) - only this explicit
+      // "Reprint bill" action counts, never the first bill-generation
+      // print (generateBill's own doPrintBill calls bypass this). Never
+      // blocks or surfaces an error on the print itself.
+      try {
+        const { billPrintCount } = await orderHistoryApi.incrementBillPrintCount(o.backendId);
+        patch((p) => ({
+          ...p,
+          orders: p.orders.map((x) => (x.id === orderId ? { ...x, billPrintCount } : x)),
+          orderHistory: p.orderHistory.map((x) =>
+            x.id === orderId ? { ...x, billPrintCount } : x,
+          ),
+        }));
+      } catch {
+        // Best-effort only - a reprint count miss is never worth surfacing.
+      }
     },
     printKot: async (orderId, round) => {
       const o =
@@ -6035,6 +8363,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!o) return;
       if (!o.backendId || !o.tableId) {
         toast.error("This KOT round hasn't been sent to the kitchen yet");
+        return;
+      }
+      // Same rule as mergeTables/transferTable - a generated bill is meant
+      // to be settled as printed, not have items moved off it afterward.
+      if (o.status === "Bill Generated") {
+        toast.error("Bill already generated", {
+          description:
+            "This order's bill has already been generated — its KOT rounds can no longer be moved.",
+        });
         return;
       }
       const destLabel = tableLabel(destTableId);

@@ -1,5 +1,5 @@
-import { Plus, Receipt, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ChefHat, ImageUp, Plus, Receipt, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
 
 import {
@@ -30,14 +30,39 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { RESTAURANT } from "@/mock/data";
-import { useStore } from "@/mock/store";
+import { orderTotals, useStore, type BillSettings } from "@/mock/store";
 import type {
   InvoiceLine,
+  KotLine,
   OpsOrderType,
+  Order,
   PaymentModeConfig,
   PromoCode,
   TaxRule,
 } from "@/mock/types";
+
+// Same shape orderTotals expects for a real order - two sample lines is
+// enough to exercise every part of the calculation (subtotal, discount-free
+// service-charge base, tax base) without this preview needing its own
+// separate re-implementation of that math. Fixed values, not derived from
+// anything live, so the preview stays stable while settings are edited.
+const INVOICE_PREVIEW_ORDER: Order = {
+  id: "invoice-preview",
+  orderNo: 0,
+  type: "Dine In",
+  tableLabel: "Preview",
+  guests: 2,
+  status: "Running",
+  lines: [
+    { id: "preview-1", itemId: "preview-1", name: "Paneer Tikka", qty: 1, price: 320, kotRound: 1 },
+    { id: "preview-2", itemId: "preview-2", name: "Butter Naan", qty: 2, price: 60, kotRound: 1 },
+  ],
+  kotRounds: 1,
+  businessDate: "",
+  createdAt: "",
+  createdBy: "",
+  itemised: true,
+};
 
 const ORDER_TYPES: OpsOrderType[] = ["Dine-in", "Pickup"];
 
@@ -505,25 +530,39 @@ export function InvoiceFormatSection() {
   const store = useStore();
   const [fmt, setFmt] = useState(store.invoiceFormat);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const logoInputRef = useRef<HTMLInputElement>(null);
 
-  // Same sample totals already shown in the "Total" line below (485 with
-  // GST, 462 without) - reused here so the QR's encoded amount matches
-  // what the preview displays instead of drifting from it independently.
-  const previewAmount = fmt.gstCalculation ? 485 : 462;
+  // Runs the exact same calculation a real bill would (service charge,
+  // every active tax rule, delivery/packaging) against a fixed two-item
+  // sample order, instead of this preview hand-maintaining its own
+  // approximate copy of that math - `fmt` (this form's own live draft),
+  // not store.invoiceFormat, so toggling GST above updates the preview
+  // immediately, before "Save invoice format" is even clicked.
+  const billSettings: BillSettings = {
+    serviceCharge: store.serviceCharge,
+    deliveryChargeRule: store.deliveryChargeRule,
+    packagingChargeRule: store.packagingChargeRule,
+    taxRules: store.taxRules,
+    invoiceFormat: fmt,
+  };
+  const totals = orderTotals(INVOICE_PREVIEW_ORDER, billSettings);
 
   // Mirrors uat-backend's own QR construction exactly (controller/kto.js's
   // getHearderAndFooterData: pa left unencoded, pn/tn encoded, cu fixed to
   // INR) - generated client-side rather than round-tripped through the
   // backend since it's a pure function of (upiId, outlet name, amount),
-  // and this is just a settings preview, not a real order's bill.
+  // and this is just a settings preview, not a real order's bill. Encodes
+  // totals.grand (the same real calculation the preview below renders),
+  // not a hand-typed number that could drift from it.
   useEffect(() => {
     if (!fmt.upiId) {
       setQrDataUrl(null);
       return;
     }
     const merchantName = encodeURIComponent(RESTAURANT.name);
-    const transactionNote = encodeURIComponent(`Bill Payment - ${previewAmount}`);
-    const upiUrl = `upi://pay?pa=${fmt.upiId}&pn=${merchantName}&tn=${transactionNote}&am=${previewAmount}&cu=INR`;
+    const transactionNote = encodeURIComponent(`Bill Payment - ${totals.grand}`);
+    const upiUrl = `upi://pay?pa=${fmt.upiId}&pn=${merchantName}&tn=${transactionNote}&am=${totals.grand}&cu=INR`;
     let cancelled = false;
     QRCode.toDataURL(upiUrl, { width: 150, margin: 2 })
       .then((url) => {
@@ -535,7 +574,7 @@ export function InvoiceFormatSection() {
     return () => {
       cancelled = true;
     };
-  }, [fmt.upiId, previewAmount]);
+  }, [fmt.upiId, totals.grand]);
 
   const update = (patch: Partial<typeof fmt>) => setFmt((f) => ({ ...f, ...patch }));
   const updateLine = (slot: "header" | "footer", id: string, patch: Partial<InvoiceLine>) =>
@@ -543,21 +582,28 @@ export function InvoiceFormatSection() {
       ...f,
       [slot]: f[slot].map((l) => (l.id === id ? { ...l, ...patch } : l)),
     }));
+  // hms_invoice_formate_mst has exactly 10 fixed slots per side
+  // (model/invoiceFormate.js) - an 11th line here would just be silently
+  // dropped on save (mock/store.tsx's toRawInvoiceFormatePayload only ever
+  // writes slots 1-10), so this stops it from being addable at all rather
+  // than accepting it and losing it later with no warning.
   const addLine = (slot: "header" | "footer") =>
-    setFmt((f) => ({
-      ...f,
-      [slot]: [
-        ...f[slot],
-        { id: `${slot}-${Date.now()}`, content: "text", text: "", fontSize: 11 },
-      ],
-    }));
+    setFmt((f) =>
+      f[slot].length >= 10
+        ? f
+        : {
+            ...f,
+            [slot]: [
+              ...f[slot],
+              { id: `${slot}-${Date.now()}`, content: "text", text: "", fontSize: 11 },
+            ],
+          },
+    );
   const removeLine = (slot: "header" | "footer", id: string) =>
     setFmt((f) => ({ ...f, [slot]: f[slot].filter((l) => l.id !== id) }));
 
   const lineText = (l: InvoiceLine) => {
     switch (l.content) {
-      case "logo":
-        return "[ LOGO ]";
       case "outlet-name":
         return RESTAURANT.name;
       case "address":
@@ -572,6 +618,18 @@ export function InvoiceFormatSection() {
   };
 
   const renderLine = (l: InvoiceLine) => {
+    if (l.content === "logo") {
+      if (!fmt.logoUrl) {
+        return (
+          <p style={{ fontSize: l.fontSize }} className="leading-snug text-warning">
+            Upload a logo above to show it here
+          </p>
+        );
+      }
+      return (
+        <img src={fmt.logoUrl} alt="Outlet logo" className="mx-auto max-h-[80px] max-w-[150px]" />
+      );
+    }
     if (l.content === "upi-qr") {
       if (!fmt.upiId) {
         return (
@@ -633,6 +691,60 @@ export function InvoiceFormatSection() {
               />
             </div>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label>Outlet logo</Label>
+                <div className="flex items-center gap-3">
+                  {fmt.logoUrl ? (
+                    <img
+                      src={fmt.logoUrl}
+                      alt="Current outlet logo"
+                      className="h-12 w-12 rounded-lg border border-border object-contain p-1"
+                    />
+                  ) : (
+                    <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-dashed border-border text-[10px] text-muted-foreground">
+                      None
+                    </div>
+                  )}
+                  <input
+                    ref={logoInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (!file) return;
+                      setUploadingLogo(true);
+                      // store.uploadHotelLogo's own patch() lands on
+                      // store.invoiceFormat, not this screen's local `fmt`
+                      // draft (this form only ever writes fmt back to the
+                      // store on an explicit Save) - applying the
+                      // returned URL to `fmt` directly here is what
+                      // actually makes the thumbnail/preview below update
+                      // right after a successful upload, confirmed live
+                      // as the cause of "uploaded but not showing".
+                      void store
+                        .uploadHotelLogo(file)
+                        .then((logoUrl) => {
+                          if (logoUrl) update({ logoUrl });
+                        })
+                        .finally(() => setUploadingLogo(false));
+                    }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={uploadingLogo}
+                    onClick={() => logoInputRef.current?.click()}
+                  >
+                    <ImageUp className="size-4" />
+                    {uploadingLogo ? "Uploading…" : fmt.logoUrl ? "Replace logo" : "Upload logo"}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Shows wherever a header or footer line below is set to "Outlet logo".
+                </p>
+              </div>
               <div className="space-y-1.5">
                 <Label>GST number</Label>
                 <Input value={fmt.gstNo} onChange={(e) => update({ gstNo: e.target.value })} />
@@ -731,8 +843,14 @@ export function InvoiceFormatSection() {
                     </Button>
                   </div>
                 ))}
-                <Button size="sm" variant="outline" onClick={() => addLine(slot)}>
-                  <Plus className="size-4" /> Add {slot} line
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={fmt[slot].length >= 10}
+                  onClick={() => addLine(slot)}
+                >
+                  <Plus className="size-4" />
+                  {fmt[slot].length >= 10 ? "10 line max reached" : `Add ${slot} line`}
                 </Button>
               </div>
             </SectionCard>
@@ -785,29 +903,47 @@ export function InvoiceFormatSection() {
             ))}
             <div className="my-3 border-t border-dashed border-border" />
             <div className="text-left text-[11px]">
-              <div className="flex justify-between">
-                <span>Paneer Tikka x1</span>
-                <span>320.00</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Butter Naan x2</span>
-                <span>120.00</span>
-              </div>
-              {store.serviceCharge.active ? (
+              {INVOICE_PREVIEW_ORDER.lines.map((l) => (
+                <div key={l.id} className="flex justify-between">
+                  <span>
+                    {l.name} x{l.qty}
+                  </span>
+                  <span>{(l.price * l.qty).toFixed(2)}</span>
+                </div>
+              ))}
+              {totals.discount ? (
+                <div className="flex justify-between">
+                  <span>Discount</span>
+                  <span>-{totals.discount.toFixed(2)}</span>
+                </div>
+              ) : null}
+              {totals.service ? (
                 <div className="flex justify-between">
                   <span>Service charge</span>
-                  <span>22.00</span>
+                  <span>{totals.service.toFixed(2)}</span>
                 </div>
               ) : null}
-              {fmt.gstCalculation ? (
+              {totals.delivery ? (
                 <div className="flex justify-between">
-                  <span>GST</span>
-                  <span>23.10</span>
+                  <span>Delivery charge</span>
+                  <span>{totals.delivery.toFixed(2)}</span>
                 </div>
               ) : null}
+              {totals.packaging ? (
+                <div className="flex justify-between">
+                  <span>Packaging charge</span>
+                  <span>{totals.packaging.toFixed(2)}</span>
+                </div>
+              ) : null}
+              {totals.taxLines.map((t) => (
+                <div key={t.id} className="flex justify-between">
+                  <span>{t.name}</span>
+                  <span>{t.amount.toFixed(2)}</span>
+                </div>
+              ))}
               <div className="mt-1 flex justify-between border-t border-dashed border-border pt-1 font-semibold">
                 <span>Total</span>
-                <span>{fmt.gstCalculation ? "485.00" : "462.00"}</span>
+                <span>{totals.grand.toFixed(2)}</span>
               </div>
             </div>
             <div className="my-3 border-t border-dashed border-border" />
@@ -822,6 +958,206 @@ export function InvoiceFormatSection() {
           ) : null}
         </SectionCard>
       </div>
+    </div>
+  );
+}
+
+/* =============== Dynamic KOT format (Task 1) =============== */
+
+const KOT_CONTENT_LABEL: Record<string, string> = {
+  "outlet-name": "Outlet name",
+  address: "Address",
+  "order-type": "Order type",
+  "customer-details": "Customer / table details",
+  "bill-no": "Bill no.",
+  "token-number": "Token number",
+  "kot-number": "KOT number",
+  "billerpe-branding": "BillerPe branding",
+  text: "Custom text",
+};
+
+// Same fixed sample items as INVOICE_PREVIEW_ORDER (no pricing shown on a
+// KOT, so only name/qty are used) plus static dummy context values for the
+// content types a KOT can show that a bill never does (order type, token/
+// KOT number, customer/table).
+const KOT_PREVIEW_CTX = {
+  hotelName: RESTAURANT.name,
+  address: RESTAURANT.outlet,
+  orderType: "Dine In",
+  customerDetails: "Table 5",
+  billNo: "1024",
+  tokenNumber: 12,
+  kotNumber: 1,
+};
+
+export function KotFormatSection() {
+  const store = useStore();
+  const [fmt, setFmt] = useState(store.kotFormat);
+
+  const updateLine = (slot: "header" | "footer", id: string, patch: Partial<KotLine>) =>
+    setFmt((f) => ({
+      ...f,
+      [slot]: f[slot].map((l) => (l.id === id ? { ...l, ...patch } : l)),
+    }));
+  // hms_kot_formate_mst has exactly 10 fixed slots per side
+  // (uat-backend-v2/model/kotFormate.js), same cap as the invoice format
+  // editor's own addLine for the same reason - see its own comment.
+  const addLine = (slot: "header" | "footer") =>
+    setFmt((f) =>
+      f[slot].length >= 10
+        ? f
+        : {
+            ...f,
+            [slot]: [
+              ...f[slot],
+              { id: `${slot}-${Date.now()}`, content: "text", text: "", fontSize: 11 },
+            ],
+          },
+    );
+  const removeLine = (slot: "header" | "footer", id: string) =>
+    setFmt((f) => ({ ...f, [slot]: f[slot].filter((l) => l.id !== id) }));
+
+  const lineText = (l: KotLine) => {
+    switch (l.content) {
+      case "outlet-name":
+        return KOT_PREVIEW_CTX.hotelName;
+      case "address":
+        return KOT_PREVIEW_CTX.address;
+      case "order-type":
+        return KOT_PREVIEW_CTX.orderType;
+      case "customer-details":
+        return KOT_PREVIEW_CTX.customerDetails;
+      case "bill-no":
+        return `KOT - ${KOT_PREVIEW_CTX.billNo}`;
+      case "token-number":
+        return `Token No.: ${KOT_PREVIEW_CTX.tokenNumber}`;
+      case "kot-number":
+        return `KOT #${KOT_PREVIEW_CTX.kotNumber}`;
+      case "billerpe-branding":
+        return "Powered by BillerPe";
+      default:
+        return l.text || "…";
+    }
+  };
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="space-y-4">
+        {(["header", "footer"] as const).map((slot) => (
+          <SectionCard
+            key={slot}
+            title={`${slot === "header" ? "Header" : "Footer"} lines`}
+            description="Each line prints in order, top to bottom on every KOT ticket."
+            bodyClassName="p-3 sm:p-4"
+          >
+            <div className="space-y-2">
+              {fmt[slot].map((l) => (
+                <div
+                  key={l.id}
+                  className="grid gap-2 rounded-xl border border-border p-2.5 sm:grid-cols-[180px_minmax(0,1fr)_110px_auto] sm:items-center"
+                >
+                  <Select
+                    value={l.content}
+                    onValueChange={(v) =>
+                      updateLine(slot, l.id, { content: v as KotLine["content"] })
+                    }
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(KOT_CONTENT_LABEL).map(([k, v]) => (
+                        <SelectItem key={k} value={k}>
+                          {v}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    className="h-9"
+                    placeholder={l.content === "text" ? "Text to print" : "Filled automatically"}
+                    disabled={l.content !== "text"}
+                    value={l.text ?? ""}
+                    onChange={(e) => updateLine(slot, l.id, { text: e.target.value })}
+                  />
+                  <Select
+                    value={String(l.fontSize)}
+                    onValueChange={(v) => updateLine(slot, l.id, { fontSize: Number(v) })}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[10, 11, 12, 14, 16, 18].map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n} px
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button size="sm" variant="ghost" onClick={() => removeLine(slot, l.id)}>
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={fmt[slot].length >= 10}
+                onClick={() => addLine(slot)}
+              >
+                <Plus className="size-4" />
+                {fmt[slot].length >= 10 ? "10 line max reached" : `Add ${slot} line`}
+              </Button>
+            </div>
+          </SectionCard>
+        ))}
+
+        <div className="flex justify-end">
+          <Button onClick={() => store.setKotFormat(fmt)}>
+            <ChefHat className="size-4" /> Save KOT format
+          </Button>
+        </div>
+      </div>
+
+      <SectionCard title="Print preview" bodyClassName="p-3 sm:p-4">
+        <div className="mx-auto w-full max-w-[280px] rounded-lg border border-border bg-surface p-4 font-mono text-center">
+          {fmt.header.map((l) => (
+            <p key={l.id} style={{ fontSize: l.fontSize }} className="leading-snug">
+              {lineText(l)}
+            </p>
+          ))}
+          <div className="my-3 border-t border-dashed border-border" />
+          <table className="w-full text-left text-[11px]">
+            <thead>
+              <tr className="border-b border-dashed border-border">
+                <th className="pb-1 font-medium">Item</th>
+                <th className="pb-1 text-right font-medium">Qty.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {INVOICE_PREVIEW_ORDER.lines.map((l) => (
+                <tr key={l.id}>
+                  <td className="py-0.5">{l.name}</td>
+                  <td className="py-0.5 text-right">{l.qty}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="my-3 border-t border-dashed border-border" />
+          {fmt.footer.map((l) => (
+            <p key={l.id} style={{ fontSize: l.fontSize }} className="leading-snug">
+              {lineText(l)}
+            </p>
+          ))}
+        </div>
+        {!fmt.header.length ? (
+          <p className="mt-3 text-xs text-warning">
+            No header lines configured yet - real tickets print the plain default layout (outlet
+            name, order type, table/customer, token) until a format is saved here.
+          </p>
+        ) : null}
+      </SectionCard>
     </div>
   );
 }
@@ -981,6 +1317,141 @@ const emptyPaymentMode = (): PaymentModeConfig => ({
   deletable: true,
 });
 
+/** One base default per order type, plus optional per-table-category
+ * overrides for Dine-in (Pickup has no table). Read by
+ * PaymentSplitEditor's "Add payment mode" button via
+ * store.resolveDefaultPaymentMode - purely a pre-selected starting point,
+ * never a restriction on what can actually be picked at billing. */
+function DefaultPaymentModeCard() {
+  const store = useStore();
+  const [overrideCategoryId, setOverrideCategoryId] = useState("");
+  const [overrideModeId, setOverrideModeId] = useState("");
+  const activeModes = store.paymentModes.filter((m) => m.active);
+  const dineInOverrides = store.paymentModeDefaults.filter(
+    (d) => d.orderType === "Dine-in" && d.tableCategoryId,
+  );
+  const availableCategories = store.tableCategories.filter(
+    (c) => !dineInOverrides.some((d) => d.tableCategoryId === c.id),
+  );
+
+  if (!activeModes.length) return null;
+
+  return (
+    <SectionCard title="Default payment mode" bodyClassName="p-3 sm:p-4 space-y-4">
+      <p className="text-xs text-muted-foreground">
+        Pre-selects a payment mode when billing starts — staff can still pick any other active mode
+        at settle time.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2">
+        {ORDER_TYPES.map((ot) => {
+          const current = store.paymentModeDefaults.find(
+            (d) => d.orderType === ot && !d.tableCategoryId,
+          );
+          return (
+            <div key={ot} className="space-y-1.5">
+              <Label>{ot}</Label>
+              <Select
+                value={current?.paymentModeId ?? ""}
+                onValueChange={(v) => store.saveDefaultPaymentMode(ot, undefined, v)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="First active mode" />
+                </SelectTrigger>
+                <SelectContent>
+                  {activeModes.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="space-y-2 border-t border-border pt-3">
+        <p className="text-sm font-medium">Table category overrides (Dine-in)</p>
+        {dineInOverrides.length ? (
+          <div className="space-y-1.5">
+            {dineInOverrides.map((d) => {
+              const category = store.tableCategories.find((c) => c.id === d.tableCategoryId);
+              const mode = store.paymentModes.find((m) => m.id === d.paymentModeId);
+              return (
+                <div
+                  key={d.id}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2 text-sm"
+                >
+                  <span>
+                    {category?.name ?? "Unknown category"} →{" "}
+                    <span className="font-medium">{mode?.name ?? "Unknown mode"}</span>
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => store.removeDefaultPaymentMode(d.id)}
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="text-xs text-muted-foreground">No category overrides yet.</p>
+        )}
+
+        {availableCategories.length ? (
+          <div className="flex flex-wrap items-end gap-2 pt-1">
+            <div className="space-y-1.5">
+              <Label>Table category</Label>
+              <Select value={overrideCategoryId} onValueChange={setOverrideCategoryId}>
+                <SelectTrigger className="w-40">
+                  <SelectValue placeholder="Select category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableCategories.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Payment mode</Label>
+              <Select value={overrideModeId} onValueChange={setOverrideModeId}>
+                <SelectTrigger className="w-40">
+                  <SelectValue placeholder="Select mode" />
+                </SelectTrigger>
+                <SelectContent>
+                  {activeModes.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!overrideCategoryId || !overrideModeId}
+              onClick={() => {
+                store.saveDefaultPaymentMode("Dine-in", overrideCategoryId, overrideModeId);
+                setOverrideCategoryId("");
+                setOverrideModeId("");
+              }}
+            >
+              <Plus className="size-4" /> Add override
+            </Button>
+          </div>
+        ) : null}
+      </div>
+    </SectionCard>
+  );
+}
+
 export function PaymentModesSection() {
   const store = useStore();
   const [draft, setDraft] = useState<PaymentModeConfig | null>(null);
@@ -1051,6 +1522,8 @@ export function PaymentModesSection() {
           ))}
         </div>
       </SectionCard>
+
+      <DefaultPaymentModeCard />
 
       <Dialog open={!!draft} onOpenChange={(o) => !o && setDraft(null)}>
         <DialogContent className="max-w-sm">

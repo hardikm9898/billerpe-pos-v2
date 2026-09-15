@@ -10,7 +10,8 @@ import {
   Search,
   UserRound,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import QRCode from "qrcode";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -41,6 +42,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { ApiError, hotelApi, qrOrderApi } from "@/lib/api";
+import { encryptHotelId, encryptQrPayload } from "@/lib/publicMenu";
 import { cn } from "@/lib/utils";
 import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
@@ -307,9 +310,106 @@ export function MenuSettingSection() {
 
 /* =============== QR code =============== */
 
+// Real, working QR menu link/code - ported from the old BillerPe
+// (POS/uat-frontend's DownloadQrCode.js). This used to be a pure mock
+// (a fabricated menu.billerpe.app URL, a static QrCode glyph, a "Download"
+// that only toasted success with no real file) - confirmed live there was
+// no actual QR-menu page behind it at all. src/routes/qr-menu.tsx is that
+// real page now; this section just points a real QR at it. `id` (the raw
+// numeric hotel_id) has to come from a fresh hotelApi.getSettings() call,
+// not RESTAURANT (mock/data.ts's seed) - the encrypted id has to match the
+// real backend's Hotel row or menuByCategory 404s on scan.
 export function QrSection() {
   const store = useStore();
-  const url = `https://menu.billerpe.app/${RESTAURANT.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const [hotelId, setHotelId] = useState<number | null>(null);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
+  const [tableQrDataUrl, setTableQrDataUrl] = useState<string | null>(null);
+  const [regenBusyId, setRegenBusyId] = useState<string | null>(null);
+
+  useEffect(() => {
+    void hotelApi
+      .getSettings()
+      .then((s) => setHotelId(s.id))
+      .catch((err) => {
+        toast.error(err instanceof ApiError ? err.message : "Could not load this outlet's QR link");
+      });
+  }, []);
+
+  const url =
+    hotelId != null && typeof window !== "undefined"
+      ? `${window.location.origin}/qr-menu?${encryptHotelId(hotelId)}`
+      : null;
+
+  useEffect(() => {
+    if (!url) {
+      setQrDataUrl(null);
+      return;
+    }
+    void QRCode.toDataURL(url, { width: 480, margin: 2 }).then(setQrDataUrl);
+  }, [url]);
+
+  const downloadQr = () => {
+    if (!qrDataUrl) return;
+    const link = document.createElement("a");
+    link.href = qrDataUrl;
+    link.download = `${RESTAURANT.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-menu-qr.png`;
+    link.click();
+    toast.success("QR downloaded as PNG");
+  };
+
+  // Per-table ordering QR - distinct from the restaurant-level menu-only
+  // QR above. Encodes {hotelId, tableId, qrVersion} (encryptQrPayload)
+  // rather than just the hotel id, so src/routes/qr-menu.tsx can tell the
+  // two apart and only show cart/checkout when a real table is known.
+  const selectedTable = selectedTableId ? store.tableById(selectedTableId) : undefined;
+  const tableUrl =
+    hotelId != null && selectedTable && typeof window !== "undefined"
+      ? `${window.location.origin}/qr-menu?${encryptQrPayload({
+          hotelId,
+          tableId: Number(selectedTable.id),
+          qrVersion: selectedTable.qrVersion ?? 1,
+        })}`
+      : null;
+
+  useEffect(() => {
+    if (!tableUrl) {
+      setTableQrDataUrl(null);
+      return;
+    }
+    void QRCode.toDataURL(tableUrl, { width: 480, margin: 2 }).then(setTableQrDataUrl);
+  }, [tableUrl]);
+
+  const downloadTableQr = () => {
+    if (!tableQrDataUrl || !selectedTable) return;
+    const link = document.createElement("a");
+    link.href = tableQrDataUrl;
+    link.download = `${selectedTable.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-order-qr.png`;
+    link.click();
+    toast.success("QR downloaded as PNG");
+  };
+
+  // Bumps qr_version cloud-side (qrOrderApi.regenerateTableQr ->
+  // billerpe-local-exe's cloudRelay -> uat-backend-v2), invalidating
+  // every previously-printed/shared link for just this table - a leaked
+  // QR photo can be neutralized without touching any other table.
+  // loadTablesFromServer picks the new version back up on the next
+  // config-sync pull; called directly here too so the dialog (if open on
+  // this table) reflects it without waiting up to ~15s.
+  const regenerateTableQr = async (tableId: string) => {
+    setRegenBusyId(tableId);
+    try {
+      await qrOrderApi.regenerateTableQr(Number(tableId));
+      await store.loadTablesFromServer();
+      toast.success("This table's QR has been regenerated — the old one no longer works");
+    } catch (err) {
+      toast.error("Could not regenerate this table's QR", {
+        description: err instanceof ApiError ? err.message : "Please try again.",
+      });
+    } finally {
+      setRegenBusyId(null);
+    }
+  };
 
   return (
     <div className="space-y-4">
@@ -322,19 +422,21 @@ export function QrSection() {
         <SectionCard title="Digital menu link" bodyClassName="p-3 sm:p-4">
           <div className="space-y-1.5">
             <Label>Public menu URL</Label>
-            <Input readOnly value={url} className="font-mono text-xs" />
+            <Input readOnly value={url ?? "Loading…"} className="font-mono text-xs" />
           </div>
           <p className="mt-3 text-sm text-muted-foreground">
             The menu reflects whatever is active in the Menu module — categories, items, variants
             and addons — with no separate publishing step.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            <Button onClick={() => toast.success("QR downloaded as PNG")}>
+            <Button onClick={downloadQr} disabled={!qrDataUrl}>
               <Download className="size-4" /> Download QR
             </Button>
             <Button
               variant="outline"
+              disabled={!url}
               onClick={() => {
+                if (!url) return;
                 void navigator.clipboard?.writeText(url);
                 toast.success("Menu link copied");
               }}
@@ -350,13 +452,89 @@ export function QrSection() {
 
         <SectionCard title="Preview" bodyClassName="p-3 sm:p-4">
           <div className="mx-auto grid aspect-square w-full max-w-[220px] place-items-center rounded-2xl border border-border bg-surface">
-            <QrCode className="size-32 text-foreground" />
+            {qrDataUrl ? (
+              <img src={qrDataUrl} alt="Menu QR code" className="size-full rounded-2xl p-3" />
+            ) : (
+              <QrCode className="size-32 text-muted-foreground" />
+            )}
           </div>
           <p className="mt-3 text-center text-xs text-muted-foreground">
             Scan for {RESTAURANT.name}
           </p>
         </SectionCard>
       </div>
+
+      <SectionCard
+        title="Per-table ordering QR codes"
+        description="Each table has its own QR - scanning it lets a guest order straight from their seat, subject to staff acceptance."
+        bodyClassName="p-3 sm:p-4"
+      >
+        {store.tables.length === 0 ? (
+          <p className="py-4 text-center text-sm text-muted-foreground">No tables yet.</p>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {store.tables.map((t) => (
+              <div
+                key={t.id}
+                className="flex items-center justify-between gap-2 rounded-lg border border-border p-2.5"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{t.name}</p>
+                  <p className="text-xs text-muted-foreground">v{t.qrVersion ?? 1}</p>
+                </div>
+                <div className="flex shrink-0 gap-1.5">
+                  <Button size="sm" variant="outline" onClick={() => setSelectedTableId(t.id)}>
+                    <QrCode className="size-3.5" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={regenBusyId === t.id}
+                    onClick={() => void regenerateTableQr(t.id)}
+                  >
+                    Regenerate
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </SectionCard>
+
+      <Dialog open={!!selectedTableId} onOpenChange={(o) => !o && setSelectedTableId(null)}>
+        <DialogContent>
+          {selectedTable ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>{selectedTable.name} · ordering QR</DialogTitle>
+              </DialogHeader>
+              <div className="mx-auto grid aspect-square w-full max-w-[220px] place-items-center rounded-2xl border border-border bg-surface">
+                {tableQrDataUrl ? (
+                  <img
+                    src={tableQrDataUrl}
+                    alt={`${selectedTable.name} QR code`}
+                    className="size-full rounded-2xl p-3"
+                  />
+                ) : (
+                  <QrCode className="size-32 text-muted-foreground" />
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label>Order URL</Label>
+                <Input readOnly value={tableUrl ?? "Loading…"} className="font-mono text-xs" />
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => void regenerateTableQr(selectedTable.id)}>
+                  Regenerate
+                </Button>
+                <Button onClick={downloadTableQr} disabled={!tableQrDataUrl}>
+                  <Download className="size-4" /> Download QR
+                </Button>
+              </DialogFooter>
+            </>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { Page, PageHeader } from "@/components/kit";
 import {
   CalculationSection,
   InvoiceFormatSection,
+  KotFormatSection,
   PaymentModesSection,
   PromoSection,
   TaxSection,
@@ -82,6 +83,8 @@ function renderSection(slug: string) {
       return <KitchenSection />;
     case "printers":
       return <PrinterSection />;
+    case "kot-format":
+      return <KotFormatSection />;
     case "display":
       return <DisplaySection />;
     case "menu-setting":

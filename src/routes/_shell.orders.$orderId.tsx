@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, Ban, ChefHat, Printer, Receipt, Send } from "lucide-react";
+import { useState } from "react";
 
 import {
   DataTable,
@@ -10,9 +11,21 @@ import {
   SectionCard,
   StatusBadge,
 } from "@/components/kit";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { RESTAURANT } from "@/mock/data";
-import { lineTotal, orderTotals, useStore } from "@/mock/store";
+import { displayBillNo, lineTotal, orderTotals, useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/orders/$orderId")({
   head: () => ({
@@ -37,6 +50,8 @@ function OrderDetailPage() {
   const store = useStore();
   const navigate = useNavigate();
   const order = store.orderById(orderId);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
 
   if (!order) {
     return (
@@ -73,7 +88,7 @@ function OrderDetailPage() {
     <Page>
       <PageHeader
         icon={Receipt}
-        title={`Order #${order.orderNo}`}
+        title={`Order #${displayBillNo(order)}`}
         description={`${order.tableLabel} · ${order.type} · ${order.guests} guests · created ${order.createdAt} by ${order.createdBy}`}
         actions={
           <>
@@ -82,6 +97,14 @@ function OrderDetailPage() {
             </Button>
             <Button variant="outline" onClick={() => void store.printBill(order.id)}>
               <Printer className="size-4" /> Reprint bill
+              {store.currentUser.role === "Owner" && order.billPrintCount ? (
+                <span
+                  className="ml-1 rounded-full bg-warning-soft px-1.5 py-0.5 text-xs font-semibold text-warning"
+                  title="How many times this bill has been reprinted"
+                >
+                  {order.billPrintCount}
+                </span>
+              ) : null}
             </Button>
             <Button
               variant="outline"
@@ -89,7 +112,7 @@ function OrderDetailPage() {
               title={order.customerPhone ? undefined : "No customer phone number attached"}
               onClick={() => void store.sendEBill(order.id)}
             >
-              <Send className="size-4" /> Share
+              <Send className="size-4" /> Send E-bill
             </Button>
             {editable ? (
               <Button
@@ -234,7 +257,7 @@ function OrderDetailPage() {
             <div className="flex items-center justify-between">
               <StatusBadge status={order.status} />
               {editable ? (
-                <Button variant="outline" size="sm" onClick={() => store.cancelOrder(order.id)}>
+                <Button variant="outline" size="sm" onClick={() => setCancelConfirmOpen(true)}>
                   <Ban className="size-4" /> Cancel order
                 </Button>
               ) : null}
@@ -242,6 +265,47 @@ function OrderDetailPage() {
           </SectionCard>
         </div>
       </div>
+
+      <AlertDialog
+        open={cancelConfirmOpen}
+        onOpenChange={(o) => {
+          setCancelConfirmOpen(o);
+          if (!o) setCancelReason("");
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel order #{order.orderNo}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This is a real, irreversible cancellation against the backend - the table is freed and
+              this order will not reappear anywhere.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="cancel-reason">Reason (optional, kept in the audit log)</Label>
+            <Textarea
+              id="cancel-reason"
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder="e.g. duplicate order, guest walked out…"
+              rows={2}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep order</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (store.cancelOrder(order.id, cancelReason.trim() || undefined)) {
+                  setCancelConfirmOpen(false);
+                  setCancelReason("");
+                }
+              }}
+            >
+              Cancel order
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Page>
   );
 }

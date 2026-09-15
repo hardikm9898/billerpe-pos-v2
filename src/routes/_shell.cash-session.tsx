@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ArrowDownCircle, ArrowUpCircle, Lock, Wallet } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   DataTable,
@@ -48,6 +48,13 @@ function CashSessionPage() {
   const store = useStore();
   const session = store.openSessionRecord();
   const balance = store.sessionBalance();
+
+  // Confirmed out of scope for the Local EXE - loaded here on this
+  // screen's own mount instead of globally (see AppShell.tsx's comment).
+  useEffect(() => {
+    void store.loadCashSessionsFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [mode, setMode] = useState<Mode>(null);
   const [amount, setAmount] = useState("");

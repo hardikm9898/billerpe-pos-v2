@@ -1,6 +1,7 @@
 import { Link, createFileRoute, useParams } from "@tanstack/react-router";
 import { ArrowLeft, Boxes } from "lucide-react";
 import type { ComponentType } from "react";
+import { useEffect } from "react";
 
 import { EmptyState, Page, PageHeader, PendingDecision } from "@/components/kit";
 import {
@@ -18,6 +19,7 @@ import {
   SupplierReport,
 } from "@/components/stock/reports";
 import { StockNav } from "@/components/stock/shared";
+import { useStore } from "@/mock/store";
 import {
   PurchaseOrdersScreen,
   RequisitionsScreen,
@@ -63,9 +65,36 @@ const SCREENS: Record<string, ComponentType> = {
   "report-order-consumption": OrderConsumptionReport,
 };
 
+// These 5 sections are confirmed out of scope for the Local EXE (no local
+// model exists for any of them - see billerpe-local-exe/model/index.js's
+// own scope comment), so they always 401 against the cloud regardless of
+// session validity. Loading them here, only when this specific section is
+// actually open, keeps that 401 noise out of every normal login/table-
+// grid/billing session - it used to fire unconditionally on every login
+// via AppShell's eager effects, confirmed live as visible console/toast
+// noise on the core POS flow that never even visits this screen.
+const SECTION_LOADERS: Record<string, keyof ReturnType<typeof useStore>> = {
+  suppliers: "loadSuppliersFromServer",
+  "semi-finished": "loadSemiFinishedFromServer",
+  production: "loadSemiFinishedFromServer",
+  "purchase-orders": "loadPurchaseOrdersFromServer",
+  "franchise-requisitions": "loadRequisitionsFromServer",
+  wastage: "loadWastageFromServer",
+  recipes: "loadRecipesFromServer",
+};
+
 function StockSectionPage() {
   const { section } = useParams({ from: "/_shell/stock/$section" });
   const meta = resolveSection(section);
+  const store = useStore();
+
+  useEffect(() => {
+    const loaderKey = meta ? SECTION_LOADERS[meta.slug] : undefined;
+    if (!loaderKey) return;
+    const loader = store[loaderKey];
+    if (typeof loader === "function") void (loader as () => Promise<void>)();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [meta?.slug]);
 
   if (!meta) {
     return (

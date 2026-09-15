@@ -82,8 +82,8 @@ export const OPS_SECTIONS: OpsSection[] = [
   },
   {
     slug: "delivery-charge",
-    name: "Delivery & Packaging",
-    short: "Delivery",
+    name: "Packaging Charge",
+    short: "Packaging",
     group: "billing",
     desc: "Same rule engine as Service Charge — type, auto-apply and tax treatment",
     affects: "Added to the bill on Pickup orders (or manually, per order)",
@@ -112,6 +112,14 @@ export const OPS_SECTIONS: OpsSection[] = [
     group: "hardware",
     desc: "Physical printers, size, copies and KOT / invoice routing",
     affects: "Which device the print job is sent to",
+  },
+  {
+    slug: "kot-format",
+    name: "KOT Format",
+    short: "KOT Format",
+    group: "hardware",
+    desc: "Customer details, order type, restaurant identity, token/KOT number and custom text",
+    affects: "Every printed and reprinted kitchen ticket",
   },
 
   {
@@ -162,6 +170,7 @@ export const OPS_ALIASES: Record<string, string> = {
   printer: "printers",
   taxes: "tax",
   invoice: "invoice-format",
+  kot: "kot-format",
   promos: "promo-codes",
   kitchen: "kitchens",
   customers: "customer-data",
