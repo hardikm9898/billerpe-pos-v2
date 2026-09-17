@@ -43,7 +43,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { ApiError, hotelApi, qrOrderApi } from "@/lib/api";
-import { encryptHotelId, encryptQrPayload } from "@/lib/publicMenu";
+import { encryptHotelId, encryptQrPayload, qrBaseUrl } from "@/lib/publicMenu";
 import { cn } from "@/lib/utils";
 import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
@@ -336,10 +336,12 @@ export function QrSection() {
       });
   }, []);
 
+  // Null when there is no safe public address to print (see qrBaseUrl) -
+  // the UI below shows how to configure one instead of rendering a QR that
+  // would resolve to the scanner's own phone.
+  const qrBase = qrBaseUrl();
   const url =
-    hotelId != null && typeof window !== "undefined"
-      ? `${window.location.origin}/qr-menu?${encryptHotelId(hotelId)}`
-      : null;
+    hotelId != null && qrBase ? `${qrBase}/qr-menu?${encryptHotelId(hotelId)}` : null;
 
   useEffect(() => {
     if (!url) {
@@ -364,8 +366,8 @@ export function QrSection() {
   // two apart and only show cart/checkout when a real table is known.
   const selectedTable = selectedTableId ? store.tableById(selectedTableId) : undefined;
   const tableUrl =
-    hotelId != null && selectedTable && typeof window !== "undefined"
-      ? `${window.location.origin}/qr-menu?${encryptQrPayload({
+    hotelId != null && selectedTable && qrBase
+      ? `${qrBase}/qr-menu?${encryptQrPayload({
           hotelId,
           tableId: Number(selectedTable.id),
           qrVersion: selectedTable.qrVersion ?? 1,
@@ -459,8 +461,15 @@ export function QrSection() {
             )}
           </div>
           <p className="mt-3 text-center text-xs text-muted-foreground">
-            Scan for {RESTAURANT.name}
+            {qrBase ? `Scan for ${RESTAURANT.name}` : "QR codes unavailable"}
           </p>
+          {!qrBase ? (
+            <p className="mt-2 text-center text-xs text-status-held-foreground">
+              This POS is open on a local address ({typeof window !== "undefined" ? window.location.origin : ""}),
+              which a customer&apos;s phone cannot reach. Set VITE_PUBLIC_QR_BASE_URL to your public
+              site before printing QR codes.
+            </p>
+          ) : null}
         </SectionCard>
       </div>
 

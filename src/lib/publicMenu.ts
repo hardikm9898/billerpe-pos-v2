@@ -9,6 +9,36 @@
 import CryptoJS from "crypto-js";
 import { API_BASE_URL } from "./api";
 
+// Where a printed QR code must point. NOT window.location.origin, which is
+// where a staff member's browser happens to have the POS open - and since
+// billerpe-local-exe now serves the POS off local disk, that is routinely
+// http://localhost:4100 or http://billerpe-local-server.local:4100.
+// Generating a QR from either produces a code that resolves to the
+// CUSTOMER'S OWN phone (or to nothing), on a sticker on a table, found out
+// only when a customer complains. The QR menu is the one surface that is
+// genuinely public, so its address has to be configured, not inferred.
+const CONFIGURED_QR_BASE = (import.meta.env["VITE_PUBLIC_QR_BASE_URL"] ?? "").replace(/\/$/, "");
+
+// A hostname only this machine or this LAN can resolve. Used to decide
+// whether falling back to the current origin is safe.
+function isLocalOrigin(origin: string): boolean {
+    return /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(origin)
+        || /\.local(:\d+)?$/i.test(origin);
+}
+
+/**
+ * The public origin to encode into a QR, or null when there isn't a safe
+ * one. Null is deliberate and callers must handle it by refusing to render
+ * a QR: a missing code a staff member can report is recoverable, a printed
+ * dead one is not.
+ */
+export function qrBaseUrl(): string | null {
+    if (CONFIGURED_QR_BASE) return CONFIGURED_QR_BASE;
+    if (typeof window === "undefined") return null;
+    const origin = window.location.origin;
+    return isLocalOrigin(origin) ? null : origin;
+}
+
 // Must match the backend's DESECRET_KEY (uat-backend-v2/.env) exactly - the
 // old frontend's own config.SECRET_KEY was "MySuperSecretKey123", confirmed
 // still equal to the backend's current DESECRET_KEY value. This is not a
