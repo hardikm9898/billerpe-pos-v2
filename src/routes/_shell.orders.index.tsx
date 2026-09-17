@@ -142,7 +142,7 @@ export const Route = createFileRoute("/_shell/orders/")({
 const filters: ("All" | OrderStatus)[] = [
   "All",
   "Running",
-  "Held",
+  "Hold",
   "Bill Generated",
   "Settled",
   "Cancelled",
@@ -183,15 +183,40 @@ function OrdersPage() {
   };
 
   // Live orders (small, always fully in memory) stay filtered/searched
-  // client-side and shown unpaginated, ahead of the current history page -
-  // store.allOrders() already dedupes any live order that's also present
-  // in the loaded history page (see its own comment), so this merge just
-  // needs the status tab + search text applied to the live slice; the
-  // history slice arrives from the server already filtered/paginated.
+  // client-side and shown unpaginated, ahead of the current history page;
+  // the history slice arrives from the server already filtered/paginated.
+  //
+  // The merge is done here rather than through store.allOrders() because of
+  // one case allOrders() cannot get right: an order that has just reached a
+  // TERMINAL state. Settling leaves the order in store.orders (marked
+  // "Settled") until the next reload, and allOrders() can only dedupe a live
+  // order against the history page that happens to be loaded - so the
+  // just-settled bill was correct on page 1 and then printed again at the
+  // top of page 2, page 3 and every other page, exactly as reported. A
+  // screen refresh appeared to "fix" it only because reloading dropped it
+  // from the live slice.
+  //
+  // A settled or cancelled order belongs to the server-paginated history
+  // from that moment on, so it is shown on the newest page - where it really
+  // is the latest bill, and where the server has not yet been asked for a
+  // fresh page that would contain it - and on no other page.
+  const mergedOrders = useMemo(() => {
+    const historyBackendIds = new Set(
+      store.orderHistory.map((o) => o.backendId).filter((id): id is number => id !== undefined),
+    );
+    const onNewestPage = store.orderHistoryPage <= 1;
+    const liveOnly = store.orders.filter((o) => {
+      if (o.backendId && historyBackendIds.has(o.backendId)) return false;
+      if (o.status === "Settled" || o.status === "Cancelled") return onNewestPage;
+      return true;
+    });
+    return [...liveOnly, ...store.orderHistory];
+  }, [store.orders, store.orderHistory, store.orderHistoryPage]);
+
   const rows = useMemo(
     () =>
-      store
-        .allOrders()
+      mergedOrders
+        .slice()
         .sort((a, b) => b.orderNo - a.orderNo)
         .filter((o) => status === "All" || o.status === status)
         .filter((o) => {
@@ -207,7 +232,7 @@ function OrdersPage() {
           );
         }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store.orders, store.orderHistory, status, q],
+    [mergedOrders, status, q],
   );
   // Only while genuinely empty AND a request is still in flight - once
   // real rows show up, an unrelated in-flight request elsewhere shouldn't

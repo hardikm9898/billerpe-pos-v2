@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
+import { computeBill, type EngineChargeRule, type EngineTax } from "@/lib/billEngine";
 import QRCode from "qrcode";
 
 import * as seed from "./data";
@@ -414,36 +415,64 @@ export interface BillTotals {
   packaging: number;
   taxLines: { id: string; name: string; amount: number }[];
   tax: number;
+  /** Signed delta applied to reach `grand` from the raw paise-precision sum - positive means rounded up, negative means rounded down. */
+  roundOff: number;
   grand: number;
 }
 
 export type BillSettings = Pick<
   State,
   "serviceCharge" | "deliveryChargeRule" | "packagingChargeRule" | "taxRules" | "invoiceFormat"
->;
+> & {
+  /** Optional - lets tax rules scoped to a table category resolve the
+   * order's table. The whole State satisfies this (it has `tables`). */
+  tables?: Pick<RestaurantTable, "id" | "categoryId">[];
+  /** Optional - lets tax rules scoped to menu categories resolve which
+   * lines they apply to. The whole State satisfies this too. */
+  menuItems?: Pick<MenuItem, "id" | "categoryId">[];
+};
 
-/** Delivery/packaging: same rule shape as service charge, but gated on auto-apply order type. */
-function chargeAmount(
-  rule: BillChargeRule,
-  subtotal: number,
-  discount: number,
-  orderType: OrderType,
-): number {
-  if (!rule.active || subtotal === 0) return 0;
-  const opsType: OpsOrderType = orderType === "Dine In" ? "Dine-in" : "Pickup";
-  if (rule.autoApply.length && !rule.autoApply.includes(opsType)) return 0;
-  const base = rule.calculationOn === "core" ? subtotal : subtotal - discount;
-  const qualifies =
-    rule.condition === "always"
-      ? true
-      : rule.condition === "greater"
-        ? base > rule.threshold
-        : base < rule.threshold;
-  if (!qualifies) return 0;
-  return rule.type === "percent" ? Math.round(((base * rule.value) / 100) * 100) / 100 : rule.value;
+const OPS_TYPE_TO_ENGINE: Record<OpsOrderType, string> = { "Dine-in": "dinin", Pickup: "pickup" };
+
+function toEngineCharge(rule: ServiceChargeRule | undefined): EngineChargeRule | null {
+  if (!rule) return null;
+  return {
+    active: rule.active,
+    type: rule.type === "percent" ? "percentage" : "fixed",
+    value: rule.value,
+    calculationOn: rule.calculationOn,
+    orderTypes: (rule.autoApply ?? []).map((t) => OPS_TYPE_TO_ENGINE[t] ?? String(t)),
+    taxOnCharge: rule.taxOnCharge,
+    condition: rule.condition === "greater" ? "1" : rule.condition === "less" ? "2" : "3",
+    threshold: rule.threshold,
+  };
 }
 
-/** Single bill-calculation engine — service charge, delivery/packaging rules, and dynamic tax rules. */
+function toEngineTax(rule: TaxRule, menuItems: BillSettings["menuItems"]): EngineTax {
+  // TaxRule is category-scoped in this app while the server stores item
+  // ids (see mapRawTaxType) - expand the categories back to item ids so
+  // the engine applies the same per-line filter the exe does.
+  const menuIds =
+    rule.menuCategoryIds.length && menuItems
+      ? menuItems.filter((m) => rule.menuCategoryIds.includes(m.categoryId)).map((m) => m.id)
+      : [];
+  return {
+    id: rule.id,
+    name: rule.name,
+    type: rule.type === "fixed" ? "fix" : "pr",
+    rate: rule.value,
+    active: rule.active,
+    orderTypes: (rule.orderTypes ?? []).map((t) => OPS_TYPE_TO_ENGINE[t] ?? String(t)),
+    tableCategIds: rule.tableCategoryIds ?? [],
+    menuIds,
+  };
+}
+
+/** Single bill-calculation engine - a thin adapter over the shared
+ * computeBill() (src/lib/billEngine.ts), which is a literal port of the
+ * exe's helpers/billEngine.js. The exe persists the authoritative figures
+ * on every mutation; this recomputes the same way so a draft round being
+ * built locally previews exactly what the exe will store. */
 export function orderTotals(order: Order | undefined, settings: BillSettings): BillTotals {
   if (!order) {
     return {
@@ -454,68 +483,63 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
       packaging: 0,
       taxLines: [],
       tax: 0,
+      roundOff: 0,
       grand: 0,
     };
   }
-  const subtotal = order.itemised
-    ? order.lines.reduce((s, l) => s + lineTotal(l), 0)
-    : (order.fallbackTotal ?? 0);
-  // A percent discount recomputes off the CURRENT subtotal every time
-  // instead of trusting the frozen `amount` from whenever it was applied -
-  // see Order["discount"]'s own comment for why (a live-reported bug: the
-  // discount amount stayed pinned at its pre-add value after adding another
-  // item post-discount). A flat discount, or one reloaded from the backend
-  // with no `type` at all, still just uses its resolved `amount` as-is.
-  const discount =
-    order.discount?.type === "percent"
-      ? Math.round(((subtotal * (order.discount.value ?? 0)) / 100) * 100) / 100
-      : (order.discount?.amount ?? 0);
+  const lines = order.itemised
+    ? order.lines.map((l) => ({
+        qty: l.qty,
+        price: l.price,
+        addons: (l.addons ?? []).map((a) => ({ price: a.price, qty: a.qty })),
+        menuId: l.itemId,
+      }))
+    : [{ qty: 1, price: order.fallbackTotal ?? 0 }];
+  const discount = order.discount
+    ? order.discount.type === "percent"
+      ? { type: "pr" as const, value: order.discount.value ?? 0 }
+      : { type: "fix" as const, value: order.discount.amount }
+    : null;
+  const tableCategId = order.tableId
+    ? (settings.tables?.find((t) => t.id === order.tableId)?.categoryId ?? null)
+    : null;
+  const totals = computeBill({
+    lines,
+    orderType: order.type === "Dine In" ? "dinin" : "pickup",
+    tableCategId,
+    discount,
+    packagingOverride: order.packagingCharge,
+    config: {
+      gstOn: settings.invoiceFormat.gstCalculation,
+      taxTypes: settings.taxRules.map((r) => toEngineTax(r, settings.menuItems)),
+      serviceCharge: toEngineCharge(settings.serviceCharge),
+      packagingRule: toEngineCharge(settings.packagingChargeRule),
+    },
+  });
+  return {
+    subtotal: totals.subtotal,
+    discount: totals.discount,
+    service: totals.service,
+    delivery: totals.delivery,
+    packaging: totals.packaging,
+    taxLines: totals.taxLines.map((t) => ({ id: String(t.id), name: t.name, amount: t.amount })),
+    tax: totals.tax,
+    roundOff: totals.roundOff,
+    grand: totals.grandAmount,
+  };
+}
 
-  const rule = settings.serviceCharge;
-  const serviceBase = rule.calculationOn === "core" ? subtotal : subtotal - discount;
-  const serviceQualifies =
-    rule.condition === "always"
-      ? true
-      : rule.condition === "greater"
-        ? serviceBase > rule.threshold
-        : serviceBase < rule.threshold;
-  const service =
-    !rule.active || !serviceQualifies || subtotal === 0
-      ? 0
-      : rule.type === "percent"
-        ? Math.round(((serviceBase * rule.value) / 100) * 100) / 100
-        : rule.value;
-
-  // Delivery charge is switched off entirely (not needed right now, per
-  // explicit sign-off) - forced to 0 here regardless of deliveryChargeRule
-  // or any per-order override, rather than only hiding the settings UI, so
-  // a rule left active from before this change (or a stray setCharges
-  // call) can never sneak a delivery line back onto a bill.
-  const delivery = 0;
-  const packaging =
-    order.packagingCharge ??
-    chargeAmount(settings.packagingChargeRule, subtotal, discount, order.type);
-
-  const taxBase =
-    Math.max(0, subtotal - discount) +
-    (rule.taxOnCharge ? service : 0) +
-    (settings.packagingChargeRule.taxOnCharge ? packaging : 0);
-  const gstOn = settings.invoiceFormat.gstCalculation;
-  const taxLines = gstOn
-    ? settings.taxRules
-        .filter((t) => t.active)
-        .map((t) => ({
-          id: t.id,
-          name: t.name,
-          amount:
-            Math.round((t.type === "percent" ? (taxBase * t.value) / 100 : t.value) * 100) / 100,
-        }))
-    : [];
-  const tax = taxLines.reduce((s, t) => s + t.amount, 0);
-  const grand =
-    Math.round((Math.max(0, subtotal - discount) + service + delivery + packaging + tax) * 100) /
-    100;
-  return { subtotal, discount, service, delivery, packaging, taxLines, tax, grand };
+// The discount INPUT (type + value) and any explicit packaging override,
+// as the exe's helpers/orderTotals.js reads them off every cart payload -
+// the exe recomputes everything else itself from the persisted lines, so
+// the other cart figures (gst/grandAmount/...) are preview-only.
+function discountPayload(o: Order, totals: BillTotals) {
+  return {
+    discount_reason: o.discount?.label ?? "",
+    discount_type: (o.discount?.type === "percent" ? "pr" : "fix") as "fix" | "pr",
+    discount_value: o.discount?.type === "percent" ? (o.discount.value ?? 0) : totals.discount,
+    ...(o.packagingCharge !== undefined ? { packaging_override: o.packagingCharge } : {}),
+  };
 }
 
 // The real `cart.taxes` payload holdOrder/kotOrder/adminOrder/AdminOrder
@@ -798,6 +822,7 @@ interface Ctx extends State {
   removeTableCategory: (id: string) => void;
   loadTablesFromServer: () => Promise<void>;
   refreshOrderFromServer: (orderId: string) => Promise<void>;
+  reconcileVanishedOrders: (backendIds: number[]) => Promise<void>;
   upsertUser: (u: User, newPassword?: string) => void;
   loadUsersFromServer: () => Promise<void>;
   loadInvoiceFormatFromServer: () => Promise<void>;
@@ -963,7 +988,7 @@ const TABLE_STATUS_MAP: Record<RawTable["table_status"], TableStatus> = {
   F: "Free",
   R: "Running",
   P: "Bill Generated",
-  H: "Held",
+  H: "Hold",
   B: "Reserved",
 };
 
@@ -1659,13 +1684,29 @@ function formatOrderTimestamp(iso: string, businessDateDMY: string): string {
 // which is what the old BillerPe app that supported multi-qty addons wrote.
 // Also tolerates the flat {name, price} shape this app itself used to send
 // (qty defaults to 1) so previously-created rows still read back correctly.
-export function parseOrderAddons(raw: string | null | undefined): NonNullable<OrderLine["addons"]> {
+//
+// `raw` is NOT reliably a JSON string despite RawOrderLine's own type claim -
+// billerpe-local-exe/model/order_details.js declares this a DataTypes.JSON
+// column, and Sequelize's JSON getter auto-parses it back to a real array
+// the moment a non-raw query (every real endpoint here - getActiveOrders/
+// getSingleOrder/getOrdersByBillNo, none pass raw:true) touches the row, so
+// the value that actually arrives over the wire is already an array, not a
+// string containing one. JSON.parse(anArray) silently threw here (caught,
+// returned []) on every single order loaded from the server rather than
+// built locally in this tab - confirmed live as the real cause of "addons
+// aren't showing" for any order taken elsewhere (Captain App, another POS
+// tab, a QR order) and then opened/reloaded here. This app's own orders
+// never hit this path at all - their addons stay in local React state from
+// the moment they're added, never round-tripping through this parser.
+export function parseOrderAddons(raw: unknown): NonNullable<OrderLine["addons"]> {
   if (!raw) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
   }
   if (!Array.isArray(parsed)) return [];
   const out: NonNullable<OrderLine["addons"]> = [];
@@ -1740,8 +1781,15 @@ export function displayBillNo(o: { billNo?: string; orderNo: number }): string {
 // a round number a QR-accepted order had already used server-side.
 // Matches addKotRoundToOrder's own "next round = current max + 1" formula
 // exactly, not a guess at a different convention.
+// A line that's been HELD but never fired carries the model's default
+// kotNumber of 0 (controller/holdOrder.js's buildHoldRows never sets it) -
+// `|| 1` and a floor of 1 both treated that as "round 1 fired", so an
+// order that was only ever held (never sent to the kitchen) showed a
+// phantom "KOT 1" instead of "New - not sent". Real fired rounds are
+// always >= 1 (addKotRoundToOrder's own "current max + 1" formula), so 0
+// unambiguously means "not fired" and the floor drops to 0 to match.
 function maxKotRound(details: { kotNumber: number }[]): number {
-  return details.reduce((max, d) => Math.max(max, d.kotNumber || 1), 1);
+  return details.reduce((max, d) => Math.max(max, d.kotNumber || 0), 0);
 }
 
 function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Order {
@@ -1757,7 +1805,10 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       price: l.price,
       variant: l.variant_name ?? undefined,
       addons: addons.length ? addons : undefined,
-      kotRound: l.kotNumber || 1,
+      // See mapRawLiveOrder's own comment on this same fallback - a
+      // settled order shouldn't have any kotNumber-0 lines in practice,
+      // but UNSENT_ROUND is the correct fallback here too if it ever did.
+      kotRound: l.kotNumber || UNSENT_ROUND,
     };
   });
   const payments: PaymentSplit[] = (
@@ -1783,10 +1834,7 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
     kotRounds: maxKotRound(detail.hms_orderDetails),
     customerName: detail.hms_user_master?.name || undefined,
     customerPhone: detail.hms_user_master?.number || undefined,
-    discount:
-      detail.totalDiscount > 0
-        ? { label: detail.discount_reason || "Discount", amount: detail.totalDiscount }
-        : undefined,
+    discount: mapRawDiscount(detail),
     payments,
     businessDate,
     createdAt: formatOrderTimestamp(detail.createdAt, businessDate),
@@ -1840,6 +1888,74 @@ function mapRawCashSession(s: RawCashSession): CashSession {
   };
 }
 
+// The exe now stores the discount INPUT (discount_type "pr"/"fix" +
+// discount_value) alongside the resolved totalDiscount, so a percent
+// discount reloaded from the server keeps recomputing as lines change
+// instead of freezing at whatever amount it was when last saved.
+function mapRawDiscount(detail: RawOrderDetail): Order["discount"] {
+  if (!(detail.totalDiscount > 0)) return undefined;
+  const label = detail.discount_reason || "Discount";
+  if (detail.discount_type === "pr" && (detail.discount_value ?? 0) > 0) {
+    return {
+      label,
+      amount: detail.totalDiscount,
+      type: "percent",
+      value: detail.discount_value ?? 0,
+    };
+  }
+  return { label, amount: detail.totalDiscount, type: "flat", value: detail.totalDiscount };
+}
+
+// Merges a fresh server copy of an order this session already knows into
+// the local Order - fired lines, rounds, status, discount, customer, table
+// and bill number come from the server; only lines still being built
+// locally (kotRound === UNSENT_ROUND) survive from the local copy. This is
+// what makes a KOT fired from the Captain App show up on an open POS
+// order (and its table card total) immediately - the old code refused to
+// touch an order it already had, or skipped entirely while a draft round
+// existed, so the POS lagged until the cashier reopened the order.
+function mergeServerOrder(local: Order, fresh: Order): Order {
+  if (local.status === "Settled" || local.status === "Cancelled" || local.editingSettledOrderId) {
+    return local;
+  }
+  // Holding an order PERSISTS its un-fired lines (controller/holdOrder.js
+  // writes them as status "in-progress"), so the server copy that comes
+  // back IS this order's local draft, not a second set of items. Keeping
+  // both showed every held item twice - as a phantom "KOT 1" plus an
+  // un-sent copy before held lines mapped to UNSENT_ROUND, and as plain
+  // doubled lines after. Local drafts only survive while the server is
+  // holding none of its own, which is exactly the "typed but never sent
+  // anywhere" case this preservation exists for.
+  const serverHasUnsent = fresh.lines.some((l) => l.kotRound === UNSENT_ROUND);
+  const draftLines = serverHasUnsent
+    ? []
+    : local.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+  const hasDraft = draftLines.length > 0;
+  return {
+    ...local,
+    lines: [...draftLines, ...fresh.lines],
+    kotRounds: fresh.kotRounds,
+    status: fresh.status,
+    backendId: fresh.backendId,
+    billNo: fresh.billNo ?? local.billNo,
+    orderNo: fresh.billNo ? fresh.orderNo : local.orderNo,
+    tableId: fresh.tableId ?? local.tableId,
+    tableLabel: fresh.tableLabel && fresh.tableLabel !== "—" ? fresh.tableLabel : local.tableLabel,
+    customerName: fresh.customerName ?? local.customerName,
+    customerPhone: fresh.customerPhone ?? local.customerPhone,
+    // A discount applied locally mid-edit (applyDiscount only patches
+    // local state until the next KOT/bill call carries it) must not be
+    // wiped by a refresh while the draft is still open.
+    discount: hasDraft ? local.discount : (fresh.discount ?? local.discount),
+    packagingCharge: hasDraft ? local.packagingCharge : fresh.packagingCharge,
+    itemised: fresh.itemised || hasDraft,
+    fallbackTotal: fresh.fallbackTotal,
+    tip: fresh.tip,
+    billPrintCount: fresh.billPrintCount,
+    token: fresh.token,
+  };
+}
+
 // For a table that's genuinely occupied on the real backend (getTable's
 // own query already filters to status in-progress/success/hold,
 // payment:pending, deleted:false) but this session never created the
@@ -1861,11 +1977,17 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
       price: l.price,
       variant: l.variant_name ?? undefined,
       addons: addons.length ? addons : undefined,
-      kotRound: l.kotNumber || 1,
+      // kotNumber 0 (the model default - buildHoldRows never sets it) is a
+      // held-but-never-fired line, exactly what UNSENT_ROUND already means
+      // for a line added locally this session (see maxKotRound's own
+      // comment). `|| 1` used to fold it into "KOT 1" - indistinguishable
+      // from a real fired round 1, and once a real round 1 existed too,
+      // held items merged straight into it as if already sent.
+      kotRound: l.kotNumber || UNSENT_ROUND,
     };
   });
   const status: Order["status"] =
-    detail.status === "hold" ? "Held" : detail.status === "success" ? "Bill Generated" : "Running";
+    detail.status === "hold" ? "Hold" : detail.status === "success" ? "Bill Generated" : "Running";
   return {
     id: `o-live-${detail.id}`,
     orderNo: parseBillNoAsOrderNo(detail.bill_no, detail.id),
@@ -1881,10 +2003,8 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
     kotRounds: maxKotRound(detail.hms_orderDetails),
     customerName: detail.hms_user_master?.name || undefined,
     customerPhone: detail.hms_user_master?.number || undefined,
-    discount:
-      detail.totalDiscount > 0
-        ? { label: detail.discount_reason || "Discount", amount: detail.totalDiscount }
-        : undefined,
+    discount: mapRawDiscount(detail),
+    ...(detail.packaging_override != null ? { packagingCharge: detail.packaging_override } : {}),
     businessDate,
     createdAt: formatOrderTimestamp(detail.createdAt, businessDate),
     createdBy: staffName,
@@ -2607,6 +2727,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           tip: o.tip ?? 0,
           orderTax,
           totalBill: t.grand,
+          roundOff: t.roundOff ?? 0,
           headerText,
           footerText,
         });
@@ -2638,6 +2759,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         tip: o.tip ?? 0,
         orderTax,
         totalBill: t.grand,
+        roundOff: t.roundOff ?? 0,
         headerText,
         footerText,
       });
@@ -2827,7 +2949,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // synthesizeDraft reconstructs a blank, unsaved Order on read so the
   // cart-builder screen has something to render; ensureRealOrder is the
   // one place that actually promotes a draft into a real p.orders entry
-  // (and marks the table Held), called only by actions that add real
+  // (and marks the table Hold), called only by actions that add real
   // content - never by finalize-only actions (hold/KOT/bill/settle),
   // which keep failing against a still-nonexistent order exactly like
   // they already fail against an empty one.
@@ -2846,7 +2968,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         tableId,
         tableLabel: tableLabel(tableId),
         guests: Math.min(table.seats || 1, 2),
-        status: "Held",
+        status: "Hold",
         kotRounds: 0,
         lines: [],
         menuId: resolveMenu(s.menus, table, "Dine In")?.id,
@@ -2870,7 +2992,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         type: "Pickup",
         tableLabel: "Take Away",
         guests: 1,
-        status: "Held",
+        status: "Hold",
         kotRounds: 0,
         lines: [],
         menuId: resolveMenu(s.menus, undefined, "Pickup")?.id,
@@ -2884,7 +3006,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   // Materializes a virtual draft into a real p.orders entry (and marks its
-  // table Held) if it isn't one already. No-ops for an id that's already
+  // table Hold) if it isn't one already. No-ops for an id that's already
   // real, or that doesn't resolve to a draft at all. Returns the draft
   // object used (for callers that need it for logging etc. right away,
   // since `s` here won't reflect this patch() until next render).
@@ -2902,7 +3024,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         t.id === draft.tableId
           ? {
               ...t,
-              status: "Held",
+              status: "Hold",
               guests: draft.guests,
               orderId: draft.id,
               occupiedSince: nowStamp(),
@@ -2955,7 +3077,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       synthesizeDraft(id),
     orderForTable: (tableId) =>
       s.orders.find(
-        (o) => o.tableId === tableId && ["Held", "Running", "Bill Generated"].includes(o.status),
+        (o) => o.tableId === tableId && ["Hold", "Running", "Bill Generated"].includes(o.status),
       ),
     allOrders: () => {
       const historyBackendIds = new Set(
@@ -3252,7 +3374,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           newQty > 0 ? `×${newQty}` : "Removed",
         );
         // Nothing left on this table/pickup order - don't leave it sitting
-        // Held/Running with zero items blocking the table for everyone else.
+        // Hold/Running with zero items blocking the table for everyone else.
         if (newQty <= 0 && order.lines.length === 1) freeEmptyDraft(order);
       }
       return true;
@@ -3292,7 +3414,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           newQty > 0 ? `×${newQty}` : "Removed",
         );
         // Nothing left on this table/pickup order - don't leave it sitting
-        // Held/Running with zero items blocking the table for everyone else.
+        // Hold/Running with zero items blocking the table for everyone else.
         if (newQty <= 0 && order.lines.length === 1) freeEmptyDraft(order);
       }
     },
@@ -3393,18 +3515,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           reason,
         );
         // Nothing left on this table/pickup order - don't leave it sitting
-        // Held/Running with zero items blocking the table for everyone else.
+        // Hold/Running with zero items blocking the table for everyone else.
         if (order.lines.length === 1) freeEmptyDraft(order);
       }
       return true;
     },
 
-    // Used to be a pure local state.orders patch - flipped status to "Held"
+    // Used to be a pure local state.orders patch - flipped status to "Hold"
     // in memory only, never called the backend. POST /holdOrder already
     // exists and already persists Order.status "hold"/Table.table_status
     // "H" server-side (confirmed reading controller/kto.js#holdOrder) and
     // loadTablesFromServer already knows how to reconstruct a "hold" order
-    // back into "Held" on reload (mapRawLiveOrder's status map) - so the
+    // back into "Hold" on reload (mapRawLiveOrder's status map) - so the
     // fix is wiring this button to that endpoint, the same way generateKot
     // wires Send KOT to /kotOrder, not adding new reload logic. Without
     // this, a held-only order (never KOT'd/Saved) had no backendId, so
@@ -3431,6 +3553,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         packagingChargeRule: s.packagingChargeRule,
         taxRules: s.taxRules,
         invoiceFormat: s.invoiceFormat,
+        tables: s.tables,
+        menuItems: s.menuItems,
       };
       const totals = orderTotals(o, billSettings);
       const menuItemsPayload = pending.map((l) => {
@@ -3465,9 +3589,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               service_charger: totals.service,
               delivery_charge: totals.delivery,
               packaging_charge: totals.packaging,
-              discount_reason: o.discount?.label ?? "",
-              discount_type: "fix",
-              discount_value: totals.discount,
+              ...discountPayload(o, totals),
               taxes: buildCartTaxes(totals, s.taxRules),
               items: [{ status: "H", menuItems: menuItemsPayload }],
             },
@@ -3485,12 +3607,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           patch((p) => ({
             ...p,
             orders: p.orders.map((x) =>
-              x.id === orderId ? { ...x, status: "Held", backendId, orderNo, billNo } : x,
+              x.id === orderId ? { ...x, status: "Hold", backendId, orderNo, billNo } : x,
             ),
-            tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Held" } : t)),
+            tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Hold" } : t)),
           }));
-          log("Order Held", `Order #${backendId}`, o.status ?? "", "Held");
-          toast.success(`Order #${backendId} held`, { description: o.tableLabel });
+          log("Order Hold", `Order #${backendId}`, o.status ?? "", "Hold");
+          toast.success(`Order #${backendId} on hold`, { description: o.tableLabel });
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not hold order");
         }
@@ -3520,7 +3642,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // role defaults (mock/data.ts's ROLE_SPECIAL_DEFAULTS - Owner/
       // Manager true, everyone else false) - it just was never actually
       // wired to this flow. Only gates when the order has something real
-      // fired on it; an order with nothing sent yet (still a Held/empty
+      // fired on it; an order with nothing sent yet (still a Hold/empty
       // draft) cancels freely regardless of role, same as before - this
       // isn't about locking down every accidental "opened the wrong
       // table" undo, just the case staff specifically flagged.
@@ -3681,6 +3803,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         packagingChargeRule: s.packagingChargeRule,
         taxRules: s.taxRules,
         invoiceFormat: s.invoiceFormat,
+        tables: s.tables,
+        menuItems: s.menuItems,
       };
       const totals = orderTotals(o, billSettings);
       const menuItemsPayload = pending.map((l) => {
@@ -3715,9 +3839,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               service_charger: totals.service,
               delivery_charge: totals.delivery,
               packaging_charge: totals.packaging,
-              discount_reason: o.discount?.label ?? "",
-              discount_type: "fix",
-              discount_value: totals.discount,
+              ...discountPayload(o, totals),
               taxes: buildCartTaxes(totals, s.taxRules),
               items: [{ status: "H", menuItems: menuItemsPayload }],
             },
@@ -3929,6 +4051,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         packagingChargeRule: s.packagingChargeRule,
         taxRules: s.taxRules,
         invoiceFormat: s.invoiceFormat,
+        tables: s.tables,
+        menuItems: s.menuItems,
       };
       const totals = orderTotals(o, billSettings);
       // Unlike generateKot, this must carry EVERY line the order has ever
@@ -3979,9 +4103,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               service_charger: totals.service,
               delivery_charge: totals.delivery,
               packaging_charge: totals.packaging,
-              discount_reason: o.discount?.label ?? "",
-              discount_type: "fix",
-              discount_value: totals.discount,
+              ...discountPayload(o, totals),
               taxes: buildCartTaxes(totals, s.taxRules),
             },
           });
@@ -4087,6 +4209,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               packagingChargeRule: s.packagingChargeRule,
               taxRules: s.taxRules,
               invoiceFormat: s.invoiceFormat,
+              tables: s.tables,
+              menuItems: s.menuItems,
             };
             const totals = orderTotals(o, billSettings);
             const allMenuItems = o.lines.map((l) => {
@@ -4119,9 +4243,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 service_charger: totals.service,
                 delivery_charge: totals.delivery,
                 packaging_charge: totals.packaging,
-                discount_reason: o.discount?.label ?? "",
-                discount_type: "fix",
-                discount_value: totals.discount,
+                ...discountPayload(o, totals),
                 taxes: buildCartTaxes(totals, s.taxRules),
               },
             });
@@ -4284,6 +4406,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         packagingChargeRule: s.packagingChargeRule,
         taxRules: s.taxRules,
         invoiceFormat: s.invoiceFormat,
+        tables: s.tables,
+        menuItems: s.menuItems,
       };
       const totals = orderTotals(o, billSettings);
       const items = o.lines.map((l) => {
@@ -4306,9 +4430,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           gst: totals.tax,
           grandAmount: totals.grand,
           totalDiscount: totals.discount,
-          discount_reason: o.discount?.label ?? "",
-          discount_type: "fix",
-          discount_value: totals.discount,
+          ...discountPayload(o, totals),
           service_charge: totals.service,
         });
         patch((p) => ({ ...p, orders: p.orders.filter((x) => x.id !== localOrderId) }));
@@ -4375,11 +4497,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const dst = s.tables.find((t) => t.id === destTableId);
       const srcOrder = s.orders.find(
         (o) =>
-          o.tableId === sourceTableId && ["Held", "Running", "Bill Generated"].includes(o.status),
+          o.tableId === sourceTableId && ["Hold", "Running", "Bill Generated"].includes(o.status),
       );
       const dstOrder = s.orders.find(
         (o) =>
-          o.tableId === destTableId && ["Held", "Running", "Bill Generated"].includes(o.status),
+          o.tableId === destTableId && ["Hold", "Running", "Bill Generated"].includes(o.status),
       );
       if (!srcOrder) {
         toast.error("Source table has no active order");
@@ -4580,7 +4702,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      const destOccupied = ["Running", "Bill Generated", "Held"].includes(dst.status);
+      const destOccupied = ["Running", "Bill Generated", "Hold"].includes(dst.status);
       if (destOccupied && o.tableId) {
         value.mergeTables(o.tableId, destTableId);
         return;
@@ -4626,6 +4748,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         kots: p.kots.map((k) => (k.id === kotId ? { ...k, status } : k)),
       }));
       toast.success(`KOT marked ${status}`);
+      // Accepted/Preparing stay purely local board state (see this
+      // function's own comment) - only Ready is a real cross-device signal
+      // now: billerpe-local-exe/controller/kot.js#markKotReady persists it
+      // and broadcasts "kotReady" to every other connected device, which is
+      // what the Captain App's item-ready notifications key off.
+      if (status === "Ready") {
+        const kot = s.kots.find((k) => k.id === kotId);
+        if (kot?.backendOrderId && kot.kotNumber) {
+          void orderApi.markKotReady(kot.backendOrderId, kot.kotNumber).catch(() => {
+            // Best-effort: the local board already shows Ready either way,
+            // this only affects other devices' visibility into it.
+          });
+        }
+      }
     },
 
     rejectKot: (kotId, reason) => {
@@ -5420,14 +5556,37 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // getActiveOrders now bundles OrderDetails directly (see its own
         // comment in api.ts) - no more per-row getDetail follow-up needed
         // to reconstruct a full local Order from an unresolved active one.
-        const toResolve = activeOrders.filter((o) => !knownBackendIds.has(o.id));
-        const resolved = toResolve.map((raw) => {
-          const staffName = raw.hotelUserId
+        const staffNameFor = (raw: RawOrderDetail) =>
+          raw.hotelUserId
             ? (s.users.find((u) => u.id === String(raw.hotelUserId))?.name ?? "Staff")
             : "Staff";
+        const toResolve = activeOrders.filter((o) => !knownBackendIds.has(o.id));
+        const resolved = toResolve.map((raw) => {
           const tableId = raw.TableId ? String(raw.TableId) : undefined;
-          return mapRawLiveOrder(raw, staffName, tableId);
+          return mapRawLiveOrder(raw, staffNameFor(raw), tableId);
         });
+        const freshByBackendId = new Map(
+          activeOrders.map((raw) => [
+            raw.id,
+            mapRawLiveOrder(raw, staffNameFor(raw), raw.TableId ? String(raw.TableId) : undefined),
+          ]),
+        );
+        // Orders this session still shows as live but the server no longer
+        // lists as active were settled or cancelled elsewhere (the Captain
+        // App, another tab). Computed HERE rather than inside the patch
+        // below: a state updater must stay pure, and React invokes it twice
+        // in development. Resolved afterwards with one GET each - normally
+        // zero or one order.
+        const vanishedIds = s.orders
+          .filter(
+            (o) =>
+              o.backendId !== undefined &&
+              !freshByBackendId.has(o.backendId) &&
+              !o.editingSettledOrderId &&
+              (o.status === "Running" || o.status === "Hold" || o.status === "Bill Generated"),
+          )
+          .map((o) => o.backendId!)
+          .filter((id): id is number => id !== undefined);
         if (callId !== tablesLoadSeq.current) return;
         patch((p) => {
           // Re-check against `p` (guaranteed current as of THIS patch),
@@ -5475,15 +5634,69 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 : undefined;
             return knownLocal ? { ...t, orderId: knownLocal.id } : t;
           });
+          const merged = p.orders.map((o) => {
+            if (o.backendId === undefined) return o;
+            const fresh = freshByBackendId.get(o.backendId);
+            // The merge is what makes a KOT fired on the Captain App show up
+            // here at once. This used to skip any order it already knew,
+            // which is exactly why a cashier had to reopen the order (or
+            // wait for a 20s poll) to see it, and why the table card's total
+            // disagreed with the Captain App's.
+            return fresh ? mergeServerOrder(o, fresh) : o;
+          });
           return {
             ...p,
             tables: tablesWithOrders,
             tableCategories: tableCatagories.map(mapRawCategory),
-            orders: [...p.orders, ...trulyNew],
+            orders: [...merged, ...trulyNew],
           };
         });
+        if (vanishedIds.length) void value.reconcileVanishedOrders(vanishedIds);
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load tables from server");
+      }
+    },
+    // See loadTablesFromServer: a locally-live order the server no longer
+    // reports as active was settled or cancelled on another device. One
+    // GET /order/:id each decides which, then the local copy is finalised
+    // the same way this POS's own settleOrder/cancelOrder would have.
+    reconcileVanishedOrders: async (backendIds) => {
+      for (const backendId of backendIds) {
+        try {
+          const { order: raw } = await orderHistoryApi.getDetail(backendId);
+          if (!raw) continue;
+          const settled = raw.payment === "success";
+          const cancelled = Boolean((raw as { deleted?: boolean }).deleted);
+          if (!settled && !cancelled) continue;
+          patch((p) => ({
+            ...p,
+            orders: p.orders.map((x) =>
+              x.backendId === backendId && x.status !== "Settled" && x.status !== "Cancelled"
+                ? settled
+                  ? {
+                      ...x,
+                      id: `o-final-${backendId}`,
+                      status: "Settled",
+                      settledAt: nowStamp(),
+                      payments: (
+                        [
+                          { mode: "Cash" as const, amount: raw.cash },
+                          { mode: "UPI" as const, amount: raw.upi },
+                          { mode: "Card" as const, amount: raw.card },
+                          { mode: "Due" as const, amount: raw.due },
+                        ] satisfies PaymentSplit[]
+                      ).filter((pm) => pm.amount > 0),
+                    }
+                  : { ...x, id: `o-final-${backendId}`, status: "Cancelled" }
+                : x,
+            ),
+            kots: p.kots.map((k) =>
+              k.backendOrderId === backendId ? { ...k, orderId: `o-final-${backendId}` } : k,
+            ),
+          }));
+        } catch {
+          // best-effort - the next refresh tries again
+        }
       }
     },
     // Fills the other gap loadTablesFromServer deliberately leaves open
@@ -5505,19 +5718,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     refreshOrderFromServer: async (orderId) => {
       const order = s.orders.find((o) => o.id === orderId);
       if (!order?.backendId) return;
-      if (order.lines.some((l) => l.kotRound > order.kotRounds)) return;
       try {
         const { order: raw } = await orderHistoryApi.getDetail(order.backendId);
         if (!raw) return;
+        if (raw.payment === "success" || (raw as { deleted?: boolean }).deleted) {
+          await value.reconcileVanishedOrders([order.backendId]);
+          return;
+        }
         const staffName = raw.hotelUserId
           ? (s.users.find((u) => u.id === String(raw.hotelUserId))?.name ?? "Staff")
           : "Staff";
-        const fresh = mapRawLiveOrder(raw, staffName, order.tableId);
+        const fresh = mapRawLiveOrder(
+          raw,
+          staffName,
+          raw.TableId ? String(raw.TableId) : order.tableId,
+        );
+        // mergeServerOrder keeps whatever draft round is being built here
+        // and takes everything else from the server - so a KOT fired on
+        // the Captain App lands on this open order immediately, even while
+        // the cashier is mid-way through adding their own items.
         patch((p) => ({
           ...p,
-          orders: p.orders.map((o) =>
-            o.id === orderId ? { ...o, lines: fresh.lines, kotRounds: fresh.kotRounds } : o,
-          ),
+          orders: p.orders.map((o) => (o.id === orderId ? mergeServerOrder(o, fresh) : o)),
         }));
       } catch {
         // best-effort - a failed background refresh just leaves the
@@ -6336,8 +6558,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Client-side duplicate-name guard (case-insensitive) so a mistaken
       // resubmit fails fast with a clear message instead of round-tripping
       // to the backend's own (case-sensitive) uniqueness check.
+      //
+      // Deleted heads are excluded, exactly as the backend's own check is
+      // (`where: { ..., deleted: false }` in controller/expense.js): they
+      // stay in store.expenseHeads only so past entries can resolve a name
+      // by id. Counting them here blocked re-adding a name that had been
+      // deleted - the management list showed nothing while this still said
+      // "already exists", and the API was never even called.
       const nameKey = h.name.trim().toLowerCase();
-      if (s.expenseHeads.some((x) => x.id !== h.id && x.name.trim().toLowerCase() === nameKey)) {
+      if (
+        s.expenseHeads.some(
+          (x) => !x.deleted && x.id !== h.id && x.name.trim().toLowerCase() === nameKey,
+        )
+      ) {
         toast.error("A head with this name already exists");
         return Promise.resolve(false);
       }

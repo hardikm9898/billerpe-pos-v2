@@ -30,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, qrOrderApi, type RawPendingQrOrder } from "@/lib/api";
+import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom } from "@/mock/format";
 import { orderTotals, useStore } from "@/mock/store";
@@ -56,7 +57,7 @@ export const Route = createFileRoute("/_shell/table-grid/")({
 
 const statusStyles: Record<TableStatus, string> = {
   Free: "border-border bg-surface hover:border-primary/40",
-  Held: "border-transparent bg-status-held text-status-held-foreground",
+  Hold: "border-transparent bg-status-held text-status-held-foreground",
   Running: "border-transparent bg-status-running text-status-running-foreground",
   "Bill Generated": "border-transparent bg-status-billed text-status-billed-foreground",
   Reserved: "border-transparent bg-status-reserved text-status-reserved-foreground",
@@ -84,8 +85,32 @@ function TableGridPage() {
   // page rather than AppShell so idle screens elsewhere don't poll table
   // data they aren't showing.
   useEffect(() => {
+    // Immediate refresh on every visit (not only on login), then the poll.
+    void store.loadTablesFromServer();
     const id = setInterval(() => void store.loadTablesFromServer(), 20000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Fast path on top of the 20s poll above - the exe already broadcasts a
+  // webChange event the instant ANY terminal (another POS tab, the Captain
+  // App, the Kitchen Display) mutates an order, but this app never listened
+  // for it, so a captain firing a KOT or requesting a bill took up to 20s
+  // to show up here. The poll stays as the self-healing fallback for a
+  // dropped/reconnecting socket, so this is additive, not a replacement.
+  useEffect(() => {
+    const disconnect = connectChangeFeed({
+      onChange: () => void store.loadTablesFromServer(),
+      onTableChange: () => void store.loadTablesFromServer(),
+      onConnect: () => void store.loadTablesFromServer(),
+      onConfigChange: (entities) => {
+        if (entities.some((e) => e.startsWith("menu") || e === "variants" || e === "addons")) {
+          void store.loadMenuFromServer();
+        }
+        if (entities.some((e) => e.startsWith("table"))) void store.loadTablesFromServer();
+      },
+    });
+    return disconnect;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -155,7 +180,7 @@ function TableGridPage() {
   const runningOrders = useMemo(
     () =>
       store.orders
-        .filter((o) => ["Running", "Held", "Bill Generated"].includes(o.status))
+        .filter((o) => o.type === "Pickup" && ["Running", "Hold", "Bill Generated"].includes(o.status))
         .sort((a, b) => b.orderNo - a.orderNo),
     [store.orders],
   );
@@ -163,7 +188,7 @@ function TableGridPage() {
   const counts = useMemo(() => {
     const base: Record<string, number> = {
       Free: 0,
-      Held: 0,
+      Hold: 0,
       Running: 0,
       "Bill Generated": 0,
       Reserved: 0,
@@ -435,7 +460,7 @@ function TableGridPage() {
 
       <div className="grid gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
         <SectionCard
-          title="Running orders"
+          title="Running pickup orders"
           bodyClassName="p-2 sm:p-2"
           className="h-fit lg:sticky lg:top-20"
         >
@@ -460,13 +485,13 @@ function TableGridPage() {
               ))}
             </ul>
           ) : (
-            <p className="px-2 py-3 text-xs text-muted-foreground">No running orders right now.</p>
+            <p className="px-2 py-3 text-xs text-muted-foreground">No running pickup orders right now.</p>
           )}
         </SectionCard>
 
         <div className="min-w-0">
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            {(["all", "Free", "Held", "Running", "Bill Generated", "Reserved"] as const).map(
+            {(["all", "Free", "Hold", "Running", "Bill Generated", "Reserved"] as const).map(
               (s) => (
                 <button
                   key={s}
@@ -533,7 +558,7 @@ function TableGridPage() {
 
           <SectionCard title="Legend" className="mt-6">
             <div className="flex flex-wrap gap-2">
-              {(["Free", "Held", "Running", "Bill Generated", "Reserved"] as TableStatus[]).map(
+              {(["Free", "Hold", "Running", "Bill Generated", "Reserved"] as TableStatus[]).map(
                 (s) => (
                   <StatusBadge key={s} status={s} />
                 ),
@@ -717,7 +742,7 @@ function TableGridPage() {
                             : o.table_status === "P"
                               ? "Bill Generated"
                               : o.table_status === "H"
-                                ? "Held"
+                                ? "Hold"
                                 : "occupied"}{" "}
                         — double-check before accepting.
                       </p>

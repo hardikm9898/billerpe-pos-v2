@@ -29,6 +29,8 @@ import {
   checkLocalServerHealth,
   getBrowserDeviceId,
   getLocalServerIdentity,
+  RegistrationCancelled,
+  registerWithReplaceConfirm,
   setManualServerAddress,
   setStoredAuthToken,
 } from "@/lib/api";
@@ -119,24 +121,22 @@ function LoginPage() {
   const [manualLoading, setManualLoading] = useState(false);
 
   useEffect(() => {
-    if (!registered) {
-      runServerCheck();
-      return;
-    }
-    // Real production failure mode, distinct from "EXE merely unreachable"
-    // above: this browser's cached `billerpe.session.device === true`
-    // survives a reinstall of the exe that wiped its local DB (data/ sits
-    // next to the .exe on disk), so the cached flag can be stale. Checked
-    // here, not folded into serverCheck/runServerCheck above, specifically
-    // so a briefly-unreachable EXE still does NOT full-page-block a
-    // registered device (architecture memo §04/Phase C, spec §4) -
-    // getLocalServerIdentity() returns null (not false) when unreachable,
-    // and null is deliberately a no-op here, not a reset. Only an EXE that
-    // actually answers and explicitly says registered:false triggers the
-    // reset, which drops back to the ordinary (non-blocking) registration
-    // panel below - no devtools/localStorage surgery required anymore.
+    // The exe is the single source of truth for "is this PC registered".
+    // This browser's cached `billerpe.session.device` flag is only a hint
+    // for the very first render: a fresh browser (or cleared storage) on an
+    // already-registered exe must NOT be asked to register again, and a
+    // cached "registered" flag on an exe whose data was wiped must be
+    // reset. getLocalServerIdentity() returns null when the exe is
+    // unreachable - deliberately a no-op, so a briefly-down exe never
+    // blocks a registered device (spec §4).
     void getLocalServerIdentity().then((identity) => {
-      if (identity && !identity.registered) store.resetDeviceRegistration();
+      if (!identity) {
+        if (!registered) setServerCheck("unreachable");
+        return;
+      }
+      setServerCheck("ok");
+      if (identity.registered && !registered) store.registerDevice();
+      if (!identity.registered && registered) store.resetDeviceRegistration();
     });
     // Only ever needs to run once, on first mount - `registered` flipping
     // true/false mid-session (right after registering, or after the reset
@@ -331,11 +331,7 @@ function LoginPage() {
                   onClick={async () => {
                     setRegLoading(true);
                     try {
-                      const { pulled } = await authApi.registerDevice(
-                        regMobile,
-                        regPassword,
-                        getBrowserDeviceId(),
-                      );
+                      const { pulled } = await registerWithReplaceConfirm(regMobile, regPassword);
                       store.registerDevice();
                       const menuCount = pulled?.["menu"] ?? 0;
                       const tableCount = pulled?.["table"] ?? 0;
@@ -343,6 +339,7 @@ function LoginPage() {
                         description: `Pulled ${menuCount} menu item(s), ${tableCount} table(s) - sign in below.`,
                       });
                     } catch (err) {
+                      if (err instanceof RegistrationCancelled) return;
                       toast.error(describeAuthError(err));
                     } finally {
                       setRegLoading(false);

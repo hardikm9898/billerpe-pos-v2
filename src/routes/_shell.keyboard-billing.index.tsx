@@ -28,7 +28,7 @@ function KeyboardBillingIndex() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    const live = store.orders.find((o) => o.status === "Running" || o.status === "Held");
+    const live = store.orders.find((o) => o.status === "Running" || o.status === "Hold");
     if (live) {
       navigate({ to: "/keyboard-billing/$orderId", params: { orderId: live.id }, replace: true });
       return;

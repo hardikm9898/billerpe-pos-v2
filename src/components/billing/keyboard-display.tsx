@@ -275,7 +275,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   // store.transferTable/mergeTables enforce.
   const billed = order?.status === "Bill Generated";
 
-  // Opening a table/pickup order starts it "Held" with zero items (see
+  // Opening a table/pickup order starts it "Hold" with zero items (see
   // startOrder's own comment). removeLine/changeQty already free it the
   // moment the LAST item is removed, but a draft that never had anything
   // added never fires that path. Fixed here (the one place every "leave
@@ -381,7 +381,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const openOrders = store.orders.filter(
     (o) =>
       o.id !== order.id &&
-      (o.status === "Running" || o.status === "Held" || o.status === "Bill Generated"),
+      (o.status === "Running" || o.status === "Hold" || o.status === "Bill Generated"),
   );
 
   return (
@@ -496,7 +496,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                     if (order && order.id !== o.id && order.lines.length === 0) {
                       store.freeIfEmpty(order.id);
                     }
-                    if (o.status === "Held") store.saveOrder(o.id);
+                    if (o.status === "Hold") store.saveOrder(o.id);
                     navigate({
                       to: "/keyboard-billing/$orderId",
                       params: { orderId: o.id },
@@ -799,6 +799,14 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
             {totals.delivery > 0 ? <Row label="Delivery charge" value={totals.delivery} /> : null}
             {totals.packaging > 0 ? (
               <Row label="Packaging charge" value={totals.packaging} />
+            ) : null}
+            {totals.roundOff !== 0 ? (
+              <Row
+                label="Round off"
+                value={totals.roundOff}
+                tone={totals.roundOff > 0 ? undefined : "success"}
+                muted
+              />
             ) : null}
           </div>
 

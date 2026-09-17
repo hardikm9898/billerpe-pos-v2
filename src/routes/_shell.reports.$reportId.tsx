@@ -1,6 +1,6 @@
 import { Link, createFileRoute, useParams } from "@tanstack/react-router";
 import { ArrowLeft, BarChart3, Download } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -29,8 +29,7 @@ import {
   realToday,
   resolveRange,
 } from "@/mock/format";
-import { orderTotals, useStore } from "@/mock/store";
-import type { Order } from "@/mock/types";
+import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/reports/$reportId")({
   head: () => ({
@@ -54,14 +53,19 @@ interface Row {
   value: number;
 }
 
-// controller/reports/*.js has real backend endpoints for these seven -
-// orderRelated.js's dayWiseGrowthReport/posCollectionReport/
-// DiscountedOrdersReport/kotReport and itemRelated.js's itemTextReports
-// (which covers both item-wise and category-wise sales in one call). The
-// rest need no report-specific endpoint of their own - they already read
-// fully backend-synced store slices (table-performance, staff-performance,
-// expense-report, purchase-report, closing-stock, and now cash-session too
-// via loadCashSessionsFromServer/controller/cashSession.js).
+// Reports computed by a real backend aggregate over the whole selected
+// range: controller/reports.js's dayWiseSales / posCollection /
+// itemAndCategoryWiseSales (which covers both item-wise and category-wise in
+// one call) / discountedReports / kotReport / tableAndStaffWiseSales.
+//
+// table-performance and staff-performance were in the list below this one
+// until they were moved up here, because "reads a fully backend-synced store
+// slice" was not true of them: they read the SETTLED orders in the store, and
+// settled orders live in store.orderHistory, which is one server-paginated
+// page of ten. Both reports therefore showed the last ten bills whatever
+// range was selected. Everything still left below is either point-in-time
+// (closing-stock), has no real date to filter on (purchase-report), or reads
+// a slice that genuinely is loaded in full (expense-report, cash-session).
 const REMOTE_REPORT_IDS = new Set([
   "day-wise-sales",
   "item-wise-sales",
@@ -70,6 +74,8 @@ const REMOTE_REPORT_IDS = new Set([
   "tax-report",
   "discount-report",
   "kot-report",
+  "table-performance",
+  "staff-performance",
 ]);
 
 function ReportDetailPage() {
@@ -222,6 +228,38 @@ function ReportDetailPage() {
             };
             break;
           }
+          case "table-performance": {
+            const { tableWise } = await reportApi.tableAndStaffWise(isoFrom, isoTo);
+            const r = tableWise.map((t) => ({
+              label: t.label,
+              a: t.orders,
+              value: Math.round(t.amount),
+            }));
+            result = {
+              // "Covers" is gone rather than shown as zero: a guest count is
+              // not a column on the order anywhere in this system, so the old
+              // column could only ever read 0 and looked like a measurement.
+              headers: ["Table", "Bills", "Revenue"],
+              rows: r,
+              total: r.reduce((s, x) => s + x.value, 0),
+            };
+            break;
+          }
+          case "staff-performance": {
+            const { staffWise } = await reportApi.tableAndStaffWise(isoFrom, isoTo);
+            const r = staffWise.map((t) => ({
+              label: t.label,
+              a: t.orders,
+              b: Math.round(t.tips ?? 0),
+              value: Math.round(t.amount),
+            }));
+            result = {
+              headers: ["Staff", "Orders", "Tips", "Revenue"],
+              rows: r,
+              total: r.reduce((s, x) => s + x.value, 0),
+            };
+            break;
+          }
           case "kot-report": {
             const { periodData, deletedTickets, unbilledTickets } = await reportApi.kotReport(
               isoFrom,
@@ -260,24 +298,6 @@ function ReportDetailPage() {
     };
   }, [reportId, isRemote, isoFrom, isoTo]);
 
-  // Settled orders live in orderHistory, not orders (loadTablesFromServer's
-  // active-orders sync explicitly excludes anything already paid) - reading
-  // store.orders here meant table-performance/staff-performance always saw
-  // zero real settled orders. allOrders() merges both, deduped by backendId.
-  const settled = useMemo(
-    () => store.allOrders().filter((o) => o.status === "Settled"),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store.orders, store.orderHistory],
-  );
-  // Historical rows carry real backendTotals from the moment they were
-  // settled - preferring those over a fresh orderTotals() recompute avoids
-  // drift from today's tax/service-charge config (same reasoning as
-  // _shell.orders.index.tsx's own totalsOf).
-  const grandTotalOf = useCallback(
-    (o: Order) => o.backendTotals?.grand ?? orderTotals(o, store).grand,
-    [store],
-  );
-
   const local = useMemo(() => {
     switch (reportId) {
       case "expense-report": {
@@ -309,52 +329,6 @@ function ReportDetailPage() {
         }));
         return {
           headers: ["Session opened", "Status", "Counted", "Variance"],
-          rows: r as Row[],
-          total: r.reduce((s, x) => s + x.value, 0),
-        };
-      }
-      case "table-performance": {
-        const map = new Map<string, { covers: number; turns: number; value: number }>();
-        settled.forEach((o) => {
-          const cur = map.get(o.tableLabel) ?? { covers: 0, turns: 0, value: 0 };
-          cur.covers += o.guests;
-          cur.turns += 1;
-          cur.value += grandTotalOf(o);
-          map.set(o.tableLabel, cur);
-        });
-        const r = [...map.entries()].map(([label, v]) => ({
-          label,
-          a: v.turns,
-          b: v.covers,
-          value: Math.round(v.value),
-        }));
-        return {
-          headers: ["Table", "Turns", "Covers", "Revenue"],
-          rows: r as Row[],
-          total: r.reduce((s, x) => s + x.value, 0),
-        };
-      }
-      case "staff-performance": {
-        // Tip is attributed to createdBy (the order's own waiter) - see
-        // mock/types.ts's own comment on Order.tip - so it folds into the
-        // exact same per-staff bucket orders/revenue already use here,
-        // not a separate report.
-        const map = new Map<string, { orders: number; value: number; tips: number }>();
-        settled.forEach((o) => {
-          const cur = map.get(o.createdBy) ?? { orders: 0, value: 0, tips: 0 };
-          cur.orders += 1;
-          cur.value += grandTotalOf(o);
-          cur.tips += o.tip ?? 0;
-          map.set(o.createdBy, cur);
-        });
-        const r = [...map.entries()].map(([label, v]) => ({
-          label,
-          a: v.orders,
-          b: Math.round(v.tips),
-          value: Math.round(v.value),
-        }));
-        return {
-          headers: ["Staff", "Orders", "Tips", "Revenue"],
           rows: r as Row[],
           total: r.reduce((s, x) => s + x.value, 0),
         };
@@ -395,7 +369,7 @@ function ReportDetailPage() {
       default:
         return { headers: [], rows: [] as Row[], total: 0 };
     }
-  }, [reportId, settled, store, from, to, grandTotalOf]);
+  }, [reportId, store, from, to]);
 
   const { headers, rows, total, kotExtra } = isRemote
     ? (remote ?? { headers: [], rows: [], total: 0, kotExtra: undefined })

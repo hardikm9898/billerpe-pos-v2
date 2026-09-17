@@ -17,7 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
-import { authApi, ApiError, getBrowserDeviceId } from "@/lib/api";
+import { ApiError, RegistrationCancelled, registerWithReplaceConfirm } from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/system/")({
@@ -72,19 +72,22 @@ function SystemPage() {
 
   const [sequenceOpen, setSequenceOpen] = useState(false);
 
-  // Real recovery path for a real production failure: the exe's own cloud
-  // session (used only for the background config/roles pull, entirely
-  // separate from staff login) can die and never self-heal - the cloud
-  // only ever honors the MOST RECENT login's refresh token per account
-  // (middleware/adminAuth.js's own comment), so a login elsewhere on the
-  // same owner account silently kills this exe's stored session for good.
-  // Confirmed live: services/syncScheduler.js then logs "cloud session
-  // refresh failed - device may need re-registration" every tick,
-  // forever, and the periodic pull can never reach later steps (like
-  // pulling corrected Role rows) because it bails at the session-refresh
-  // step first, every single time. registerDevice is safe to call again
-  // here - controller/deviceRegistration.js's bootstrap is resumable and
-  // upserts rather than wiping local data.
+  // Recovery path for the one sync failure a human has to resolve: this
+  // PC's registration as the outlet's local server is gone, because a
+  // SuperAdmin released it or another PC was registered in its place. The
+  // exe reports that state outright (status.sync.registrationRequired) -
+  // it is no longer inferred from an error message.
+  //
+  // This used to be a far more common problem for a much worse reason: the
+  // exe authenticated its background sync as the OWNER, and the cloud keeps
+  // only the newest login per account, so the owner opening the cloud
+  // dashboard on their phone silently ended this machine's sync until
+  // someone came here and re-entered the password. The exe now holds its own
+  // device token instead (uat-backend-v2 middleware/deviceAuth.js), so an
+  // owner logging in elsewhere has no effect at all.
+  //
+  // Registering again is safe to repeat: the bootstrap upserts and is
+  // resumable, and it never wipes local data.
   const [reauthOpen, setReauthOpen] = useState(false);
   const [reauthMobile, setReauthMobile] = useState("");
   const [reauthPassword, setReauthPassword] = useState("");
@@ -100,21 +103,25 @@ function SystemPage() {
   // is stored - it says nothing about whether the cloud still honors it.
   // lastError.phase === "session-refresh" is the real signal that it's
   // actually dead, not merely due for its next scheduled refresh.
-  const cloudSessionBroken =
-    status?.registered && status.sync?.lastError?.phase === "session-refresh";
+  // The exe now says so outright rather than leaving this to be inferred
+  // from an error phase: its sync credential is a device token tied to this
+  // PC's registration, so the only unrecoverable state is that registration
+  // being released centrally or claimed by another PC.
+  const cloudSessionBroken = Boolean(status?.registered && status.sync?.registrationRequired);
 
   async function handleReauth() {
     setReauthLoading(true);
     try {
-      await authApi.registerDevice(reauthMobile, reauthPassword, getBrowserDeviceId());
-      toast.success("Re-authenticated with the cloud", {
-        description: "Background sync will pick up correct data on its next tick.",
+      await registerWithReplaceConfirm(reauthMobile, reauthPassword);
+      toast.success("This PC is registered again", {
+        description: "Background sync resumes on the next cycle.",
       });
       setReauthOpen(false);
       setReauthMobile("");
       setReauthPassword("");
       void store.loadServerStatusFromServer();
     } catch (err) {
+      if (err instanceof RegistrationCancelled) return;
       toast.error(err instanceof ApiError ? err.message : "Could not reach the cloud");
     } finally {
       setReauthLoading(false);
@@ -157,14 +164,14 @@ function SystemPage() {
             <StatCard
               label="Server status"
               value={
-                isServerOnline(status.sync.lastSuccessfulSyncAt, status.sync.intervalSeconds) ? (
+                isServerOnline(status.sync.lastSuccessfulSyncAt, status.sync.heartbeatSeconds) ? (
                   <StatusBadge status="Online" />
                 ) : (
                   <StatusBadge status="Offline" />
                 )
               }
               tone={
-                isServerOnline(status.sync.lastSuccessfulSyncAt, status.sync.intervalSeconds)
+                isServerOnline(status.sync.lastSuccessfulSyncAt, status.sync.heartbeatSeconds)
                   ? "success"
                   : "warning"
               }
@@ -192,19 +199,19 @@ function SystemPage() {
               tone="warning"
               title={
                 cloudSessionBroken
-                  ? "This server's cloud login has stopped working"
+                  ? "This PC is no longer registered as the outlet's local server"
                   : `Last sync error - ${status.sync.lastError.phase}`
               }
               action={
                 cloudSessionBroken ? (
                   <Button size="sm" onClick={() => setReauthOpen(true)}>
-                    <KeyRound className="size-4" /> Re-authenticate with cloud
+                    <KeyRound className="size-4" /> Register this PC again
                   </Button>
                 ) : undefined
               }
             >
               {cloudSessionBroken
-                ? "Usually because the owner/admin account signed in somewhere else since. Local billing keeps working; menu/role/config updates from the cloud won't reach this device until you re-authenticate."
+                ? "Its registration was released centrally, or another PC was registered as this outlet's server. Billing here keeps working, but nothing reaches the cloud - and no central menu or config change reaches this PC - until it is registered again."
                 : `${status.sync.lastError.message} (${formatRelative(status.sync.lastError.at)})`}
             </Notice>
           ) : null}
@@ -258,9 +265,7 @@ function SystemPage() {
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">Orders</dt>
-                <dd className="text-sm font-medium num">
-                  {status.orders.today} today · {status.orders.offlineTotal} offline (all-time)
-                </dd>
+                <dd className="text-sm font-medium num">{status.orders.today} today</dd>
               </div>
             </dl>
           </SectionCard>
@@ -318,10 +323,12 @@ function SystemPage() {
       <Dialog open={reauthOpen} onOpenChange={setReauthOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Re-authenticate with the cloud</DialogTitle>
+            <DialogTitle>Register this PC as the outlet's server</DialogTitle>
             <DialogDescription>
-              Enter the outlet owner/admin's BillerPe cloud login again - this only refreshes the
-              background sync session, it does not affect any staff logins on this terminal.
+              Enter the outlet owner/admin's BillerPe cloud login. This re-establishes background
+              sync for this PC only. Staff logins on this terminal are unaffected, and no local data
+              is removed. If another PC is currently registered for this outlet, you will be asked
+              to confirm replacing it.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">

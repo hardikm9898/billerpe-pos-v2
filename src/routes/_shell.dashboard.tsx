@@ -26,7 +26,13 @@ import {
   StatusBadge,
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
-import { ApiError, reportApi, type RawDayWisePeriod } from "@/lib/api";
+import {
+  ApiError,
+  reportApi,
+  type RawDayWisePeriod,
+  type RawItemWiseRow,
+  type RawPosCollection,
+} from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   RANGE_OPTIONS,
@@ -39,7 +45,7 @@ import {
   realToday,
   resolveRange,
 } from "@/mock/format";
-import { lineTotal, orderTotals, useStore } from "@/mock/store";
+import { orderTotals, useStore } from "@/mock/store";
 import type { TableStatus } from "@/mock/types";
 
 export const Route = createFileRoute("/_shell/dashboard")({
@@ -61,7 +67,7 @@ export const Route = createFileRoute("/_shell/dashboard")({
   component: DashboardPage,
 });
 
-const tableStatuses: TableStatus[] = ["Running", "Held", "Bill Generated", "Reserved", "Free"];
+const tableStatuses: TableStatus[] = ["Running", "Hold", "Bill Generated", "Reserved", "Free"];
 const REAL_TODAY = realToday();
 
 /** Smoothly tweens the displayed number to `value` whenever it changes. */
@@ -134,10 +140,6 @@ function DashboardPage() {
     [store],
   );
 
-  const settledInRange = useMemo(
-    () => store.orderHistory.filter((o) => inRange(o.businessDate, from, to)),
-    [store.orderHistory, from, to],
-  );
   const expensesInRange = useMemo(
     () => store.expenses.filter((e) => inRange(e.date, from, to)),
     [store.expenses, from, to],
@@ -216,6 +218,53 @@ function DashboardPage() {
     };
   }, [isoFrom, isoTo]);
 
+  // "Top ordered items" reads the SAME call the Item-wise Sales report reads
+  // (controller/reports.js#itemAndCategoryWiseSales), which aggregates every
+  // order line in the range in SQL. It used to be summed here from
+  // store.orderHistory, which is ONE SERVER-PAGINATED PAGE of ten orders - so the Dashboard's top items and
+  // the Item-wise report disagreed for any range with more than ten bills,
+  // exactly as reported. Nothing on this card is derived locally now.
+  const [itemWise, setItemWise] = useState<RawItemWiseRow[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    reportApi
+      .itemAndCategoryWiseSales(isoFrom, isoTo)
+      .then(({ itemWise: rows }) => !cancelled && setItemWise(rows))
+      .catch((err) => {
+        if (cancelled) return;
+        setItemWise([]);
+        console.error(
+          "[dashboard] Could not load item-wise sales:",
+          err instanceof ApiError ? err.message : err,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isoFrom, isoTo]);
+
+  // Order-type split and the discounted-order count come from the POS
+  // Collection aggregate for the same reason - both were computed from that
+  // same ten-row page of history.
+  const [collection, setCollection] = useState<RawPosCollection | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    reportApi
+      .posCollection(isoFrom, isoTo)
+      .then(({ posCollections }) => !cancelled && setCollection(posCollections))
+      .catch((err) => {
+        if (cancelled) return;
+        setCollection(null);
+        console.error(
+          "[dashboard] Could not load POS collection:",
+          err instanceof ApiError ? err.message : err,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isoFrom, isoTo]);
+
   const dayRows = useMemo(() => (dayWise ?? []).filter((p) => p.period !== "Total"), [dayWise]);
   const totalRow = useMemo(() => dayWise?.find((p) => p.period === "Total"), [dayWise]);
   const prevTotalRow = useMemo(() => prevDayWise?.find((p) => p.period === "Total"), [prevDayWise]);
@@ -226,16 +275,18 @@ function DashboardPage() {
     dayWise && prevDayWise && prevSales ? ((sales - prevSales) / prevSales) * 100 : null;
   const settledCount = totalRow?.totalOrders ?? 0;
 
-  // Guest count isn't tracked on the backend Order model at all - every
-  // synced history entry has guests:0 (see mapRawOrderHistoryEntry), so
-  // this undercounts for any range that includes synced data rather than
-  // only today's locally-created orders. No backend aggregate exists for
-  // this either, so it stays derived from the local cache.
-  const covers = settledInRange.reduce((s, o) => s + o.guests, 0);
+  // Guest count is not a column on the order at all - not locally and not on
+  // the server - so every settled order reads back guests:0 (see
+  // mapRawOrderHistoryEntry). Summing it produced a "0 covers" hint that
+  // looked like a real measurement of an empty restaurant. The only place a
+  // guest count genuinely exists is on a table while it is occupied, so that
+  // is what is shown, labelled as such; a covers figure per settled bill
+  // needs the column to be added first.
+  const seatedGuests = store.tables.reduce((n, t) => n + (t.guests ?? 0), 0);
   const avgBill = settledCount ? Math.round(sales / settledCount) : 0;
 
   const running = store.orders.filter((o) =>
-    ["Running", "Held", "Bill Generated"].includes(o.status),
+    ["Running", "Hold", "Bill Generated"].includes(o.status),
   );
   const occupiedTables = store.tables.filter((t) => t.status !== "Free").length;
   const lowStock = store.rawMaterials.filter((m) => m.stock <= m.reorderLevel);
@@ -256,19 +307,22 @@ function DashboardPage() {
   }, [totalRow]);
   const paymentTotal = paymentMix.reduce((s, [, v]) => s + v, 0);
 
-  // No backend aggregate splits by order_type - stays derived from the
-  // local cache like covers/hourly above (not itself something the
-  // Reports pages show a comparable number for, so nothing to drift
-  // against).
+  // Straight from the aggregate's own GROUP BY order_type, so the two halves
+  // always add up to the sales figure above them.
   const typeSplit = useMemo(() => {
-    const dineIn = settledInRange
-      .filter((o) => o.type === "Dine In")
-      .reduce((s, o) => s + grandOf(o), 0);
-    const pickup = settledInRange
-      .filter((o) => o.type === "Pickup")
-      .reduce((s, o) => s + grandOf(o), 0);
-    return { dineIn, pickup };
-  }, [settledInRange, grandOf]);
+    const amountFor = (...types: string[]) =>
+      (collection?.orderTypeSplit ?? [])
+        .filter((r) => types.includes((r.orderType ?? "").toLowerCase()))
+        .reduce((sum, r) => sum + r.amount, 0);
+    // The column stores "dinin" - the backend's own spelling, confirmed
+    // against the live data - so that is what is matched; the other spellings
+    // are accepted too rather than silently reporting zero dine-in sales if
+    // it is ever normalised.
+    return {
+      dineIn: amountFor("dinin", "dinein", "dine in", "dine_in"),
+      pickup: amountFor("pickup"),
+    };
+  }, [collection]);
   const typeTotal = typeSplit.dineIn + typeSplit.pickup;
 
   const expenseTotal = expensesInRange.reduce((s, e) => s + e.amount, 0);
@@ -330,27 +384,28 @@ function DashboardPage() {
   }, [store.orderHistory, hourlyDay, grandOf]);
   const maxHour = Math.max(1, ...hourly.map((h) => h.orders));
 
+  // The report returns one row per item AND variant; the card shows items, so
+  // a variant's quantity is folded back into its item (the report's own
+  // Item-wise table is where the per-variant breakdown belongs).
   const topItems = useMemo(() => {
     const map = new Map<string, { qty: number; value: number }>();
-    settledInRange.forEach((o) =>
-      o.lines.forEach((l) => {
-        const cur = map.get(l.name) ?? { qty: 0, value: 0 };
-        cur.qty += l.qty;
-        cur.value += lineTotal(l);
-        map.set(l.name, cur);
-      }),
-    );
+    (itemWise ?? []).forEach((r) => {
+      const cur = map.get(r.item_name) ?? { qty: 0, value: 0 };
+      cur.qty += Number(r.totalQty) || 0;
+      cur.value += Number(r.totalSale) || 0;
+      map.set(r.item_name, cur);
+    });
     return [...map.entries()]
       .map(([name, v]) => ({ name, ...v }))
       .sort((a, b) => b.qty - a.qty)
       .slice(0, 8);
-  }, [settledInRange]);
+  }, [itemWise]);
   const maxItemQty = Math.max(1, ...topItems.map((i) => i.qty));
 
   const tableCounts = useMemo(() => {
     const base: Record<TableStatus, number> = {
       Free: 0,
-      Held: 0,
+      Hold: 0,
       Running: 0,
       "Bill Generated": 0,
       Reserved: 0,
@@ -425,7 +480,7 @@ function DashboardPage() {
           label="Bills settled"
           value={<AnimatedNumber value={settledCount} />}
           icon={Receipt}
-          hint={`${covers} covers`}
+          hint={`${seatedGuests} guest(s) seated now`}
         />
         <StatCard
           label="Avg. bill value"
@@ -469,7 +524,7 @@ function DashboardPage() {
           value={<Money value={Math.round(discountGiven)} />}
           icon={BadgePercent}
           tone={discountGiven ? "warning" : "default"}
-          hint={`${settledInRange.filter((o) => o.discount).length} order(s) discounted · ${rangeLabel}`}
+          hint={`${collection?.discounted?.orders ?? 0} order(s) discounted · ${rangeLabel}`}
         />
         <StatCard
           label="E-bill credits"

@@ -74,7 +74,7 @@ export interface User {
   permissionOverrides?: PermissionOverrides;
 }
 
-export type TableStatus = "Free" | "Held" | "Running" | "Bill Generated" | "Reserved";
+export type TableStatus = "Free" | "Hold" | "Running" | "Bill Generated" | "Reserved";
 
 export interface TableCategory {
   id: string;
@@ -176,7 +176,7 @@ export interface MenuItem {
 }
 
 export type OrderType = "Dine In" | "Pickup";
-export type OrderStatus = "Held" | "Running" | "Bill Generated" | "Settled" | "Cancelled";
+export type OrderStatus = "Hold" | "Running" | "Bill Generated" | "Settled" | "Cancelled";
 /** Outlet-configurable — see `PaymentModeConfig` / `store.paymentModes`. "Split" is a derived label, never a configured mode. */
 export type PaymentMode = string;
 

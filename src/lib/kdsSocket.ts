@@ -1,6 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 
-import { EXE_BASE_URL } from "./api";
+import { EXE_BASE_URL, getStoredAuthToken, kitchenApi } from "./api";
 
 // The /kds namespace's per-KOT-round push shape - shared by "newOrder"
 // (fired on generateKot success, both for a brand-new order and for a
@@ -26,32 +26,54 @@ export type KdsTicketPayload = {
 
 // Connects through the Local EXE, not the cloud directly - Web POS never
 // talks to the cloud directly per the confirmed Milestone 1 architecture,
-// and the EXE's own /kds namespace (connection/socket.js) now ports this
-// exact contract. Handshake auth is the same httpOnly "token" cookie
-// every REST call already sends (see the EXE's socketAuth) -
-// withCredentials makes the browser attach it automatically, same as
-// fetch's credentials: "include" in lib/api.ts.
+// and the EXE's own /kds namespace (connection/socket.js) ports this exact
+// contract.
+//
+// Handshake auth is the BEARER TOKEN, not the cookie. This was the reason
+// no KOT ever reached the board: the exe's login cookie is set
+// SameSite=strict (controller/auth.js), and the POS and the exe are
+// different origins, so a browser never sends that cookie here - the exact
+// problem already documented in lib/api.ts, which is why every REST call
+// and lib/changeFeedSocket.ts send the token as a header instead. This
+// connection was the last one still relying on the cookie, so its handshake
+// was rejected as Unauthorized and the board simply stayed empty, with
+// nothing to indicate why. Verified end to end against the real exe with
+// billerpe-local-exe/scripts/verify-kds-delivery.js: with a token the
+// initialOrders snapshot and every newOrder push arrive correctly.
+//
+// The token is read inside the `auth` callback rather than captured once, so
+// a reconnect after a re-login uses the current one.
 export function connectKdsSocket(handlers: {
   onTicket: (order: KdsTicketPayload) => void;
   onOrderComplete: (orderId: number) => void;
+  /** Called with 0 when this hotel has no kitchens configured - without a
+   * kitchen there is no room to broadcast into, so the board can never
+   * receive anything and should say so rather than look merely idle. */
+  onKitchensResolved?: (count: number) => void;
 }): () => void {
   const socket: Socket = io(`${EXE_BASE_URL}/kds`, {
     transports: ["websocket"],
     withCredentials: true,
+    auth: (cb) => {
+      const token = getStoredAuthToken();
+      cb(token ? { token } : {});
+    },
   });
 
   const joinAllKitchens = async () => {
     try {
-      const res = await fetch(`${EXE_BASE_URL}/kitchen/kitchens`, { credentials: "include" });
-      const json = (await res.json().catch(() => null)) as {
-        results?: { kitchen?: { id: number }[] };
-      } | null;
-      const kitchens = json?.results?.kitchen ?? [];
+      // kitchenApi (not a raw fetch) so this carries the same auth header
+      // as every other request. The previous raw fetch sent only
+      // credentials: "include", so it 401'd for the same cookie reason as
+      // the handshake above - meaning even a connected socket never joined
+      // a room, because the kitchen list came back empty.
+      const { kitchen } = await kitchenApi.getKitchens();
+      const kitchens = kitchen ?? [];
+      handlers.onKitchensResolved?.(kitchens.length);
       kitchens.forEach((k) => socket.emit("joinKitchen", { kitchenId: k.id }));
     } catch {
-      // No kitchens configured for this hotel (or the lookup failed) -
-      // the board just stays whatever this tab already knows locally,
-      // same as before this was wired.
+      // Lookup failed (exe briefly unreachable) - the board keeps whatever
+      // this tab already knows locally, and the next reconnect retries.
     }
   };
 
@@ -80,6 +102,7 @@ export function connectKdsSocket(handlers: {
   });
 
   return () => {
+    socket.removeAllListeners();
     socket.close();
   };
 }

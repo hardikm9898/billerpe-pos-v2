@@ -17,7 +17,7 @@ export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] ?? "http://loca
 // reads resolveBaseUrl() -> this binding fresh on every request (never
 // captured at import time), so overriding it here is enough - no other
 // call site needs to change.
-export let EXE_BASE_URL = import.meta.env["VITE_EXE_BASE_URL"] ?? "http://192.168.1.48:4100";
+export let EXE_BASE_URL = import.meta.env["VITE_EXE_BASE_URL"] ?? "http://localhost:4100";
 
 // crypto.randomUUID() only exists in secure contexts (HTTPS, or the page's
 // own localhost) - undefined (throws "not a function") on a plain-HTTP LAN
@@ -81,7 +81,7 @@ export function setStoredAuthToken(token: string | null) {
   }
 }
 
-function getStoredAuthToken(): string | null {
+export function getStoredAuthToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
     return window.localStorage.getItem(AUTH_TOKEN_KEY);
@@ -232,6 +232,11 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // payment-mode-defaults one, confirmed live as "hold order logs the app
     // out."
     { method: "POST", test: (p) => p === "/holdOrder" },
+    // Item-ready broadcast (billerpe-local-exe/controller/kot.js#markKotReady) -
+    // the Kitchen Display's Ready transition used to be purely local state in
+    // that one browser tab (setKotStatus, mock/store.tsx); this is the real
+    // write + cross-device broadcast the Captain App's notifications need.
+    { method: "POST", test: (p) => p === "/kotReady" },
     // Waitlist queue - real local implementation (billerpe-local-exe/
     // controller/queue.js), no cloud counterpart at all - see model/
     // queueEntry.js's own comment on why.
@@ -258,7 +263,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // rules (TaxType has no cloud sync endpoint at all to fall back to -
     // see cloudPull.js's own comment - so its writes are local-only by
     // necessity, not a shortcut).
-    
+
     { method: "GET", test: (p) => p === "/offlineHotelUser" },
     { method: "POST", test: (p) => p === "/user" },
     { method: "POST", test: (p) => p === "/userUpdate" },
@@ -308,6 +313,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "GET", test: (p) => p.startsWith("/report/itemTextReports") },
     { method: "GET", test: (p) => p.startsWith("/report/discountedReports") },
     { method: "GET", test: (p) => p.startsWith("/report/kotReport") },
+    { method: "GET", test: (p) => p.startsWith("/report/tableAndStaffWise") },
     { method: "POST", test: (p) => p === "/getDueOrders" },
     { method: "POST", test: (p) => p === "/settleDue" },
     { method: "POST", test: (p) => p === "/allSettleDue" },
@@ -319,6 +325,12 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // KDS - kitchen list/config. The /kds socket namespace itself isn't
     // path-routed here (kdsSocket.ts connects directly to EXE_BASE_URL,
     // not through apiGet/apiPost) - see its own comment.
+    // Closing gaps in bill numbers is a local operation now that the exe
+    // owns numbering. It was NOT listed here, so the call went to the cloud,
+    // where a browser holding only an exe session has no cookie - the 401
+    // then signed the user out, which is exactly what pressing "Renumber the
+    // order number sequence" did.
+    { method: "GET", test: (p) => p === "/makeSequenceBillNo" },
     { method: "GET", test: (p) => p === "/kitchen/kitchens" },
     { method: "POST", test: (p) => p === "/kitchen/kitchens" },
     { method: "POST", test: (p) => p === "/kitchen/setCategoryForKitchen" },
@@ -532,12 +544,21 @@ export async function setManualServerAddress(hostOrUrl: string): Promise<boolean
 export async function getLocalServerIdentity(): Promise<{
   registered: boolean;
   deviceId: string;
+  hotelName?: string;
 } | null> {
   if (!(await checkLocalServerHealth())) return null;
   try {
     const res = await fetch(`${EXE_BASE_URL}/health`);
-    const body = (await res.json()) as { registered?: unknown; deviceId?: unknown };
-    return { registered: body.registered === true, deviceId: String(body.deviceId ?? "") };
+    const body = (await res.json()) as {
+      registered?: unknown;
+      deviceId?: unknown;
+      hotelName?: unknown;
+    };
+    return {
+      registered: body.registered === true,
+      deviceId: String(body.deviceId ?? ""),
+      ...(typeof body.hotelName === "string" ? { hotelName: body.hotelName } : {}),
+    };
   } catch {
     return null;
   }
@@ -551,10 +572,17 @@ export class ApiError extends Error {
   // flag to tell them apart and reset back to the registration screen
   // instead of showing a login-failure toast.
   needsRegistration?: boolean;
-  constructor(message: string, needsRegistration?: boolean) {
+  /** The envelope's own `code` (e.g. 409 for a device-registration
+   * conflict) and its full `results` payload, for callers that need more
+   * than the message - the HTTP status is unreliable (see unwrap). */
+  code?: number;
+  details?: unknown;
+  constructor(message: string, needsRegistration?: boolean, code?: number, details?: unknown) {
     super(message);
     this.name = "ApiError";
     this.needsRegistration = needsRegistration;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -566,7 +594,10 @@ export class ApiError extends Error {
 // the one path that's actually reliable: every branch (no token, bad token,
 // expired/logged-out-elsewhere session, deactivated user) real-401s via
 // res.status(...), so that's what session-expiry detection below keys off.
-type ApiEnvelope<T> = { error: boolean; results: T };
+// `code` is the backend's own status field (responce/res.js sets it on
+// every response) - the real signal, since most error paths never call
+// res.status() and answer HTTP 200 regardless. See ApiError.code.
+type ApiEnvelope<T> = { error: boolean; results: T; code?: number };
 
 // Architecture memo, Phase F: this list held 11 direct-cloud paths at the
 // start of that pass (stock, recipes, semiFinished, expense, cashSession,
@@ -676,6 +707,8 @@ function unwrap<T>(json: ApiEnvelope<T> | null): T {
     throw new ApiError(
       GENERIC_BACKEND_MESSAGES.has(message) ? FRIENDLY_GENERIC_MESSAGE : message,
       needsRegistration,
+      typeof json?.code === "number" ? json.code : undefined,
+      json?.results,
     );
   }
   return json.results;
@@ -944,7 +977,16 @@ export const authApi = {
   // pulls that hotel's real data down for the first time - see
   // controller/deviceRegistration.js. Not a login itself; a registered
   // device still needs a normal restaurantLogin/pinLogin afterward.
-  registerDevice: (mobile: string, password: string, deviceId: string) =>
+  // `replace: true` re-sends after the exe reported a 409 (another PC is
+  // this hotel's active local server) - the owner has confirmed in the UI
+  // that THIS PC should take over. The cloud auto-allows takeover of a
+  // server not seen for a while; an actively-running one needs this flag.
+  registerDevice: (
+    mobile: string,
+    password: string,
+    deviceId: string,
+    opts?: { replace?: boolean },
+  ) =>
     apiPost<{
       message?: string;
       hotelId?: number;
@@ -960,8 +1002,51 @@ export const authApi = {
       mobile,
       password,
       device_id: deviceId,
+      ...(opts?.replace ? { replace: true } : {}),
     }),
 };
+
+export class RegistrationCancelled extends Error {
+  constructor() {
+    super("Registration cancelled");
+    this.name = "RegistrationCancelled";
+  }
+}
+
+// Registers this PC, handling the one interactive case the cloud can't
+// decide alone: another PC is still this restaurant's ACTIVE local server
+// (seen within the last few minutes). The cloud answers 409 with
+// `canReplace: true` plus the other machine's details; the owner confirms
+// the takeover here and the call is repeated with `replace: true`. A
+// server that has been silent for a while is taken over automatically by
+// the cloud without ever reaching this prompt. Shared by the login page's
+// registration panel and the System page's re-authenticate action.
+export async function registerWithReplaceConfirm(mobile: string, password: string) {
+  try {
+    return await authApi.registerDevice(mobile, password, getBrowserDeviceId());
+  } catch (err) {
+    const details =
+      err instanceof ApiError
+        ? (err.details as
+            | { canReplace?: boolean; existing?: { hostname?: string; last_seen_at?: string } }
+            | undefined)
+        : undefined;
+    if (err instanceof ApiError && err.code === 409 && details?.canReplace) {
+      const seen = details.existing?.last_seen_at
+        ? new Date(details.existing.last_seen_at).toLocaleString("en-IN")
+        : "recently";
+      const ok = window.confirm(
+        `Another PC (${details.existing?.hostname ?? "unknown"}, last seen ${seen}) is currently this restaurant's local server.\n\n` +
+          "Replace it with THIS PC? The other PC will stop syncing to the cloud and must not be used for billing any more.",
+      );
+      if (!ok) throw new RegistrationCancelled();
+      return await authApi.registerDevice(mobile, password, getBrowserDeviceId(), {
+        replace: true,
+      });
+    }
+    throw err;
+  }
+}
 
 // hotelApi is scoped tightly to what's actually wired: the UPI VPA used to
 // build the bill's payment QR code. The rest of what GET /singleHotel and
@@ -1628,6 +1713,9 @@ type KotPayload = {
     discount_reason: string;
     discount_type: "fix" | "pr";
     discount_value: number;
+    /** Explicit packaging override (Web POS "Charges" sheet); omitted =
+     * the exe applies the hotel's packaging rule itself. */
+    packaging_override?: number;
     taxes: RawCartTax[];
     // Only one entry is ever sent: kotOrder's server-side code looks for
     // `cart.items.find(el => el.status === 'H')` (creating a new order) or
@@ -1664,11 +1752,19 @@ export const orderApi = {
   // Persists Order.status "hold" (backend's ORDER_TYPE.HOLD) and
   // Table.table_status "H" - this is what makes a held order actually
   // survive a refresh: mapRawLiveOrder already maps that "hold" status back
-  // to this app's "Held" the moment loadTablesFromServer reconstructs it,
+  // to this app's "Hold" the moment loadTablesFromServer reconstructs it,
   // confirmed live - the gap was only ever that nothing called this
   // endpoint in the first place.
   holdOrder: (payload: KotPayload) =>
     apiPost<{ message?: string; orderId: number; bill_no?: string }>("/holdOrder", payload),
+
+  // POST /kotReady (billerpe-local-exe/controller/kot.js#markKotReady) -
+  // marks every still-in-kitchen line of one fired round ready and broadcasts
+  // it to every other connected device (Captain App notifications, other Web
+  // POS tabs). Real backend write; previously the Kitchen Display's Ready
+  // transition never left the browser tab that clicked it.
+  markKotReady: (orderId: number, kotNumber: number) =>
+    apiPost<{ message?: string }>("/kotReady", { order_id: orderId, kotNumber }),
 
   // POST /adminOrder finalizes an order (Running -> table status "P",
   // Pending Settle) - but ONLY the dine-in path is safe to call from a
@@ -1867,6 +1963,8 @@ export const orderApi = {
       tax_value: number;
     }[];
     totalBill: number;
+    /** Signed delta applied to reach totalBill from the raw sum - positive rounded up, negative rounded down. Shown as its own line on the printed bill. */
+    roundOff?: number;
     headerText: string[];
     footerText: string[];
   }) =>
@@ -1975,6 +2073,15 @@ export type RawOrderHeader = {
   TableId: number | null;
   hms_table_mst?: { table_name: string } | null;
   hms_user_master?: { name?: string; number?: string } | null;
+  /** Discount INPUT the exe recomputes from ("pr" = percent of subtotal). */
+  discount_type?: "fix" | "pr" | null;
+  discount_value?: number | null;
+  /** Explicit per-order packaging override, null when the rule applies. */
+  packaging_override?: number | null;
+  packaging_charge?: number | null;
+  totalAmount?: number | null;
+  roundOff?: number | null;
+  deleted?: boolean;
 };
 
 export type RawOrderLine = {
@@ -1982,7 +2089,11 @@ export type RawOrderLine = {
   qty: number;
   price: number;
   variant_name: string | null;
-  addons: string;
+  // A DataTypes.JSON column on the exe side - arrives as an already-parsed
+  // array, not a JSON string, despite how this used to be typed. See
+  // mock/store.tsx#parseOrderAddons's own comment for the live bug that
+  // came from trusting this type.
+  addons: unknown;
   comment: string | null;
   MenuId: number;
   kotNumber: number;
@@ -2459,12 +2570,24 @@ export type RawLocalServerStatus =
         maxOfflineDays: number;
         daysSinceSync: number;
         transactionsBlocked: boolean;
-        intervalSeconds: number;
+        /** Heartbeat cadence - one cloud request per outlet per tick. */
+        heartbeatSeconds: number;
+        /** Push cadence - orders and other exe-owned rows, in chunks. */
+        pushSeconds: number;
+        lastHeartbeatAt: string | null;
+        lastPushAt: string | null;
+        /** A real queue depth: rows genuinely waiting to be pushed. */
         pendingOrderCount: number;
+        /** Orders the cloud has refused, with the reason - no longer an
+         * invisible stall. */
+        stuckOrders?: { id: number; bill_no: string; sync_error: string; sync_attempts: number }[];
+        /** No amount of waiting fixes this: the device's credential is gone
+         * (released centrally, or another PC took the outlet over). */
+        registrationRequired?: boolean;
         lastError: { phase: string; message: string; at: string } | null;
       };
       tables: { total: number; free: number; running: number };
-      orders: { today: number; offlineTotal: number };
+      orders: { today: number };
     };
 export const localServerApi = {
   getStatus: () => apiGetRaw<RawLocalServerStatus>("/localServerStatus"),
@@ -2517,6 +2640,8 @@ export const localPrintApi = {
     tip?: number;
     orderTax: unknown[];
     totalBill: number;
+    /** Signed delta applied to reach totalBill from the raw sum - positive rounded up, negative rounded down. Shown as its own line on the printed bill. */
+    roundOff?: number;
     headerText: string[];
     footerText: string[];
   }) => apiPost<{ orderId: string; printer: string }>("/printInvoiceDirect", params),
@@ -3331,6 +3456,14 @@ export type RawTaxBreakdown = {
   applicableOrders: number;
 };
 
+export type RawTableStaffRow = {
+  label: string;
+  orders: number;
+  amount: number;
+  /** Staff rows only - tips are attributed to the order's own waiter. */
+  tips?: number;
+};
+
 export type RawPosCollection = {
   totalBills: number;
   cashTotal: string;
@@ -3341,6 +3474,12 @@ export type RawPosCollection = {
   totalDiscount: string;
   totalDynamicTax: number;
   taxBreakdown: RawTaxBreakdown[];
+  /** Per order type, over the WHOLE range - added because the Dashboard was
+   * deriving this from a single page of order history, so it was wrong as
+   * soon as the range held more than ten bills. */
+  orderTypeSplit?: { orderType: string; orders: number; amount: number }[];
+  /** Discounted-order count and total over the whole range, same reason. */
+  discounted?: { orders: number; amount: number };
 };
 
 export type RawDiscountedOrder = {
@@ -3379,10 +3518,25 @@ export const reportApi = {
     apiGet<{ periodData: RawDayWisePeriod[] }>(
       `/report/order-aggregation?period=daily&startDate=${startDate}&endDate=${endDate}`,
     ),
+  /** Item and category totals for a range, aggregated in SQL over EVERY
+   * order in it. Both the Item-wise report and the Dashboard's "Top ordered
+   * items" read this one call, so the two cannot disagree - they used to,
+   * because the Dashboard summed one page of ten cached orders. */
   itemAndCategoryWiseSales: (startDate: string, endDate: string) =>
     apiGet<{ itemWise: RawItemWiseRow[]; categoryWise: RawCategoryWiseRow[] }>(
       `/report/itemTextReports?startDate=${startDate}&endDate=${endDate}`,
     ),
+  /** Per-table and per-staff performance over the whole range
+   * (controller/reports.js#tableAndStaffWiseSales). Both used to be summed in
+   * the browser from the ten settled orders that happened to be cached, which
+   * ignored the date range completely - see that controller's comment. */
+  tableAndStaffWise: (startDate: string, endDate: string) =>
+    apiGet<{
+      tableWise: RawTableStaffRow[];
+      staffWise: RawTableStaffRow[];
+      totalOrders: number;
+      totalAmount: number;
+    }>(`/report/tableAndStaffWise?startDate=${startDate}&endDate=${endDate}`),
   posCollection: (startDate: string, endDate: string) =>
     apiGet<{ posCollections: RawPosCollection }>(
       `/report/posCollection?startDate=${startDate}&endDate=${endDate}`,

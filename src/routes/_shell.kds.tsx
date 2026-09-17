@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/operations/shared";
 import { connectKdsSocket } from "@/lib/kdsSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
@@ -53,6 +54,11 @@ function KdsPage() {
   const stations = ["All", ...store.kitchens.map((k) => k.name)];
   const [rejectTarget, setRejectTarget] = useState<Kot | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  // null = not determined yet. 0 means this hotel has no kitchen configured,
+  // in which case the exe has no room to broadcast a KOT into and this board
+  // can never receive anything - worth saying outright instead of letting it
+  // look like a quiet service.
+  const [kitchenCount, setKitchenCount] = useState<number | null>(null);
 
   // Real-time visibility across devices only - see the KDS wiring
   // decision: the backend has just one ready/not-ready flag per item, no
@@ -65,6 +71,7 @@ function KdsPage() {
     const disconnect = connectKdsSocket({
       onTicket: (ticket) => store.receiveKdsTicket(ticket),
       onOrderComplete: (orderId) => store.receiveKdsOrderComplete(orderId),
+      onKitchensResolved: setKitchenCount,
     });
     return disconnect;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -110,6 +117,15 @@ function KdsPage() {
           </button>
         ))}
       </div>
+
+      {kitchenCount === 0 ? (
+        <div className="mb-4">
+          <Notice tone="warning" title="No kitchen is configured for this outlet">
+            A KOT is delivered to a kitchen, so with none set up this board cannot receive anything.
+            Add one under Operations, Kitchens.
+          </Notice>
+        </div>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {lanes.map((lane) => {

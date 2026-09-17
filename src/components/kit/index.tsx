@@ -243,7 +243,7 @@ export function StatCard({
 
 const statusTone: Record<string, string> = {
   Free: "bg-status-free text-status-free-foreground",
-  Held: "bg-status-held text-status-held-foreground",
+  Hold: "bg-status-held text-status-held-foreground",
   Running: "bg-status-running text-status-running-foreground",
   "Bill Generated": "bg-status-billed text-status-billed-foreground",
   Reserved: "bg-status-reserved text-status-reserved-foreground",

@@ -473,7 +473,7 @@ export const tables: RestaurantTable[] = [
     occupiedSince: "18/08/2026 06:55 pm",
   }),
   tbl("t-ot5", "T5", "tc1", 4),
-  tbl("t-ot6", "T6", "tc1", 2, "Held", { guests: 2, orderId: "o-live-4" }),
+  tbl("t-ot6", "T6", "tc1", 2, "Hold", { guests: 2, orderId: "o-live-4" }),
   tbl("t-ot7", "T7", "tc1", 8),
   tbl("t-od1", "T1", "tc2", 4, "Running", {
     guests: 4,
@@ -715,7 +715,7 @@ export const liveOrders: Order[] = [
     tableId: "t-ot6",
     tableLabel: "Open Table · T6",
     guests: 2,
-    status: "Held",
+    status: "Hold",
     kotRounds: 0,
     lines: [line("l11", "m13", 1, 1), line("l12", "m34", 2, 1)],
     businessDate: now,

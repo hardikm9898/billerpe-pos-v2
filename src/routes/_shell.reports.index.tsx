@@ -26,7 +26,7 @@ export const Route = createFileRoute("/_shell/reports/")({
 
 function ReportsPage() {
   // Was computed from store.orders.filter(status === "Settled") - that
-  // array only ever holds live (Held/Running/Bill Generated) orders plus
+  // array only ever holds live (Hold/Running/Bill Generated) orders plus
   // whatever hasn't synced into order history yet, so these two stat
   // cards showed near-empty numbers instead of the real all-time totals
   // (task 43). posCollection is the same real backend aggregate the

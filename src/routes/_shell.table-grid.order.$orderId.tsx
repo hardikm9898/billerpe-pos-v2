@@ -66,6 +66,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { ApiError, customerApi, type RawOrderDetail } from "@/lib/api";
+import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
 import { lineTotal, orderTotals, parseOrderAddons, useStore } from "@/mock/store";
 import type { MenuItem, OrderLine, PaymentSplit } from "@/mock/types";
@@ -95,10 +96,10 @@ function OrderCartPage() {
   const navigate = useNavigate();
   const order = store.orderById(orderId);
 
-  // Opening a table starts it "Held" with zero items (see startOrder's own
+  // Opening a table starts it "Hold" with zero items (see startOrder's own
   // comment). removeLine/changeQty already free the table the moment the
   // LAST item is removed, but a table that never had any item added at all
-  // never fires that path - it just sits Held forever. Fixed at every
+  // never fires that path - it just sits Hold forever. Fixed at every
   // explicit "leave this screen" action below (goToTables) rather than an
   // unmount effect - an unmount can fire from framework-internal remounts
   // (e.g. a route re-render) with no real user action behind it, which
@@ -124,6 +125,27 @@ function OrderCartPage() {
     if (!order || order.status === "Settled") return;
     const id = setInterval(() => void store.refreshOrderFromServer(orderId), 20000);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId, order?.status]);
+
+  // Fast path on top of the poll above - see _shell.table-grid.index.tsx's
+  // own comment on connectChangeFeed for why this was missing entirely.
+  // Matters most here specifically: a captain firing another KOT round
+  // while a cashier already has this exact order open to bill it used to
+  // not show up for up to 20s.
+  useEffect(() => {
+    if (!order || order.status === "Settled") return;
+    const disconnect = connectChangeFeed({
+      onChange: (changedId) => {
+        // Only this order's own backend id matters here - every other
+        // change is the table grid's business (it keeps its own feed).
+        if (order?.backendId === undefined || changedId === order.backendId) {
+          void store.refreshOrderFromServer(orderId);
+        }
+      },
+      onConnect: () => void store.refreshOrderFromServer(orderId),
+    });
+    return disconnect;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId, order?.status]);
 
