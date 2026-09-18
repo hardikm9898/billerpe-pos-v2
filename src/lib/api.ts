@@ -976,17 +976,11 @@ export const authApi = {
   // real credentials, resolves which hotel this device belongs to, and
   // pulls that hotel's real data down for the first time - see
   // controller/deviceRegistration.js. Not a login itself; a registered
-  // device still needs a normal restaurantLogin/pinLogin afterward.
-  // `replace: true` re-sends after the exe reported a 409 (another PC is
-  // this hotel's active local server) - the owner has confirmed in the UI
-  // that THIS PC should take over. The cloud auto-allows takeover of a
-  // server not seen for a while; an actively-running one needs this flag.
-  registerDevice: (
-    mobile: string,
-    password: string,
-    deviceId: string,
-    opts?: { replace?: boolean },
-  ) =>
+  // device still needs a normal restaurantLogin/pinLogin afterward. The exe
+  // wipes its local data and downloads the restaurant fresh; a restaurant
+  // already registered on another PC is refused with a contact-support
+  // message (moving PCs is a support action).
+  registerDevice: (mobile: string, password: string, deviceId: string) =>
     apiPost<{
       message?: string;
       hotelId?: number;
@@ -1002,50 +996,13 @@ export const authApi = {
       mobile,
       password,
       device_id: deviceId,
-      ...(opts?.replace ? { replace: true } : {}),
     }),
 };
 
-export class RegistrationCancelled extends Error {
-  constructor() {
-    super("Registration cancelled");
-    this.name = "RegistrationCancelled";
-  }
-}
-
-// Registers this PC, handling the one interactive case the cloud can't
-// decide alone: another PC is still this restaurant's ACTIVE local server
-// (seen within the last few minutes). The cloud answers 409 with
-// `canReplace: true` plus the other machine's details; the owner confirms
-// the takeover here and the call is repeated with `replace: true`. A
-// server that has been silent for a while is taken over automatically by
-// the cloud without ever reaching this prompt. Shared by the login page's
-// registration panel and the System page's re-authenticate action.
-export async function registerWithReplaceConfirm(mobile: string, password: string) {
-  try {
-    return await authApi.registerDevice(mobile, password, getBrowserDeviceId());
-  } catch (err) {
-    const details =
-      err instanceof ApiError
-        ? (err.details as
-            | { canReplace?: boolean; existing?: { hostname?: string; last_seen_at?: string } }
-            | undefined)
-        : undefined;
-    if (err instanceof ApiError && err.code === 409 && details?.canReplace) {
-      const seen = details.existing?.last_seen_at
-        ? new Date(details.existing.last_seen_at).toLocaleString("en-IN")
-        : "recently";
-      const ok = window.confirm(
-        `Another PC (${details.existing?.hostname ?? "unknown"}, last seen ${seen}) is currently this restaurant's local server.\n\n` +
-          "Replace it with THIS PC? The other PC will stop syncing to the cloud and must not be used for billing any more.",
-      );
-      if (!ok) throw new RegistrationCancelled();
-      return await authApi.registerDevice(mobile, password, getBrowserDeviceId(), {
-        replace: true,
-      });
-    }
-    throw err;
-  }
+// Shared by the login page's registration panel and the System page's
+// re-authenticate action.
+export function registerThisPc(mobile: string, password: string) {
+  return authApi.registerDevice(mobile, password, getBrowserDeviceId());
 }
 
 // hotelApi is scoped tightly to what's actually wired: the UPI VPA used to

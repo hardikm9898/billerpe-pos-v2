@@ -17,7 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
-import { ApiError, RegistrationCancelled, registerWithReplaceConfirm } from "@/lib/api";
+import { ApiError, registerThisPc } from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/system/")({
@@ -112,16 +112,15 @@ function SystemPage() {
   async function handleReauth() {
     setReauthLoading(true);
     try {
-      await registerWithReplaceConfirm(reauthMobile, reauthPassword);
+      await registerThisPc(reauthMobile, reauthPassword);
       toast.success("This PC is registered again", {
-        description: "Background sync resumes on the next cycle.",
+        description: "This restaurant's data was downloaded fresh from the server.",
       });
       setReauthOpen(false);
       setReauthMobile("");
       setReauthPassword("");
       void store.loadServerStatusFromServer();
     } catch (err) {
-      if (err instanceof RegistrationCancelled) return;
       toast.error(err instanceof ApiError ? err.message : "Could not reach the cloud");
     } finally {
       setReauthLoading(false);

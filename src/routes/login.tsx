@@ -29,8 +29,7 @@ import {
   checkLocalServerHealth,
   getBrowserDeviceId,
   getLocalServerIdentity,
-  RegistrationCancelled,
-  registerWithReplaceConfirm,
+  registerThisPc,
   setManualServerAddress,
   setStoredAuthToken,
 } from "@/lib/api";
@@ -331,15 +330,14 @@ function LoginPage() {
                   onClick={async () => {
                     setRegLoading(true);
                     try {
-                      const { pulled } = await registerWithReplaceConfirm(regMobile, regPassword);
+                      const { pulled } = await registerThisPc(regMobile, regPassword);
                       store.registerDevice();
-                      const menuCount = pulled?.["menu"] ?? 0;
-                      const tableCount = pulled?.["table"] ?? 0;
+                      const menuCount = pulled?.["menuItems"] ?? 0;
+                      const tableCount = pulled?.["tables"] ?? 0;
                       toast.success("Device registered", {
                         description: `Pulled ${menuCount} menu item(s), ${tableCount} table(s) - sign in below.`,
                       });
                     } catch (err) {
-                      if (err instanceof RegistrationCancelled) return;
                       toast.error(describeAuthError(err));
                     } finally {
                       setRegLoading(false);
