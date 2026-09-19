@@ -6,7 +6,7 @@ import { Page, PageHeader, SectionCard, StatCard, StatusBadge } from "@/componen
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RESTAURANT, connectionStateLabels } from "@/mock/data";
+import { connectionStateLabels } from "@/mock/data";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/profile")({
@@ -31,7 +31,7 @@ function ProfilePage() {
       <PageHeader
         icon={UserCog}
         title="Profile"
-        description={`${u.role} at ${RESTAURANT.name}`}
+        description={`${u.role} at ${(store.restaurant?.name ?? store.serverHotelName ?? "")}`}
         actions={
           <Button
             variant="outline"
@@ -83,16 +83,19 @@ function ProfilePage() {
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div className="flex justify-between rounded-lg bg-surface-muted px-3 py-2">
             <dt className="text-muted-foreground">Outlet</dt>
-            <dd className="font-medium">{RESTAURANT.name}</dd>
+            <dd className="font-medium">{(store.restaurant?.name ?? store.serverHotelName ?? "")}</dd>
           </div>
           <div className="flex justify-between rounded-lg bg-surface-muted px-3 py-2">
             <dt className="text-muted-foreground">GSTIN</dt>
-            <dd className="num font-medium">{RESTAURANT.gstin}</dd>
+            <dd className="num font-medium">{store.restaurant?.gstin || "Not set"}</dd>
           </div>
           <div className="flex justify-between rounded-lg bg-surface-muted px-3 py-2">
             <dt className="text-muted-foreground">Tax</dt>
             <dd className="num font-medium">
-              CGST {RESTAURANT.cgst}% + SGST {RESTAURANT.sgst}%
+              {store.taxRules
+                .filter((t) => t.active)
+                .map((t) => `${t.name} ${t.value}${t.type === "percent" ? "%" : ""}`)
+                .join(" + ") || "None"}
             </dd>
           </div>
           <div className="flex justify-between rounded-lg bg-surface-muted px-3 py-2">

@@ -6,7 +6,6 @@ import { IconButton, Money } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
 import type { OpsOrderType, PaymentSplit } from "@/mock/types";
 
@@ -21,13 +20,17 @@ export function splitPaid(splits: PaymentSplit[]) {
 // RestaurantSetting.qr_code_open_on_settle toggle (store.qrOnSettle).
 export function UpiQrPanel({ upiId, amount }: { upiId: string; amount: number }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const store = useStore();
+  // The name a customer's UPI app shows as the payee - must be the real
+  // restaurant, never a placeholder.
+  const payeeName = store.restaurant?.name ?? store.serverHotelName ?? "";
 
   useEffect(() => {
     if (!upiId || amount <= 0) {
       setDataUrl(null);
       return;
     }
-    const merchantName = encodeURIComponent(RESTAURANT.name);
+    const merchantName = encodeURIComponent(payeeName);
     const transactionNote = encodeURIComponent(`Bill Payment - ${amount}`);
     const upiUrl = `upi://pay?pa=${upiId}&pn=${merchantName}&tn=${transactionNote}&am=${amount}&cu=INR`;
     let cancelled = false;

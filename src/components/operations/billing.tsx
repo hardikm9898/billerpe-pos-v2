@@ -29,7 +29,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { RESTAURANT } from "@/mock/data";
 import { orderTotals, useStore, type BillSettings } from "@/mock/store";
 import type {
   InvoiceLine,
@@ -560,7 +559,7 @@ export function InvoiceFormatSection() {
       setQrDataUrl(null);
       return;
     }
-    const merchantName = encodeURIComponent(RESTAURANT.name);
+    const merchantName = encodeURIComponent((store.restaurant?.name ?? store.serverHotelName ?? ""));
     const transactionNote = encodeURIComponent(`Bill Payment - ${totals.grand}`);
     const upiUrl = `upi://pay?pa=${fmt.upiId}&pn=${merchantName}&tn=${transactionNote}&am=${totals.grand}&cu=INR`;
     let cancelled = false;
@@ -605,9 +604,9 @@ export function InvoiceFormatSection() {
   const lineText = (l: InvoiceLine) => {
     switch (l.content) {
       case "outlet-name":
-        return RESTAURANT.name;
+        return (store.restaurant?.name ?? store.serverHotelName ?? "");
       case "address":
-        return RESTAURANT.outlet;
+        return store.restaurant?.address ?? "";
       case "gstin":
         return `GSTIN: ${fmt.gstNo}`;
       case "fssai":
@@ -981,8 +980,6 @@ const KOT_CONTENT_LABEL: Record<string, string> = {
 // content types a KOT can show that a bill never does (order type, token/
 // KOT number, customer/table).
 const KOT_PREVIEW_CTX = {
-  hotelName: RESTAURANT.name,
-  address: RESTAURANT.outlet,
   orderType: "Dine In",
   customerDetails: "Table 5",
   billNo: "1024",
@@ -1020,9 +1017,9 @@ export function KotFormatSection() {
   const lineText = (l: KotLine) => {
     switch (l.content) {
       case "outlet-name":
-        return KOT_PREVIEW_CTX.hotelName;
+        return (store.restaurant?.name ?? store.serverHotelName ?? "");
       case "address":
-        return KOT_PREVIEW_CTX.address;
+        return store.restaurant?.address ?? "";
       case "order-type":
         return KOT_PREVIEW_CTX.orderType;
       case "customer-details":

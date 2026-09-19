@@ -45,7 +45,6 @@ import { Switch } from "@/components/ui/switch";
 import { ApiError, hotelApi, qrOrderApi } from "@/lib/api";
 import { encryptHotelId, encryptQrPayload, qrBaseUrl } from "@/lib/publicMenu";
 import { cn } from "@/lib/utils";
-import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
 import type { Customer, OrderType } from "@/mock/types";
 
@@ -355,7 +354,7 @@ export function QrSection() {
     if (!qrDataUrl) return;
     const link = document.createElement("a");
     link.href = qrDataUrl;
-    link.download = `${RESTAURANT.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-menu-qr.png`;
+    link.download = `${((store.restaurant?.name ?? store.serverHotelName ?? "") || "menu").toLowerCase().replace(/[^a-z0-9]+/g, "-")}-menu-qr.png`;
     link.click();
     toast.success("QR downloaded as PNG");
   };
@@ -461,7 +460,7 @@ export function QrSection() {
             )}
           </div>
           <p className="mt-3 text-center text-xs text-muted-foreground">
-            {qrBase ? `Scan for ${RESTAURANT.name}` : "QR codes unavailable"}
+            {qrBase ? `Scan for ${(store.restaurant?.name ?? store.serverHotelName ?? "")}` : "QR codes unavailable"}
           </p>
           {!qrBase ? (
             <p className="mt-2 text-center text-xs text-status-held-foreground">

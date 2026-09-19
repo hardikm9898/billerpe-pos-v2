@@ -47,7 +47,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { RESTAURANT } from "@/mock/data";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
 import { lineTotal, orderTotals, useStore } from "@/mock/store";
 import type { AddonGroup, MenuItem, Order, OrderLine, PaymentSplit } from "@/mock/types";
@@ -395,7 +394,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
           <div className="leading-tight">
             <p className="text-[13px] font-semibold">Keyboard Billing</p>
             <p className="num text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
-              {RESTAURANT.name}
+              {(store.restaurant?.name ?? store.serverHotelName ?? "")}
             </p>
           </div>
         </div>

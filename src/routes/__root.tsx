@@ -12,6 +12,7 @@ import { useEffect, type ReactNode } from "react";
 import { GlobalLoadingBar } from "@/components/app/GlobalLoadingBar";
 import { Toaster } from "@/components/ui/sonner";
 import { StoreProvider } from "@/mock/store";
+import { ServerGate } from "@/components/app/ServerGate";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 
@@ -134,8 +135,10 @@ function RootComponent() {
     <QueryClientProvider client={queryClient}>
       <StoreProvider>
         <GlobalLoadingBar />
-        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-        <Outlet />
+        <ServerGate>
+          {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+          <Outlet />
+        </ServerGate>
         <Toaster position="top-right" richColors closeButton />
       </StoreProvider>
     </QueryClientProvider>

@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { landingRoute } from "@/components/app/AppShell";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/")({
@@ -26,9 +27,23 @@ function Index() {
   const store = useStore();
   const navigate = useNavigate();
 
+  // Each user lands on the first screen their role can open (kitchen staff
+  // on KDS, billing staff on the floor) - which needs their permissions, so
+  // the session loads first.
   useEffect(() => {
-    navigate({ to: store.authed ? "/table-grid" : "/login", replace: true });
-  }, [store.authed, navigate]);
+    if (!store.authed) {
+      navigate({ to: "/login", replace: true });
+      return;
+    }
+    if (!store.sessionReady) {
+      void store.loadSession().then((ok) => {
+        if (!ok) store.logout();
+      });
+      return;
+    }
+    navigate({ to: landingRoute(store.can), replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.authed, store.sessionReady]);
 
   return (
     <div className="grid min-h-screen place-items-center bg-background">

@@ -43,9 +43,8 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { checkLocalServerHealth } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { RESTAURANT, connectionStateLabels } from "@/mock/data";
+import { connectionStateLabels } from "@/mock/data";
 import { realToday } from "@/mock/format";
 import { useStore } from "@/mock/store";
 import type { ConnectionState, PermissionModule } from "@/mock/types";
@@ -181,7 +180,35 @@ function hasViewAccess(
 const ACCOUNT_MENU_ROUTES: { to: string; module: PermissionModule }[] = [
   { to: "/system/audit-log", module: "audit-log" },
   { to: "/system", module: "system" },
+  { to: "/kds", module: "kds" },
 ];
+
+// Where each user lands after signing in (and where a page they can't open
+// sends them): the first of these they can view. Billing staff get the
+// floor, kitchen staff the KDS, an accountant the dashboard, and so on.
+const LANDING: { to: string; module: PermissionModule | PermissionModule[] }[] = [
+  { to: "/table-grid", module: "biller" },
+  { to: "/kds", module: "kds" },
+  { to: "/dashboard", module: "dashboard" },
+  { to: "/orders", module: "orders" },
+  { to: "/keyboard-billing", module: "keyboard-billing" },
+  { to: "/stock", module: ["stock-masters", "stock-transactions", "stock-recipes", "stock-reports"] },
+  { to: "/reports", module: "reports" },
+  { to: "/expense/entries", module: "expense" },
+  { to: "/cash-session", module: "cash-session" },
+  { to: "/menu/items", module: "menu" },
+  { to: "/tables/manage", module: "tables" },
+  { to: "/reservations", module: "reservations" },
+  { to: "/queue", module: "queue" },
+  { to: "/users", module: "users" },
+  { to: "/operations", module: ["ops-billing", "ops-hardware", "ops-experience", "ops-ledger"] },
+];
+
+export function landingRoute(
+  can: (m: PermissionModule, a: "view" | "create" | "edit" | "delete") => boolean,
+): string {
+  return LANDING.find((l) => hasViewAccess(can, l.module))?.to ?? "/profile";
+}
 
 /** Finds the most specific NAV entry (a child link, else its parent) that
  * matches `pathname`, so a route guard can check the right module even for
@@ -207,8 +234,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [railHover, setRailHover] = useState(false);
   const [openGroup, setOpenGroup] = useState<string | null>(null);
   const railExpanded = railHover || openGroup !== null;
-  const connectionRef = useRef(store.connection);
-  connectionRef.current = store.connection;
 
   useEffect(() => {
     setOpen("none");
@@ -221,165 +246,64 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (!store.authed) navigate({ to: "/login" });
   }, [store.authed, navigate]);
 
-  // Real trigger for the "Local Server Unavailable" blocking modal below -
-  // previously only reachable via the demo state switcher in the
-  // connection chip menu (grep confirmed: setConnection had exactly 2 call
-  // sites, both manual, before this). A dead exe mid-shift used to surface
-  // as ~30 independent "Could not load X from server" toasts (one per
-  // failed store.tsx call site) with no single unified signal - this polls
-  // the same checkLocalServerHealth() the login screen uses and flips the
-  // one shared connection state instead. connectionRef (not store.connection
-  // in the dep array) so the interval isn't torn down and rebuilt every
-  // poll; only toggles "online" <-> "local-server-down" specifically so it
-  // never stomps "syncing"/"sync-error"/"conflict"/"offline-limit-exceeded"
-  // if something else ever drives those live.
+  // The signed-in user's own record and permissions load before anything
+  // permission-dependent renders. Before this, a refresh briefly treated
+  // the user as whoever was first in the (demo) staff list, and the access
+  // guard below bounced a real Owner to Profile with "no access".
   useEffect(() => {
-    if (!store.authed) return;
+    if (!store.authed || store.sessionReady) return;
     let cancelled = false;
-    const check = async () => {
-      const ok = await checkLocalServerHealth();
-      if (cancelled) return;
-      if (!ok && connectionRef.current === "online") store.setConnection("local-server-down");
-      else if (ok && connectionRef.current === "local-server-down") store.setConnection("online");
-    };
-    void check();
-    const interval = setInterval(check, 20000);
+    void store.loadSession().then((ok) => {
+      if (!cancelled && !ok) store.logout();
+    });
     return () => {
       cancelled = true;
-      clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
+  }, [store.authed, store.sessionReady]);
 
   // Hiding a nav link isn't real access control - someone can still type
-  // the URL directly, so the module a role/user lacks view on needs to be
-  // blocked here too, not just filtered out of navItems below.
+  // the URL directly. A page this user can't open goes quietly to the first
+  // one they can (kitchen staff -> KDS), no toast: they never asked for it.
   useEffect(() => {
-    if (!store.authed) return;
+    if (!store.authed || !store.sessionReady) return;
     const module = findNavModule(pathname);
-    // /profile carries no module tag (always accessible) - a safe fallback
-    // regardless of how a role/user's permissions are configured, so this
-    // can never loop back into itself the way /table-grid theoretically
-    // could for a role with no biller access at all.
     if (pathname !== "/profile" && !hasViewAccess(store.can, module)) {
-      toast.error("You don't have access to that section");
-      navigate({ to: "/profile" });
+      navigate({ to: landingRoute(store.can), replace: true });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed, pathname, navigate]);
+  }, [store.authed, store.sessionReady, pathname, navigate]);
 
-  // Replaces the seeded mock tables/categories with real backend data once
-  // there's a session to fetch them with - covers both a fresh login and a
-  // page reload while already authed (the auth check above only handles
-  // the unauthenticated case).
+  // Loaded once the session is ready, and only what this user may see. The
+  // exe refuses the rest (billerpe-local-exe/constant/routePermissions.js),
+  // so loading it anyway only produced "no permission" errors for staff who
+  // never opened those screens.
   useEffect(() => {
-    if (store.authed) void store.loadTablesFromServer();
+    if (!store.sessionReady) return;
+    // Reference data every working screen reads; open to any staff member.
+    void store.loadTablesFromServer();
+    void store.loadMenuFromServer();
+    void store.loadUsersFromServer();
+    void store.loadInvoiceFormatFromServer();
+    void store.loadKotFormatFromServer();
+    void store.loadCustomersFromServer();
+    void store.loadKitchensFromServer();
+    void store.loadPrintersFromServer();
+    void store.loadTaxRulesFromServer();
+    void store.loadServiceChargeFromServer();
+    void store.loadPaymentModesFromServer();
+    void store.loadPaymentModeDefaultsFromServer();
+    void store.loadBillChargeRulesFromServer();
+    void store.loadNotificationSettingsFromServer();
+    void store.loadUnitsFromServer();
+    void store.loadRawMaterialsFromServer();
+    void store.loadOrderHistoryFromServer();
+    if (store.can("ops-ledger", "view")) {
+      void store.loadDueBillsFromServer();
+      void store.loadRefundDueOrdersFromServer();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadMenuFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadUsersFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadInvoiceFormatFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadKotFormatFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadDueBillsFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadRefundDueOrdersFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadCustomersFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadKitchensFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadPrintersFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadTaxRulesFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadServiceChargeFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadPaymentModesFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadPaymentModeDefaultsFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadBillChargeRulesFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadNotificationSettingsFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadRolePermissionsFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadUnitsFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  useEffect(() => {
-    if (store.authed) void store.loadRawMaterialsFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
-
-  // Suppliers, Purchase Orders, Wastage, Semi-Finished/Production, and
-  // Recipes are NOT loaded here anymore - all 5 are confirmed out of
-  // scope for the Local EXE (no local model exists for any of them), so
-  // they always 401 against the cloud regardless of session validity.
-  // Loading them unconditionally on every login/route was pure console/
-  // toast noise on screens (table-grid, billing) that never even show
-  // this data - moved to _shell.stock.$section.tsx's own mount effect,
-  // firing only when that specific stock section is actually open.
-
-  useEffect(() => {
-    if (store.authed) void store.loadOrderHistoryFromServer();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed]);
+  }, [store.sessionReady]);
 
   // Expense Heads/Entries, Cash Sessions, Promo Codes, and E-Bill Credit -
   // same reasoning as above, moved to their own screens' mount effects
@@ -398,6 +322,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     item.to
       ? pathname === item.to || pathname.startsWith(`${item.to}/`)
       : (item.children ?? []).some((c) => pathname.startsWith(c.to));
+
+  if (!store.sessionReady) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-background">
+        <p className="text-sm text-muted-foreground">Loading your outlet…</p>
+      </div>
+    );
+  }
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -572,17 +504,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                   </SheetContent>
                 </Sheet>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold tracking-tight">{RESTAURANT.name}</p>
+                  <p className="truncate text-sm font-semibold tracking-tight">
+                    {store.restaurant?.name ?? store.serverHotelName ?? ""}
+                  </p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {/* RESTAURANT.businessDate is a frozen mock literal
-                    (never wired to anything real) - realToday() shows the
-                    actual current date instead. Doesn't account for a
-                    non-midnight business-day rollover (that logic only
-                    exists server-side, via getBusinessDate) - a plain
-                    calendar date is still correct almost all the time and
-                    is a real improvement over a value that was never
-                    correct at all. */}
-                    {RESTAURANT.outlet} · Business date {realToday()}
+                    {/* Plain calendar date - the non-midnight business-day
+                    rollover only exists server-side (getBusinessDate). */}
+                    {store.restaurant?.address ? `${store.restaurant.address} · ` : ""}Business date{" "}
+                    {realToday()}
                   </p>
                 </div>
               </div>
@@ -807,50 +736,6 @@ export function AppShell({ children }: { children: ReactNode }) {
           </nav>
         </div>
 
-        {/* local server unavailable blocking modal */}
-        <AnimatePresence>
-          {store.connection === "local-server-down" ? (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-[60] grid place-items-center bg-foreground/50 p-4 backdrop-blur-sm"
-            >
-              <motion.div
-                initial={{ scale: 0.96, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                className="w-full max-w-md rounded-2xl border border-border bg-surface p-6 shadow-overlay"
-              >
-                <div className="flex items-start gap-3">
-                  <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-primary-soft text-primary">
-                    <ServerCrash className="size-5" />
-                  </span>
-                  <div className="min-w-0">
-                    <h2 className="text-base font-semibold">Local Server Unavailable</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      BillerPe cannot reach the local server on this network. Billing, KOT printing
-                      and settlement are paused until the connection is restored.
-                    </p>
-                  </div>
-                </div>
-                <div className="mt-5 flex flex-wrap justify-end gap-2">
-                  <Button variant="outline" onClick={() => navigate({ to: "/system" })}>
-                    Open Local Server
-                  </Button>
-                  <Button
-                    onClick={async () => {
-                      const ok = await checkLocalServerHealth();
-                      store.setConnection(ok ? "online" : "local-server-down");
-                      if (!ok) toast.error("Still can't reach the local server");
-                    }}
-                  >
-                    <RefreshCw className="size-4" /> Retry connection
-                  </Button>
-                </div>
-              </motion.div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
 
         {open !== "none" ? (
           <button

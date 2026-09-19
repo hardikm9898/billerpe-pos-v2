@@ -30,16 +30,6 @@ import type {
   Wastage,
 } from "./types";
 
-export const RESTAURANT = {
-  name: "BillerPe Demo Restaurant",
-  outlet: "Main Outlet · Ahmedabad",
-  gstin: "24ABCDE1234F1Z5",
-  businessDate: "18/08/2026",
-  currency: "₹",
-  cgst: 2.5,
-  sgst: 2.5,
-};
-
 export const users: User[] = [
   {
     id: "u1",

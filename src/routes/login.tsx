@@ -20,17 +20,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
-import { RESTAURANT } from "@/mock/data";
 import { useStore } from "@/mock/store";
 import { cn } from "@/lib/utils";
 import {
   authApi,
   ApiError,
-  checkLocalServerHealth,
   getBrowserDeviceId,
-  getLocalServerIdentity,
+  refreshServerState,
   registerThisPc,
-  setManualServerAddress,
   setStoredAuthToken,
 } from "@/lib/api";
 
@@ -53,8 +50,9 @@ function describeAuthError(err: unknown): string {
 function handleLoginError(err: unknown, resetDeviceRegistration: () => void) {
   if (err instanceof ApiError && err.needsRegistration) {
     resetDeviceRegistration();
-    toast.error("This device needs to be registered again", {
-      description: "The local server's data was reset - register this terminal below.",
+    void refreshServerState();
+    toast.error("This PC is not registered to a restaurant", {
+      description: "Register it below with the owner's BillerPe login.",
     });
     return;
   }
@@ -100,134 +98,21 @@ function LoginPage() {
 
   const registered = store.deviceRegistered;
 
-  // Architecture memo §04/Phase C: the local-server-required gate only
-  // matters BEFORE this device is registered - once registered, a briefly
-  // unreachable EXE is handled by the ordinary error toasts below on
-  // whichever button was actually clicked, not a blocking full-page state
-  // on every visit (spec §4: detection is for initial setup only, it must
-  // not "unnecessarily block normal operation" afterward).
-  const [serverCheck, setServerCheck] = useState<"checking" | "ok" | "unreachable">(
-    registered ? "ok" : "checking",
-  );
-
-  const runServerCheck = () => {
-    setServerCheck("checking");
-    void checkLocalServerHealth().then((ok) => setServerCheck(ok ? "ok" : "unreachable"));
-  };
-
-  const [manualOpen, setManualOpen] = useState(false);
-  const [manualAddress, setManualAddress] = useState("");
-  const [manualLoading, setManualLoading] = useState(false);
-
-  useEffect(() => {
-    // The exe is the single source of truth for "is this PC registered".
-    // This browser's cached `billerpe.session.device` flag is only a hint
-    // for the very first render: a fresh browser (or cleared storage) on an
-    // already-registered exe must NOT be asked to register again, and a
-    // cached "registered" flag on an exe whose data was wiped must be
-    // reset. getLocalServerIdentity() returns null when the exe is
-    // unreachable - deliberately a no-op, so a briefly-down exe never
-    // blocks a registered device (spec §4).
-    void getLocalServerIdentity().then((identity) => {
-      if (!identity) {
-        if (!registered) setServerCheck("unreachable");
-        return;
-      }
-      setServerCheck("ok");
-      if (identity.registered && !registered) store.registerDevice();
-      if (!identity.registered && registered) store.resetDeviceRegistration();
-    });
-    // Only ever needs to run once, on first mount - `registered` flipping
-    // true/false mid-session (right after registering, or after the reset
-    // above fires) should not re-trigger this effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const doLogin = (realUserId: string | null) => {
     if (!realUserId) {
       toast.error("Could not identify the logged-in account");
       return;
     }
     store.login(realUserId);
-    toast.success("Welcome back", { description: RESTAURANT.name });
-    navigate({ to: "/table-grid" });
+    toast.success("Welcome back", { description: store.serverHotelName ?? undefined });
+    // "/" loads the session and sends each role to its own landing screen.
+    navigate({ to: "/" });
   };
 
   const tabs: { id: Tab; label: string; icon: typeof LogIn }[] = [
     { id: "password", label: "Password", icon: LogIn },
     { id: "pin", label: "PIN", icon: KeyRound },
   ];
-
-  if (serverCheck === "unreachable") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background px-4">
-        <div className="w-full max-w-md rounded-2xl border border-border bg-surface p-8 text-center shadow-raised">
-          <div className="mx-auto flex size-14 items-center justify-center rounded-full bg-destructive/10">
-            <ServerCrash className="size-7 text-destructive" />
-          </div>
-          <h1 className="mt-4 text-xl font-semibold tracking-tight">
-            BillerPe Local Server required
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            This terminal can't reach the BillerPe Local Server on this network. It must be
-            installed and running on this outlet's server PC before setup can continue - Web POS
-            never talks to the cloud directly for restaurant operations.
-          </p>
-          <Button className="mt-6 w-full" onClick={runServerCheck}>
-            Try again
-          </Button>
-
-          {!manualOpen ? (
-            <button
-              type="button"
-              className="mt-3 w-full text-center text-xs text-primary"
-              onClick={() => setManualOpen(true)}
-            >
-              Enter the server's address manually
-            </button>
-          ) : (
-            <div className="mt-4 space-y-2 text-left">
-              <Label htmlFor="manualAddress">Server PC's local address</Label>
-              <p className="text-xs text-muted-foreground">
-                Found on the server PC's own dashboard, under "Network" (e.g. 192.168.1.12:4100).
-              </p>
-              <Input
-                id="manualAddress"
-                value={manualAddress}
-                onChange={(e) => setManualAddress(e.target.value)}
-                placeholder="192.168.1.12:4100"
-              />
-              <Button
-                className="w-full"
-                disabled={manualLoading || !manualAddress}
-                onClick={async () => {
-                  setManualLoading(true);
-                  const ok = await setManualServerAddress(manualAddress);
-                  setManualLoading(false);
-                  if (ok) {
-                    toast.success("Connected to the local server");
-                    setServerCheck("ok");
-                  } else {
-                    toast.error("Could not reach that address");
-                  }
-                }}
-              >
-                {manualLoading ? "Connecting…" : "Connect"}
-              </Button>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  if (serverCheck === "checking") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-background">
-        <p className="text-sm text-muted-foreground">Looking for the BillerPe Local Server…</p>
-      </div>
-    );
-  }
 
   return (
     <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
@@ -270,7 +155,7 @@ function LoginPage() {
           </div>
         </div>
         <p className="text-xs opacity-60">
-          {RESTAURANT.name} · {RESTAURANT.outlet}
+          {store.serverHotelName ?? "BillerPe"}
         </p>
       </div>
 
@@ -332,8 +217,9 @@ function LoginPage() {
                     try {
                       const { pulled } = await registerThisPc(regMobile, regPassword);
                       store.registerDevice();
-                      const menuCount = pulled?.["menuItems"] ?? 0;
-                      const tableCount = pulled?.["tables"] ?? 0;
+                      void refreshServerState();
+                      const menuCount = Number(pulled?.["menuItems"] ?? 0);
+                      const tableCount = Number(pulled?.["tables"] ?? 0);
                       toast.success("Device registered", {
                         description: `Pulled ${menuCount} menu item(s), ${tableCount} table(s) - sign in below.`,
                       });

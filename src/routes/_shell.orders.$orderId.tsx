@@ -24,7 +24,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { RESTAURANT } from "@/mock/data";
 import { displayBillNo, lineTotal, orderTotals, useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/orders/$orderId")({
@@ -212,7 +211,9 @@ function OrderDetailPage() {
         <div className="space-y-4">
           <SectionCard
             title="Bill summary"
-            description={`${RESTAURANT.name} · GSTIN ${RESTAURANT.gstin}`}
+            description={[(store.restaurant?.name ?? store.serverHotelName ?? ""), store.restaurant?.gstin ? `GSTIN ${store.restaurant.gstin}` : ""]
+              .filter(Boolean)
+              .join(" · ")}
           >
             <dl className="space-y-1.5 text-sm">
               <Line label="Subtotal" value={t.subtotal} />

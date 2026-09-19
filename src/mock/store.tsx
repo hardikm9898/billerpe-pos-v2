@@ -12,9 +12,7 @@ import { toast } from "sonner";
 import { computeBill, type EngineChargeRule, type EngineTax } from "@/lib/billEngine";
 import QRCode from "qrcode";
 
-import * as seed from "./data";
-import * as stockSeed from "./stock-seed";
-import * as opsSeed from "./ops-seed";
+import { OFFLINE_SETTINGS, ROLE_PERMISSION_DEFAULTS, ROLE_SPECIAL_DEFAULTS } from "./data";
 import { nowStamp, todayLabel, isoToDMY } from "./format";
 import {
   ApiError,
@@ -204,8 +202,18 @@ export interface AddLineInput {
 
 interface State {
   authed: boolean;
+  /** Mirrors the exe's own /health `registered` (ServerGate keeps it current) -
+   * never this browser's storage. */
   deviceRegistered: boolean;
+  /** Restaurant name the exe reports, for screens shown before sign-in. */
+  serverHotelName: string | null;
   currentUserId: string;
+  /** The signed-in user's own record and permissions, from GET /getUserAccess.
+   * Nothing permission-dependent renders until this has loaded. */
+  sessionUser: User | null;
+  sessionReady: boolean;
+  /** Real restaurant details from GET /singleHotel. */
+  restaurant: { id: number; name: string; address: string; gstin: string } | null;
   tables: RestaurantTable[];
   tableCategories: TableCategory[];
   orders: Order[];
@@ -311,12 +319,71 @@ interface State {
   roleSpecialPermissions: Record<Role, Partial<Record<SpecialPermission, boolean>>>;
 }
 
+// Neutral starting values while the exe's real settings load - never demo
+// data. A charge rule is off, the invoice has no GSTIN/FSSAI/UPI until the
+// restaurant's real ones arrive; the header/footer layout is only the slot
+// order the settings screen starts from.
+const CHARGE_OFF = {
+  active: false,
+  type: "fixed" as const,
+  value: 0,
+  calculationOn: "core" as const,
+  autoApply: [],
+  taxOnCharge: false,
+  condition: "always" as const,
+  threshold: 0,
+};
+
+const EMPTY_INVOICE_FORMAT: State["invoiceFormat"] = {
+  gstCalculation: true,
+  gstNo: "",
+  fssaiNo: "",
+  multiLanguage: false,
+  upiId: "",
+  header: [
+    { id: "h1", content: "logo", fontSize: 14 },
+    { id: "h2", content: "outlet-name", fontSize: 16 },
+    { id: "h3", content: "address", fontSize: 11 },
+    { id: "h4", content: "gstin", fontSize: 11 },
+    { id: "h5", content: "fssai", fontSize: 10 },
+  ],
+  footer: [{ id: "f1", content: "upi-qr", fontSize: 12 }],
+  unconfirmed: { isTokenOn: false, billWithKot: false, billWithToken: false, saveBehaviour: false },
+};
+
+const DEFAULT_KOT_FORMAT: State["kotFormat"] = {
+  header: [
+    { id: "kh1", content: "outlet-name", fontSize: 14 },
+    { id: "kh2", content: "order-type", fontSize: 12 },
+    { id: "kh3", content: "kot-number", fontSize: 12 },
+    { id: "kh4", content: "token-number", fontSize: 16 },
+    { id: "kh5", content: "customer-details", fontSize: 11 },
+  ],
+  footer: [{ id: "kf1", content: "billerpe-branding", fontSize: 10 }],
+};
+
+/** Stand-in before the signed-in user's record loads. Has no permissions
+ * (can() is false until sessionUser exists), so nothing is unlocked by it. */
+const NO_USER: User = {
+  id: "",
+  name: "",
+  role: "Cashier",
+  mobile: "",
+  email: "",
+  status: "Active",
+  pin: "",
+};
+
 const initialState: State = {
   authed: false,
   deviceRegistered: false,
-  currentUserId: seed.CURRENT_USER_ID,
-  tables: seed.tables,
-  tableCategories: seed.tableCategories,
+  currentUserId: "",
+  sessionUser: null,
+  sessionReady: false,
+  restaurant: null,
+  serverHotelName: null,
+  tables: [],
+  tableCategories: [],
   // Unlike tables/menu/etc., loadTablesFromServer never fully replaces
   // `orders` (it only appends real live orders it reconstructs, to avoid
   // ever clobbering an in-progress local edit) - so seed demo orders here
@@ -338,68 +405,68 @@ const initialState: State = {
   // KDS until it gets a new real-time event - a real remaining gap, not
   // something starting empty here fixes.
   kots: [],
-  menuItems: seed.menuItems,
-  menuCategories: seed.menuCategories,
-  variantMasters: seed.variantMasters,
-  addonGroups: seed.addonGroups,
-  users: seed.users,
-  customers: seed.customers,
+  menuItems: [],
+  menuCategories: [],
+  variantMasters: [],
+  addonGroups: [],
+  users: [],
+  customers: [],
   reservations: [],
   queue: [],
-  expenses: seed.expenses,
+  expenses: [],
   expenseEntriesPageRows: [],
   expenseEntriesPage: 1,
   expenseEntriesTotalPages: 1,
   expenseEntriesTotal: 0,
   expenseEntriesTotalMoneyIn: 0,
   expenseEntriesTotalExpense: 0,
-  expenseHeads: seed.expenseHeads,
-  rawMaterials: seed.rawMaterials,
-  recipes: stockSeed.recipes,
-  semiFinished: seed.semiFinished,
-  suppliers: seed.suppliers,
-  purchaseOrders: stockSeed.purchaseOrders,
-  wastages: seed.wastages,
-  units: stockSeed.units,
-  stockMovements: stockSeed.stockMovements,
-  stockAdjustments: stockSeed.stockAdjustments,
-  productionRuns: stockSeed.productionRuns,
-  requisitions: stockSeed.requisitions,
+  expenseHeads: [],
+  rawMaterials: [],
+  recipes: [],
+  semiFinished: [],
+  suppliers: [],
+  purchaseOrders: [],
+  wastages: [],
+  units: [],
+  stockMovements: [],
+  stockAdjustments: [],
+  productionRuns: [],
+  requisitions: [],
   // Same seed-pollution issue as orders/orderHistory (see their own
   // comment) - loadCashSessionsFromServer fully replaces this from the
   // real backend now that one exists, so starting empty means every
   // session shown, once loaded, is real.
   cashSessions: [],
-  printers: seed.printers,
+  printers: [],
   localServerStatus: null,
-  notifications: seed.notifications,
-  notificationSettings: seed.notificationSettings,
-  auditLogs: seed.auditLogs,
+  notifications: [],
+  notificationSettings: [],
+  auditLogs: [],
   connection: "online",
-  maxOfflineDays: seed.OFFLINE_SETTINGS.maxOfflineDays,
-  serviceCharge: opsSeed.serviceCharge,
+  maxOfflineDays: OFFLINE_SETTINGS.maxOfflineDays,
+  serviceCharge: { ...CHARGE_OFF },
   serviceChargeBackendId: null,
-  deliveryChargeRule: opsSeed.deliveryChargeRule,
-  packagingChargeRule: opsSeed.packagingChargeRule,
-  taxRules: opsSeed.taxRules,
-  invoiceFormat: opsSeed.invoiceFormat,
-  kotFormat: opsSeed.kotFormat,
+  deliveryChargeRule: { ...CHARGE_OFF },
+  packagingChargeRule: { ...CHARGE_OFF },
+  taxRules: [],
+  invoiceFormat: EMPTY_INVOICE_FORMAT,
+  kotFormat: DEFAULT_KOT_FORMAT,
   qrOnSettle: false,
-  promoCodes: opsSeed.promoCodes,
-  paymentModes: opsSeed.paymentModes,
+  promoCodes: [],
+  paymentModes: [],
   paymentModeDefaults: [],
-  kitchens: opsSeed.kitchens,
-  menus: opsSeed.menus,
+  kitchens: [],
+  menus: [],
   displayMode: "Touch",
   menuImages: true,
-  dueBills: opsSeed.dueBills,
+  dueBills: [],
   refundDueOrders: [],
-  eBillCredit: seed.EBILL_SETTINGS.startingCredit,
+  eBillCredit: 0,
   tableGridView: "Tabs",
   keyboardOnly: false,
   defaultOrderType: "Dine In",
-  rolePermissions: seed.ROLE_PERMISSION_DEFAULTS,
-  roleSpecialPermissions: seed.ROLE_SPECIAL_DEFAULTS,
+  rolePermissions: ROLE_PERMISSION_DEFAULTS,
+  roleSpecialPermissions: ROLE_SPECIAL_DEFAULTS,
 };
 
 export function lineTotal(l: OrderLine) {
@@ -638,6 +705,11 @@ interface Ctx extends State {
    * see login.tsx's boot-time reconciliation). Drops any cached userId too;
    * re-registering is a fresh start, not a resume. */
   resetDeviceRegistration: () => void;
+  /** Called by ServerGate with what the exe's /health reports. */
+  applyServerIdentity: (registered: boolean, hotelName: string | null) => void;
+  /** Loads the signed-in user's own record and the role permissions, then
+   * marks the session ready. False if the user could not be resolved. */
+  loadSession: () => Promise<boolean>;
   login: (userId?: string) => void;
   /** Resolves the real hotelUser the current session's cookie belongs to
    * (GET /getUserAccess), adds/updates it in `users`, and returns its id -
@@ -1284,17 +1356,17 @@ function mapRolePermissionDefaults(rows: RawRolePermissionDefault[]): {
   roleSpecialPermissions: Record<Role, Partial<Record<SpecialPermission, boolean>>>;
 } {
   const byRole = new Map(rows.map((r) => [r.role, r]));
-  const roles = Object.keys(seed.ROLE_PERMISSION_DEFAULTS) as Role[];
+  const roles = Object.keys(ROLE_PERMISSION_DEFAULTS) as Role[];
   const rolePermissions = {} as Record<Role, RolePermissions>;
   const roleSpecialPermissions = {} as Record<Role, Partial<Record<SpecialPermission, boolean>>>;
   for (const role of roles) {
     const row = byRole.get(role);
     rolePermissions[role] = {
-      ...seed.ROLE_PERMISSION_DEFAULTS[role],
+      ...ROLE_PERMISSION_DEFAULTS[role],
       ...(row?.permissions as Partial<RolePermissions> | undefined),
     };
     roleSpecialPermissions[role] = {
-      ...seed.ROLE_SPECIAL_DEFAULTS[role],
+      ...ROLE_SPECIAL_DEFAULTS[role],
       ...(row?.special_permissions as Partial<Record<SpecialPermission, boolean>> | undefined),
     };
   }
@@ -1394,6 +1466,20 @@ function toShortCode(sku: string | undefined, name: string, seed: string): strin
   return (fromName || `ITEM${seed}`).slice(0, 20);
 }
 
+// Stored by the exe (POST /userPermissionOverrides) as JSON; SQLite can hand
+// it back as a string.
+function parseOverrides(value: RawHotelUser["permission_overrides"]): PermissionOverrides | undefined {
+  if (!value) return undefined;
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as PermissionOverrides;
+    } catch {
+      return undefined;
+    }
+  }
+  return value as PermissionOverrides;
+}
+
 function mapRawUser(u: RawHotelUser): User {
   return {
     id: String(u.id),
@@ -1406,6 +1492,7 @@ function mapRawUser(u: RawHotelUser): User {
     // way to display or re-derive it. Left blank; only a re-save sets a
     // new one.
     pin: "",
+    permissionOverrides: parseOverrides(u.permission_overrides),
     // permissionOverrides deliberately isn't seeded from the real
     // backend's own hms_user_accesses here (used to be, via
     // MODULE_TO_ACCESS_AREA) - those are coarse legacy CRUD flags on the
@@ -2324,11 +2411,11 @@ function loadInitialState(): State {
   try {
     const saved = window.localStorage.getItem("billerpe.session");
     if (!saved) return initialState;
-    const parsed = JSON.parse(saved) as { userId?: string; device: boolean; authed: boolean };
+    const parsed = JSON.parse(saved) as { userId?: string; authed: boolean };
+    // Registration is never restored from here - ServerGate asks the exe.
     return {
       ...initialState,
-      authed: parsed.authed,
-      deviceRegistered: parsed.device,
+      authed: parsed.authed === true && !!parsed.userId,
       currentUserId: parsed.userId ?? initialState.currentUserId,
     };
   } catch {
@@ -2354,8 +2441,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const tablesLoadSeq = useRef(0);
 
   const currentUser = useMemo(
-    () => s.users.find((u) => u.id === s.currentUserId) ?? s.users[0],
-    [s.users, s.currentUserId],
+    () => s.sessionUser ?? s.users.find((u) => u.id === s.currentUserId) ?? NO_USER,
+    [s.sessionUser, s.users, s.currentUserId],
   );
 
   const tableLabel = useCallback(
@@ -2371,7 +2458,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const log = useCallback(
     (action: string, entity: string, before: string, after: string, reason?: string) => {
       const userId = s.currentUserId;
-      const userName = currentUser?.name ?? "Taj";
+      const userName = currentUser.name;
       const entry: AuditLog = {
         id: uid("a"),
         userId,
@@ -2380,8 +2467,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         entity,
         before,
         after,
-        device: "Counter POS",
-        ip: "192.168.1.14",
+        device: "Web POS",
+        ip: "",
         at: nowStamp(),
         ...(reason ? { reason } : {}),
       };
@@ -2429,15 +2516,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [currentUser, s.rolePermissions, s.roleSpecialPermissions]);
 
   const can = useCallback(
-    (moduleName: PermissionModule, action: StandardAction) =>
-      currentUser?.role === "Owner" ? true : !!resolvedPermissions?.modules[moduleName]?.[action],
-    [currentUser, resolvedPermissions],
+    (moduleName: PermissionModule, action: StandardAction) => {
+      if (!s.sessionUser) return false;
+      return currentUser.role === "Owner" ? true : !!resolvedPermissions?.modules[moduleName]?.[action];
+    },
+    [s.sessionUser, currentUser, resolvedPermissions],
   );
 
   const canSpecial = useCallback(
-    (perm: SpecialPermission) =>
-      currentUser?.role === "Owner" ? true : !!resolvedPermissions?.special[perm],
-    [currentUser, resolvedPermissions],
+    (perm: SpecialPermission) => {
+      if (!s.sessionUser) return false;
+      return currentUser.role === "Owner" ? true : !!resolvedPermissions?.special[perm];
+    },
+    [s.sessionUser, currentUser, resolvedPermissions],
   );
 
   const guardForbidden = useCallback(
@@ -2974,7 +3065,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         menuId: resolveMenu(s.menus, table, "Dine In")?.id,
         businessDate: todayLabel,
         createdAt: nowStamp(),
-        createdBy: currentUser?.name ?? "Taj",
+        createdBy: currentUser.name,
         itemised: true,
         // Reserved table (mapRawTable, sourced from billerpe-local-exe's
         // reserved_name/reserved_number) - pre-fill straight from the
@@ -2998,7 +3089,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         menuId: resolveMenu(s.menus, undefined, "Pickup")?.id,
         businessDate: todayLabel,
         createdAt: nowStamp(),
-        createdBy: currentUser?.name ?? "Taj",
+        createdBy: currentUser.name,
         itemised: true,
       };
     }
@@ -3140,14 +3231,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         users: p.users.map((x) => (x.id === userId ? { ...x, permissionOverrides: overrides } : x)),
       }));
-      log(
-        "User Permission Override",
-        u.name,
-        "",
-        "",
-        overrides ? "set custom overrides" : "reset to role default",
-      );
-      toast.success(`${u.name}'s permissions updated`);
+      const run = async () => {
+        try {
+          await userApi.setPermissionOverrides(Number(userId), overrides ?? null);
+          log(
+            "User Permission Override",
+            u.name,
+            "",
+            "",
+            overrides ? "set custom overrides" : "reset to role default",
+          );
+          toast.success(`${u.name}'s permissions updated`);
+          if (userId === s.currentUserId) await value.syncCurrentUser();
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not save permissions");
+        }
+        await value.loadUsersFromServer();
+      };
+      void run();
     },
 
     // Persisted immediately, not just in React state - a device that just
@@ -3159,31 +3260,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // real data pulled down).
     registerDevice: () => {
       patch((p) => ({ ...p, deviceRegistered: true }));
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem(
-          "billerpe.session",
-          JSON.stringify({ device: true, authed: false }),
-        );
-      }
-      toast.success("Device registered", { description: "Counter POS · 192.168.1.14" });
+    },
+    applyServerIdentity: (registered, hotelName) => {
+      patch((p) =>
+        p.deviceRegistered === registered && p.serverHotelName === hotelName
+          ? p
+          : { ...p, deviceRegistered: registered, serverHotelName: hotelName },
+      );
+    },
+    loadSession: async () => {
+      const [id] = await Promise.all([
+        value.syncCurrentUser(),
+        value.loadRolePermissionsFromServer(),
+      ]);
+      if (!id) return false;
+      patch((p) => ({ ...p, currentUserId: id, sessionReady: true }));
+      return true;
     },
     resetDeviceRegistration: () => {
-      patch((p) => ({ ...p, deviceRegistered: false, authed: false }));
+      patch((p) => ({
+        ...p,
+        deviceRegistered: false,
+        authed: false,
+        sessionUser: null,
+        sessionReady: false,
+      }));
       setStoredAuthToken(null);
       if (typeof window !== "undefined") {
-        window.localStorage.setItem(
-          "billerpe.session",
-          JSON.stringify({ device: false, authed: false }),
-        );
+        window.localStorage.setItem("billerpe.session", JSON.stringify({ authed: false }));
       }
     },
     login: (userId) => {
       const id = userId ?? s.currentUserId;
-      patch((p) => ({ ...p, authed: true, currentUserId: id, deviceRegistered: true }));
+      patch((p) => ({ ...p, authed: true, currentUserId: id }));
       if (typeof window !== "undefined") {
         window.localStorage.setItem(
           "billerpe.session",
-          JSON.stringify({ userId: id, device: true, authed: true }),
+          JSON.stringify({ userId: id, authed: true }),
         );
       }
     },
@@ -3192,13 +3305,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // `authed`, keeping `device: true` so the next load shows the sign-in
     // tabs, not the registration screen again.
     logout: () => {
-      patch((p) => ({ ...p, authed: false }));
+      patch((p) => ({ ...p, authed: false, sessionUser: null, sessionReady: false }));
       setStoredAuthToken(null);
       if (typeof window !== "undefined") {
-        window.localStorage.setItem(
-          "billerpe.session",
-          JSON.stringify({ device: true, authed: false }),
-        );
+        window.localStorage.setItem("billerpe.session", JSON.stringify({ authed: false }));
       }
     },
     syncCurrentUser: async () => {
@@ -3207,10 +3317,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const mapped = mapRawUser(access);
         patch((p) => ({
           ...p,
+          sessionUser: mapped,
           users: p.users.some((u) => u.id === mapped.id)
-            ? p.users.map((u) =>
-                u.id === mapped.id ? { ...mapped, permissionOverrides: u.permissionOverrides } : u,
-              )
+            ? p.users.map((u) => (u.id === mapped.id ? mapped : u))
             : [...p.users, mapped],
         }));
         return mapped.id;
@@ -4343,7 +4452,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                           ? `Cash refund · Order #${o.orderNo}`
                           : `Cash settlement · Order #${o.orderNo}`,
                       at: nowStamp(),
-                      by: currentUser?.name ?? "Taj",
+                      by: currentUser.name,
                     },
                   ],
                 }
@@ -5811,13 +5920,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     addTables: (tables) => {
-      const nums = tables.map((t) => Number(t.name));
-      if (nums.some((n) => !Number.isFinite(n))) {
-        toast.error("Backend only supports numeric table numbers for bulk creation", {
-          description: "A name prefix can't be sent to the server - remove it and try again.",
+      // Names come from the bulk dialog as <prefix><number> (e.g. T1..T5).
+      const parts = tables.map((t) => /^(.*?)(\d+)$/.exec(t.name.trim()));
+      const prefix = parts[0]?.[1] ?? "";
+      if (!parts.length || parts.some((p) => !p || p[1] !== prefix)) {
+        toast.error("Table names must end in a number", {
+          description: "For example T1, T2, T3 - the number is what increases.",
         });
         return;
       }
+      const nums = parts.map((p) => Number(p![2]));
       const categoryId = tables[0]?.categoryId;
       const startNo = Math.min(...nums);
       const endNo = Math.max(...nums);
@@ -5828,6 +5940,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             endNo,
             table_catag_id: Number(categoryId),
             type: "T",
+            prefix,
+            capacity: tables[0]?.seats,
           });
           await value.loadTablesFromServer();
           toast.success(`${tables.length} table(s) added`);
@@ -5875,22 +5989,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     loadUsersFromServer: async () => {
       try {
         const { hotelUsers } = await userApi.getUsers();
-        patch((p) => ({
-          ...p,
-          // A per-user override set locally via updateUserPermissionOverrides
-          // (the Users screen's own permission editor) must survive a
-          // resync - mapRawUser always returns a fresh user with no
-          // override of its own, so carry the existing one forward by id
-          // rather than letting every reload silently wipe an Owner's
-          // explicit grant back to the role default.
-          users: hotelUsers.map((u) => {
-            const fresh = mapRawUser(u);
-            const existing = p.users.find((x) => x.id === fresh.id);
-            return existing?.permissionOverrides
-              ? { ...fresh, permissionOverrides: existing.permissionOverrides }
-              : fresh;
-          }),
-        }));
+        // Overrides now live on the exe with the user, so the server copy is
+        // the truth - nothing local to carry forward.
+        patch((p) => ({ ...p, users: hotelUsers.map(mapRawUser) }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load users from server");
       }
@@ -5913,8 +6014,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const { upiId, hotel_logo, hms_res_setting, invoiceFormateIncGst } = settings;
         patch((p) => ({
           ...p,
+          restaurant: {
+            id: settings.id,
+            name: settings.hotel_name,
+            address: [settings.address1, settings.address2].filter(Boolean).join(", "),
+            gstin: settings.gst_no ?? "",
+          },
           invoiceFormat: {
             ...p.invoiceFormat,
+            gstNo: settings.gst_no ?? "",
+            fssaiNo: settings.fssai_no ?? "",
             upiId: upiId ?? "",
             gstCalculation: invoiceFormateIncGst,
             // Same filename-only convention as hotel_logo everywhere else
@@ -6804,7 +6913,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     savePurchase: (po, opts) => {
       const receive = opts?.receive ?? po.status === "Received";
       const totals = poTotals(po);
-      const who = currentUser?.name ?? "Taj";
+      const who = currentUser.name;
       const isNew = !s.purchaseOrders.some((x) => x.id === po.id);
       const id = po.id || uid("po");
       const record: PurchaseOrder = { ...po, id, status: receive ? "Received" : po.status };
@@ -7030,7 +7139,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     saveStockCount: (rows, note) => {
-      const who = currentUser?.name ?? "Taj";
+      const who = currentUser.name;
       const changed = rows.filter((r) => {
         const m = s.rawMaterials.find((x) => x.id === r.materialId);
         return m && Math.abs(m.stock - r.countedQty) > 0.0001;
@@ -7125,7 +7234,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     addWastageBatch: (rows) => {
-      const who = currentUser?.name ?? "Taj";
+      const who = currentUser.name;
       const valid = rows.filter((r) => r.materialId && r.qty > 0);
       if (!valid.length) {
         toast.error("Add at least one wastage row");
@@ -7265,7 +7374,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     recordProduction: (semiId, qty, notes) => {
       const sf = s.semiFinished.find((x) => x.id === semiId);
       if (!sf || qty <= 0) return;
-      const who = currentUser?.name ?? "Taj";
+      const who = currentUser.name;
       const cost = semiUnitCost(semiId) * qty;
       patch((p) => {
         const moves: StockMovement[] = [];
@@ -8476,7 +8585,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                         amount: cashPortion,
                         reason: `Due settlement · ${ids.length} bill(s)`,
                         at: nowStamp(),
-                        by: currentUser?.name ?? "Taj",
+                        by: currentUser.name,
                       },
                     ],
                   }

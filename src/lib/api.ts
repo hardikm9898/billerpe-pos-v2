@@ -9,15 +9,9 @@ export const API_BASE_URL = import.meta.env["VITE_API_BASE_URL"] ?? "http://loca
 // have a real EXE-side implementation as of Phases 1-7 - everything else
 // keeps going to API_BASE_URL (the cloud) unchanged.
 //
-// Architecture memo, Phase C: `let`, not `const` - a build-time env var is
-// the ONLY thing this ever resolved to before, meaning a restaurant's
-// router reassigning a new DHCP lease permanently broke every client until
-// someone rebuilt with a new VITE_EXE_BASE_URL. discoverLocalServer() below
-// can now override this at runtime; every apiGet/apiPost/etc. call site
-// reads resolveBaseUrl() -> this binding fresh on every request (never
-// captured at import time), so overriding it here is enough - no other
-// call site needs to change.
-export let EXE_BASE_URL = import.meta.env["VITE_EXE_BASE_URL"] ?? "http://localhost:4100";
+// Empty = same origin as the page (the build the exe serves). See
+// checkLocalServerHealth for why this never changes at runtime.
+export const EXE_BASE_URL: string = import.meta.env["VITE_EXE_BASE_URL"] ?? "http://localhost:4100";
 
 // crypto.randomUUID() only exists in secure contexts (HTTPS, or the page's
 // own localhost) - undefined (throws "not a function") on a plain-HTTP LAN
@@ -99,25 +93,6 @@ export function getStoredAuthToken(): string | null {
 function authHeader(): Record<string, string> {
   const token = getStoredAuthToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-const LAST_KNOWN_GOOD_KEY = "billerpe.exeBaseUrl";
-// bonjour-service (services/lanDiscovery.js) advertises the EXE under this
-// exact fixed hostname regardless of the PC's own OS hostname, which varies
-// per install and isn't knowable from the client side ahead of time. mDNS
-// is link-local multicast - it never crosses a router - so every
-// restaurant's own isolated LAN can safely reuse the same fixed name with
-// no cross-site collision risk.
-const MDNS_HOSTNAME_URL = "http://billerpe-local-server.local:4100";
-
-function setExeBaseUrl(url: string) {
-  EXE_BASE_URL = url;
-  try {
-    window.localStorage.setItem(LAST_KNOWN_GOOD_KEY, url);
-  } catch {
-    // localStorage can throw (private browsing, storage disabled) - losing
-    // the cache just means next time skips straight to mDNS, not a failure.
-  }
 }
 
 async function pingHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
@@ -455,6 +430,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/printKotDirect" },
     { method: "POST", test: (p) => p === "/printInvoiceDirect" },
     { method: "POST", test: (p) => p === "/testPrintDirect" },
+    { method: "POST", test: (p) => p === "/userPermissionOverrides" },
   ];
 
 function resolveBaseUrl(method: "GET" | "POST" | "PUT" | "DELETE", path: string): string {
@@ -462,69 +438,17 @@ function resolveBaseUrl(method: "GET" | "POST" | "PUT" | "DELETE", path: string)
   return isExeRoute ? EXE_BASE_URL : API_BASE_URL;
 }
 
-// Architecture memo, Phase C: distinguishes "the EXE process itself isn't
-// reachable" from "reachable but returned a real error" - previously a raw
-// fetch failure (connection refused, since nothing was listening) was a
-// plain TypeError, not an ApiError, so login.tsx's `err instanceof ApiError`
-// checks fell through to a generic "failed" toast indistinguishable from a
-// wrong password. Deliberately a plain, unauthenticated hit on /health (see
-// billerpe-local-exe/server.js) - no cookie, safe to call before any
-// registration or login exists, which is exactly when this matters most.
-//
-// Also where LAN discovery actually happens: 1) the address that worked
-// last time (fast path - nothing changed on most visits), 2) the fixed
-// mDNS hostname (handles a DHCP lease change - the whole reason a pure
-// hardcoded IP/last-known-good cache alone isn't enough), 3) whatever
-// EXE_BASE_URL is already set to (the original build-time default) as a
-// last resort, so a fresh browser profile with nothing cached yet and no
-// mDNS resolution available still gets exactly today's behavior, not a
-// worse one.
-//
-// The mDNS step gets a longer timeout than the other two, deliberately -
-// verified live that a COLD mDNS lookup (the client's OS hasn't resolved
-// this hostname recently) genuinely needs real time for the multicast
-// query/response round trip, and can still fail outright on some Windows
-// network configurations even when the underlying server is perfectly
-// reachable (confirmed: a direct IP hit succeeded on the same machine at
-// the same time a `.local` lookup timed out). That's exactly why
-// setManualServerAddress below exists as a real, necessary fallback - not
-// a hypothetical one - for whichever restaurant PCs hit that gap.
+// Where this page's exe is - one rule, no discovery:
+//  - built into the exe (empty base URL): the page's own address, on the
+//    server PC and on every other device that opened the server's address;
+//  - the public website: this PC's own localhost, the only plain-http address
+//    an https page is allowed to reach.
+// Discovery by the shared network name billerpe-local-server.local was
+// removed: with two exes on one network (an office, a test PC next to a live
+// till) it reached the WRONG restaurant's server - confirmed live, a login
+// token was sent to another exe, refused, and the user signed out.
 export async function checkLocalServerHealth(timeoutMs = 3000): Promise<boolean> {
-  let cached: string | null = null;
-  try {
-    cached = window.localStorage.getItem(LAST_KNOWN_GOOD_KEY);
-  } catch {
-    // ignore - falls through to mDNS/default below
-  }
-
-  if (cached && (await pingHealth(cached, timeoutMs))) {
-    EXE_BASE_URL = cached;
-    return true;
-  }
-  if (await pingHealth(MDNS_HOSTNAME_URL, Math.max(timeoutMs, 5000))) {
-    setExeBaseUrl(MDNS_HOSTNAME_URL);
-    return true;
-  }
-  if (await pingHealth(EXE_BASE_URL, timeoutMs)) {
-    setExeBaseUrl(EXE_BASE_URL);
-    return true;
-  }
-  return false;
-}
-
-// Last-resort manual override for whichever restaurant PCs land in the real
-// gap above - a technician types the server PC's LAN IP once (shown on
-// that PC's own dashboard - see billerpe-local-exe/controller/dashboard.js),
-// and it's cached as the new last-known-good from then on, so this is a
-// true last resort, not something anyone re-enters "every time the
-// network changes" (the architecture's own stated requirement) - only the
-// rare case where BOTH the cache and mDNS have already failed.
-export async function setManualServerAddress(hostOrUrl: string): Promise<boolean> {
-  const url = /^https?:\/\//.test(hostOrUrl) ? hostOrUrl : `http://${hostOrUrl}`;
-  const normalized = url.replace(/\/$/, "");
-  if (!(await pingHealth(normalized, 4000))) return false;
-  setExeBaseUrl(normalized);
-  return true;
+  return pingHealth(EXE_BASE_URL, timeoutMs);
 }
 
 // login.tsx's boot-time reconciliation for a real production failure mode:
@@ -545,6 +469,7 @@ export async function getLocalServerIdentity(): Promise<{
   registered: boolean;
   deviceId: string;
   hotelName?: string;
+  lanUrls: string[];
 } | null> {
   if (!(await checkLocalServerHealth())) return null;
   try {
@@ -553,10 +478,12 @@ export async function getLocalServerIdentity(): Promise<{
       registered?: unknown;
       deviceId?: unknown;
       hotelName?: unknown;
+      lanUrls?: unknown;
     };
     return {
       registered: body.registered === true,
       deviceId: String(body.deviceId ?? ""),
+      lanUrls: Array.isArray(body.lanUrls) ? body.lanUrls.map(String) : [],
       ...(typeof body.hotelName === "string" ? { hotelName: body.hotelName } : {}),
     };
   } catch {
@@ -744,10 +671,85 @@ async function trackPending<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Exe availability and registration, shared by the whole app.
+//
+// The exe is the only authority for "is this PC registered" - never this
+// browser's storage - so every device and every page load asks it. When it
+// can't be reached, the app shows ONE blocking screen (ServerGate) instead of
+// a "could not load X" toast per request, and nothing half-loaded or stale
+// is left on screen as if it were real.
+// ---------------------------------------------------------------------------
+export type ServerState =
+  | { status: "checking" }
+  | { status: "unreachable" }
+  | { status: "reachable"; registered: boolean; hotelName: string | null; lanUrls: string[] };
+
+let serverState: ServerState = { status: "checking" };
+const serverStateListeners = new Set<() => void>();
+
+function setServerState(next: ServerState) {
+  serverState = next;
+  serverStateListeners.forEach((l) => l());
+}
+
+export function getServerState(): ServerState {
+  return serverState;
+}
+
+export function subscribeServerState(listener: () => void): () => void {
+  serverStateListeners.add(listener);
+  return () => serverStateListeners.delete(listener);
+}
+
+export async function refreshServerState(): Promise<ServerState> {
+  const identity = await getLocalServerIdentity();
+  setServerState(
+    identity
+      ? {
+          status: "reachable",
+          registered: identity.registered,
+          hotelName: identity.hotelName ?? null,
+          lanUrls: identity.lanUrls,
+        }
+      : { status: "unreachable" },
+  );
+  return serverState;
+}
+
+export function markServerUnreachable() {
+  if (serverState.status !== "unreachable") setServerState({ status: "unreachable" });
+}
+
+// A request to the exe that fails at the network level means the exe is
+// down: flag it (ServerGate takes over the screen) and never settle, so the
+// caller's own catch/toast doesn't fire on top. Cloud calls (public customer
+// pages only) still reject normally.
+async function guardedFetch(base: string, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch (err) {
+    if (base !== API_BASE_URL) {
+      markServerUnreachable();
+      return new Promise<Response>(() => {});
+    }
+    throw err;
+  }
+}
+
+// The exe refuses reads a role isn't allowed (billerpe-local-exe/constant/
+// routePermissions.js). The screens only load what the user can see, so this
+// is a backstop: stay quiet rather than toast "no permission" at someone who
+// never asked for that data.
+function forbiddenRead<T>(path: string): Promise<T> {
+  console.warn(`[api] ${path} is not permitted for this user - skipped`);
+  return new Promise<T>(() => {});
+}
+
 async function apiGet<T>(path: string): Promise<T> {
   return trackPending(async () => {
     const base = resolveBaseUrl("GET", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "GET",
       credentials: "include",
       headers: { ...authHeader() },
@@ -757,6 +759,7 @@ async function apiGet<T>(path: string): Promise<T> {
       if (redirect) return redirect;
       throw outOfScopeUnauthorized();
     }
+    if (res.status === 403) return forbiddenRead<T>(path);
     const json = (await res.json().catch(() => null)) as ApiEnvelope<T> | null;
     return unwrap(json);
   });
@@ -765,7 +768,7 @@ async function apiGet<T>(path: string): Promise<T> {
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return trackPending(async () => {
     const base = resolveBaseUrl("POST", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json", ...authHeader() },
@@ -790,7 +793,7 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
 async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
   return trackPending(async () => {
     const base = resolveBaseUrl("POST", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "POST",
       credentials: "include",
       headers: { ...authHeader() },
@@ -818,7 +821,7 @@ async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
 async function apiGetRaw<T>(path: string): Promise<T | null> {
   return trackPending(async () => {
     const base = resolveBaseUrl("GET", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "GET",
       credentials: "include",
       headers: { ...authHeader() },
@@ -834,7 +837,7 @@ async function apiGetRaw<T>(path: string): Promise<T | null> {
 async function apiPostRaw<T>(path: string, body: unknown): Promise<T | null> {
   return trackPending(async () => {
     const base = resolveBaseUrl("POST", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json", ...authHeader() },
@@ -851,7 +854,7 @@ async function apiPostRaw<T>(path: string, body: unknown): Promise<T | null> {
 async function apiPut<T>(path: string, body: unknown): Promise<T> {
   return trackPending(async () => {
     const base = resolveBaseUrl("PUT", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "PUT",
       credentials: "include",
       headers: { "Content-Type": "application/json", ...authHeader() },
@@ -871,7 +874,7 @@ async function apiPut<T>(path: string, body: unknown): Promise<T> {
 async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
   return trackPending(async () => {
     const base = resolveBaseUrl("DELETE", path);
-    const res = await fetch(`${base}${path}`, {
+    const res = await guardedFetch(base, `${base}${path}`, {
       method: "DELETE",
       credentials: "include",
       ...(body !== undefined
@@ -1268,12 +1271,16 @@ export const tableApi = {
     endNo: number;
     table_catag_id: number;
     type: "T" | "R";
+    prefix?: string;
+    capacity?: number;
   }) =>
     apiPost<{ message?: string }>("/table", {
       startNo: String(params.startNo),
       endNo: String(params.endNo),
       table_catag_id: String(params.table_catag_id),
       type: params.type,
+      prefix: params.prefix ?? "",
+      ...(params.capacity ? { capacity: params.capacity } : {}),
     }),
 
   editTable: (params: {
@@ -1577,6 +1584,13 @@ export type RawHotelUser = {
   pin: string | null; // bcrypt hash, never the real PIN
   role_mst?: { role_cd: number; role_name: string };
   hms_user_accesses?: RawUserAccess[];
+  /** Per-user exceptions to the role's permissions, stored and enforced by the exe. */
+  permission_overrides?: RawPermissionOverrides | string | null;
+};
+
+export type RawPermissionOverrides = {
+  modules?: Record<string, Partial<Record<"view" | "create" | "edit" | "delete", boolean>>>;
+  special?: Record<string, boolean>;
 };
 
 type UserPayload = {
@@ -1615,6 +1629,9 @@ export const userApi = {
   createUser: (params: UserPayload) => apiPost<{ message?: string }>("/user", params),
   editUser: (params: UserPayload & { id: number }) =>
     apiPost<{ message?: string }>("/userUpdate", params),
+  // null resets the user to their role's defaults.
+  setPermissionOverrides: (id: number, overrides: RawPermissionOverrides | null) =>
+    apiPost<{ message?: string }>("/userPermissionOverrides", { id, overrides }),
 };
 
 export type KotCartItem = {

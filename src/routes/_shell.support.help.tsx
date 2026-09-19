@@ -9,7 +9,8 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
-import { RESTAURANT, faqs } from "@/mock/data";
+import { faqs } from "@/mock/data";
+import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/support/help")({
   head: () => ({
@@ -24,12 +25,13 @@ export const Route = createFileRoute("/_shell/support/help")({
 });
 
 function HelpPage() {
+  const store = useStore();
   return (
     <Page>
       <PageHeader
         icon={CircleHelp}
         title="Help & Support"
-        description={`Support for ${RESTAURANT.name} — available during service hours, every day.`}
+        description={`Support for ${(store.restaurant?.name ?? store.serverHotelName ?? "")} — available during service hours, every day.`}
         actions={
           <Button asChild>
             <Link to="/support/raise-ticket">
