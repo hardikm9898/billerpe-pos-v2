@@ -1,0 +1,1 @@
+import{pt as e}from"./api-JyAu5JcP.js";import{x as t}from"./index-CcHN7LOD.js";e();function n(e){let n=t();return{view:n.can(e,`view`),create:n.can(e,`create`),edit:n.can(e,`edit`),delete:n.can(e,`delete`)}}var r=`You can view this but not change it. Ask the owner for edit permission.`;export{n,r as t};

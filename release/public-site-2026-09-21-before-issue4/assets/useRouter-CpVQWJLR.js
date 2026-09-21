@@ -1,0 +1,1 @@
+import{mt as e,vt as t}from"./api-JyAu5JcP.js";var n=t(e(),1),r=n.createContext(null);function i(e){return n.useContext(r)}export{r as n,i as t};

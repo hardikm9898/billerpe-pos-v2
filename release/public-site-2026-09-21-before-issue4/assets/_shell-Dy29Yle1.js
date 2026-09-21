@@ -1,0 +1,1 @@
+import{pt as e}from"./api-JyAu5JcP.js";import{n as t}from"./Match-CFzisL1f.js";import{t as n}from"./AppShell-DyCfllw0.js";var r=e();function i(){return(0,r.jsx)(n,{children:(0,r.jsx)(t,{})})}export{i as component};
