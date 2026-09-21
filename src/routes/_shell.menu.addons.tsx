@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Pencil, Plus, PlusCircle, Trash2 } from "lucide-react";
@@ -58,6 +59,12 @@ function MenuAddonsPage() {
   const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<AddonGroup | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
@@ -180,12 +187,14 @@ function MenuAddonsPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Group name</Label>
+                <Label required>Group name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   placeholder="e.g. Extra Toppings"
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5">
@@ -216,16 +225,24 @@ function MenuAddonsPage() {
                 <div className="space-y-1.5">
                   <Label>Max</Label>
                   <Input
+                    {...form.fieldProps("max")}
                     type="number"
+                    min={0}
                     value={draft.max}
                     onChange={(e) => setDraft({ ...draft, max: Number(e.target.value || 0) })}
                   />
+                  <FieldError message={form.error("max")} />
                 </div>
               </div>
 
-              <div className="rounded-xl border border-border p-3">
+              <div
+                className={`rounded-xl border p-3 ${form.error("options") ? "border-destructive" : "border-border"}`}
+              >
+                <FieldError message={form.error("options")} />
                 <div className="flex items-center justify-between">
-                  <p className="text-sm font-medium">Options</p>
+                  <p className="text-sm font-medium" data-field="options" tabIndex={-1}>
+                    Options<span className="ml-0.5 text-destructive">*</span>
+                  </p>
                   <Button
                     size="sm"
                     variant="outline"
@@ -291,15 +308,35 @@ function MenuAddonsPage() {
             </Button>
             <Button
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={
-                !(draft?.id ? access.edit : access.create) ||
-                !draft?.name.trim() ||
-                !draft.options.length
-              }
-              onClick={() => {
+              disabled={!(draft?.id ? access.edit : access.create)}
+              onClick={async () => {
                 if (!draft) return;
-                store.upsertAddonGroup(draft);
-                setDraft(null);
+                const ok = form.check([
+                  { key: "name", label: "Group name", value: draft.name },
+                  {
+                    key: "options",
+                    label: "Options",
+                    value: draft.options,
+                    valid: (v) =>
+                      Array.isArray(v) &&
+                      v.length > 0 &&
+                      v.every(
+                        (o: { name: string; price: number }) => o.name.trim() && o.price >= 0,
+                      ),
+                    message: draft.options.length
+                      ? "Every option needs a name and a price of ₹0 or more"
+                      : "Add at least one option",
+                  },
+                  {
+                    key: "max",
+                    label: "Max",
+                    value: draft.max,
+                    valid: (v) => typeof v === "number" && v >= draft.min,
+                    message: "Max can't be less than Min",
+                  },
+                ]);
+                if (!ok) return;
+                if (await store.upsertAddonGroup(draft)) setDraft(null);
               }}
             >
               Save group

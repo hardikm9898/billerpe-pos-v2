@@ -1,6 +1,7 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { ChefHat, CookingPot, Factory, Plus, Trash2, Utensils } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 
 import {
   DataTable,
@@ -222,6 +223,7 @@ function RecipeEditor({
 }) {
   const access = useAccess("stock-recipes");
   const store = useStore();
+  const form = useFormCheck();
   const groups = draft.groups ?? [];
 
   const setGroup = (key: string, patch: Partial<RecipeGroup>) =>
@@ -260,15 +262,19 @@ function RecipeEditor({
         </SheetHeader>
         <div className="space-y-4 px-4 pb-24">
           <div className="grid gap-3 sm:grid-cols-2">
-            <FieldRow label="Menu item">
+            <FieldRow label="Menu item" required error={form.error("menuItemId")}>
               <Select
                 value={draft.menuItemId ?? ""}
                 onValueChange={(v) => {
                   const mi = store.menuItems.find((m) => m.id === v);
                   setDraft({ ...draft, menuItemId: v, itemName: mi?.name ?? draft.itemName });
+                  form.clearError("menuItemId");
                 }}
               >
-                <SelectTrigger>
+                <SelectTrigger
+                  data-field="menuItemId"
+                  aria-invalid={!!form.error("menuItemId") || undefined}
+                >
                   <SelectValue placeholder="Link a dish" />
                 </SelectTrigger>
                 <SelectContent>
@@ -280,14 +286,19 @@ function RecipeEditor({
                 </SelectContent>
               </Select>
             </FieldRow>
-            <FieldRow label="Yield">
+            <FieldRow label="Yield" required error={form.error("yieldQty")}>
               <div className="flex gap-2">
                 <Input
+                  {...form.fieldProps("yieldQty")}
+                  aria-label="Yield quantity"
                   type="number"
+                  min={0}
                   value={draft.yieldQty}
                   onChange={(e) => setDraft({ ...draft, yieldQty: Number(e.target.value || 1) })}
                 />
                 <Input
+                  aria-label="Yield unit"
+                  placeholder="e.g. plate"
                   value={draft.yieldUnit}
                   onChange={(e) => setDraft({ ...draft, yieldUnit: e.target.value })}
                 />
@@ -303,6 +314,7 @@ function RecipeEditor({
                     {g.kind}
                   </span>
                   <Input
+                    aria-label="Group name"
                     value={g.label}
                     onChange={(e) => setGroup(g.key, { label: e.target.value })}
                     className="h-8 w-48"
@@ -310,7 +322,15 @@ function RecipeEditor({
                 </div>
                 <div className="flex items-center gap-2">
                   <Money value={store.recipeGroupCost(g)} className="text-sm font-semibold" />
-                  <Button size="sm" variant="outline" onClick={() => addLine(g.key)}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-field={g.kind === "base" ? "base" : undefined}
+                    onClick={() => {
+                      addLine(g.key);
+                      if (g.kind === "base") form.clearError("base");
+                    }}
+                  >
                     <Plus className="size-4" /> Ingredient
                   </Button>
                   {g.kind === "base" ? null : (
@@ -345,7 +365,7 @@ function RecipeEditor({
                         });
                       }}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger aria-label="Ingredient type">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -355,14 +375,19 @@ function RecipeEditor({
                     </Select>
                     <Select
                       value={l.refId}
-                      onValueChange={(v) =>
+                      onValueChange={(v) => {
                         setGroup(g.key, {
                           lines: g.lines.map((x, j) => (j === i ? { ...x, refId: v } : x)),
-                        })
-                      }
+                        });
+                        form.clearError(`ref-${g.key}-${i}`);
+                      }}
                     >
-                      <SelectTrigger>
-                        <SelectValue />
+                      <SelectTrigger
+                        aria-label="Ingredient"
+                        data-field={`ref-${g.key}-${i}`}
+                        aria-invalid={!!form.error(`ref-${g.key}-${i}`) || undefined}
+                      >
+                        <SelectValue placeholder="Choose ingredient" />
                       </SelectTrigger>
                       <SelectContent>
                         {(l.type === "raw" ? store.rawMaterials : store.semiFinished).map((o) => (
@@ -374,7 +399,10 @@ function RecipeEditor({
                     </Select>
                     <div className="flex items-center gap-1">
                       <Input
+                        {...form.fieldProps(`qty-${g.key}-${i}`)}
+                        aria-label="Quantity used"
                         type="number"
+                        min={0}
                         step="0.001"
                         value={l.qty}
                         onChange={(e) =>
@@ -390,12 +418,22 @@ function RecipeEditor({
                     <Button
                       size="sm"
                       variant="ghost"
+                      aria-label="Remove ingredient"
+                      title="Remove ingredient"
                       onClick={() => setGroup(g.key, { lines: g.lines.filter((_, j) => j !== i) })}
                     >
                       <Trash2 className="size-4" />
                     </Button>
+                    {form.error(`ref-${g.key}-${i}`) || form.error(`qty-${g.key}-${i}`) ? (
+                      <p className="text-xs text-destructive sm:col-span-4">
+                        {form.error(`ref-${g.key}-${i}`) ?? form.error(`qty-${g.key}-${i}`)}
+                      </p>
+                    ) : null}
                   </div>
                 ))}
+                {g.kind === "base" && form.error("base") ? (
+                  <p className="text-xs text-destructive">{form.error("base")}</p>
+                ) : null}
                 {g.lines.length ? null : (
                   <p className="py-2 text-center text-xs text-muted-foreground">
                     No ingredients in this group yet.
@@ -472,15 +510,60 @@ function RecipeEditor({
             disabled={!(draft?.id ? access.edit : access.create)}
             title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
             className="flex-1"
-            onClick={() => {
+            onClick={async () => {
               const base = (draft.groups ?? []).find((g) => g.kind === "base");
-              store.upsertRecipe({
+              const valid = form.check([
+                {
+                  key: "menuItemId",
+                  label: "Menu item",
+                  value: draft.menuItemId,
+                  message: "Choose the dish this recipe is for",
+                },
+                {
+                  key: "yieldQty",
+                  label: "Yield",
+                  value: draft.yieldQty,
+                  valid: (v) => typeof v === "number" && v > 0,
+                  message: "Yield must be more than 0",
+                },
+                {
+                  key: "base",
+                  label: "Ingredients",
+                  value: base?.lines ?? [],
+                  message: "Add at least one ingredient to the base recipe",
+                },
+                ...groups.flatMap((g) =>
+                  g.lines.flatMap((l, i) => {
+                    const known = (l.type === "raw" ? store.rawMaterials : store.semiFinished).some(
+                      (o) => o.id === l.refId,
+                    );
+                    return [
+                      {
+                        key: `ref-${g.key}-${i}`,
+                        label: `${g.label} ingredient ${i + 1}`,
+                        value: known,
+                        valid: (v: unknown) => v === true,
+                        message: `${g.label}, line ${i + 1}: choose an ingredient`,
+                      },
+                      {
+                        key: `qty-${g.key}-${i}`,
+                        label: `${g.label} quantity ${i + 1}`,
+                        value: l.qty,
+                        valid: (v: unknown) => typeof v === "number" && v > 0,
+                        message: `${g.label}, line ${i + 1}: quantity must be more than 0`,
+                      },
+                    ];
+                  }),
+                ),
+              ]);
+              if (!valid) return;
+              const ok = await store.upsertRecipe({
                 ...draft,
                 components: (base?.lines ?? [])
                   .filter((l) => l.type === "raw")
                   .map((l) => ({ materialId: l.refId, qty: l.qty })),
               });
-              setDraft(null);
+              if (ok) setDraft(null);
             }}
           >
             Save recipe
@@ -499,6 +582,12 @@ export function ProductionScreen() {
   const [runFor, setRunFor] = useState<string | null>(null);
   const [qty, setQty] = useState(0);
   const [notes, setNotes] = useState("");
+  const prodForm = useFormCheck();
+  const prodFormOpen = !!runFor;
+  const prodFormReset = prodForm.reset;
+  useEffect(() => {
+    if (!prodFormOpen) prodFormReset();
+  }, [prodFormOpen, prodFormReset]);
 
   const sf = store.semiFinished.find((s) => s.id === runFor);
   const unitCost = sf ? store.semiUnitCost(sf.id) : 0;
@@ -640,9 +729,15 @@ export function ProductionScreen() {
           </DialogHeader>
           {sf ? (
             <div className="space-y-3">
-              <FieldRow label={`Quantity produced (${sf.unit})`}>
+              <FieldRow
+                label={`Quantity produced (${sf.unit})`}
+                required
+                error={prodForm.error("qty")}
+              >
                 <Input
+                  {...prodForm.fieldProps("qty")}
                   type="number"
+                  min={0}
                   value={qty}
                   onChange={(e) => setQty(Number(e.target.value || 0))}
                 />
@@ -686,9 +781,19 @@ export function ProductionScreen() {
             </Button>
             <Button
               hidden={!access.create}
-              onClick={() => {
-                if (sf && qty > 0) store.recordProduction(sf.id, qty, notes);
-                setRunFor(null);
+              onClick={async () => {
+                if (!sf) return;
+                const valid = prodForm.check([
+                  {
+                    key: "qty",
+                    label: "Quantity produced",
+                    value: qty,
+                    valid: (v) => typeof v === "number" && v > 0,
+                    message: "Quantity produced must be more than 0",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.recordProduction(sf.id, qty, notes)) setRunFor(null);
               }}
             >
               Record production

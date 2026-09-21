@@ -1,3 +1,4 @@
+import { FieldError, isMobile10, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { AlarmClock, Phone, Trash2, UserCheck, UserX, Users } from "lucide-react";
@@ -81,6 +82,12 @@ function QueuePage() {
   const access = useAccess("queue");
   const store = useStore();
   const [addDraft, setAddDraft] = useState<AddDraft | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!addDraft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [thresholdMinutes, setThresholdMinutes] = useState(DEFAULT_THRESHOLD_MINUTES);
   const [fromTime, setFromTime] = useState("");
@@ -116,8 +123,20 @@ function QueuePage() {
 
   const submitAdd = async () => {
     if (!addDraft) return;
-    await store.addToQueue(addDraft.name.trim(), addDraft.mobile.trim(), addDraft.partySize);
-    setAddDraft(null);
+    const ok = form.check([
+      { key: "name", label: "Guest name", value: addDraft.name },
+      {
+        key: "mobile",
+        label: "Mobile number",
+        value: addDraft.mobile,
+        valid: isMobile10,
+        message: "Enter a 10-digit mobile number",
+      },
+    ]);
+    if (!ok) return;
+    if (await store.addToQueue(addDraft.name.trim(), addDraft.mobile.trim(), addDraft.partySize)) {
+      setAddDraft(null);
+    }
   };
 
   return (
@@ -339,22 +358,33 @@ function QueuePage() {
           {addDraft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Guest name</Label>
+                <Label required>Guest name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={addDraft.name}
                   onChange={(e) => setAddDraft({ ...addDraft, name: e.target.value })}
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Mobile number</Label>
+                  <Label required>Mobile number</Label>
                   <Input
+                    {...form.fieldProps("mobile")}
+                    inputMode="numeric"
+                    placeholder="10-digit mobile"
                     value={addDraft.mobile}
-                    onChange={(e) => setAddDraft({ ...addDraft, mobile: e.target.value })}
+                    onChange={(e) =>
+                      setAddDraft({
+                        ...addDraft,
+                        mobile: e.target.value.replace(/\D/g, "").slice(0, 10),
+                      })
+                    }
                   />
+                  <FieldError message={form.error("mobile")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Party size</Label>
+                  <Label required>Party size</Label>
                   <Input
                     type="number"
                     min={1}
@@ -371,12 +401,7 @@ function QueuePage() {
             <Button variant="outline" onClick={() => setAddDraft(null)}>
               Cancel
             </Button>
-            <Button
-              disabled={!addDraft?.name.trim() || !addDraft?.mobile.trim()}
-              onClick={() => void submitAdd()}
-            >
-              Add to queue
-            </Button>
+            <Button onClick={() => void submitAdd()}>Add to queue</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

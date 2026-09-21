@@ -290,7 +290,7 @@ export function DuePaymentSection() {
           ) : null}
           <DialogFooter>
             <Button
-              onClick={() => {
+              onClick={async () => {
                 if (!settleTarget) return;
                 const balance =
                   Math.round((settleTarget.amount - splitPaid(settleSplits)) * 100) / 100;
@@ -300,7 +300,7 @@ export function DuePaymentSection() {
                   });
                   return;
                 }
-                store.settleDueBills(settleTarget.ids, settleSplits);
+                if (!(await store.settleDueBills(settleTarget.ids, settleSplits))) return;
                 setSelected([]);
                 setSettleTarget(null);
               }}

@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Plus, Search, Tags, Trash2 } from "lucide-react";
@@ -53,6 +54,12 @@ function ExpenseHeadsPage() {
   const access = useAccess("expense");
   const store = useStore();
   const [draft, setDraft] = useState<ExpenseHead | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [q, setQ] = useState("");
@@ -192,11 +199,13 @@ function ExpenseHeadsPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Head name</Label>
+                <Label required>Head name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="space-y-1.5">
                 <Label>Type</Label>
@@ -254,11 +263,10 @@ function ExpenseHeadsPage() {
               </Button>
               <Button
                 title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-                disabled={
-                  !(draft?.id ? access.edit : access.create) || !draft?.name.trim() || saving
-                }
+                disabled={!(draft?.id ? access.edit : access.create) || saving}
                 onClick={() => {
                   if (!draft) return;
+                  if (!form.check([{ key: "name", label: "Head name", value: draft.name }])) return;
                   setSaving(true);
                   void store
                     .upsertExpenseHead(draft)

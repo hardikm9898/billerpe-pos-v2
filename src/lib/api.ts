@@ -260,6 +260,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "GET", test: (p) => p.startsWith("/customer/getAll") },
     { method: "POST", test: (p) => p === "/customer/create" },
     { method: "PUT", test: (p) => p === "/customer/update" },
+    // Support tickets - the exe forwards them to the cloud itself.
+    { method: "POST", test: (p) => p === "/support/ticket" },
+    { method: "GET", test: (p) => p.startsWith("/support/tickets") },
     { method: "GET", test: (p) => p.startsWith("/customer/lastOrder") },
     { method: "GET", test: (p) => p === "/offlinePrinterSetting" },
     { method: "POST", test: (p) => p === "/setPrinter" },
@@ -2640,6 +2643,25 @@ export type RawCustomer = {
 // count or last-visit date to load from here - confirmed by reading the
 // query, nothing this app's Customer type wants for those two fields
 // exists in the response.
+// Support tickets - the exe forwards them to the BillerPe cloud, where the
+// sales team handles them (controller/support.js in billerpe-local-exe).
+export interface RawSupportTicket {
+  id: number;
+  issue: string | null;
+  ticket_type: string;
+  priority: "low" | "medium" | "high";
+  status: "new" | "open" | "close";
+  createdAt: string;
+}
+export const supportApi = {
+  list: (page = 1) =>
+    apiGet<{ tickets: RawSupportTicket[]; page: number; totalRecords: number }>(
+      `/support/tickets?page=${page}`,
+    ),
+  raise: (params: { subject: string; details: string; category: string; priority: string }) =>
+    apiPost<{ message?: string; ticket?: RawSupportTicket }>("/support/ticket", params),
+};
+
 export const customerApi = {
   // limit set high rather than wired to true pagination - this loads "the
   // first N customers" once and the existing local name/phone search runs
@@ -3360,9 +3382,7 @@ export const semiFinishedApi = {
     return Array.isArray(r) ? r : (r?.items ?? []);
   },
   getSingle: async (id: number) => {
-    const r = await apiGet<RawSFIDetail | { item: RawSFIDetail }>(
-      `/semiFinished/single?id=${id}`,
-    );
+    const r = await apiGet<RawSFIDetail | { item: RawSFIDetail }>(`/semiFinished/single?id=${id}`);
     const item = r && "item" in r ? r.item : (r as RawSFIDetail);
     return { ...item, recipes: item?.recipes ?? [] };
   },

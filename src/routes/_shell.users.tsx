@@ -1,7 +1,8 @@
+import { FieldError, isEmailOrEmpty, isMobile10, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { ChevronDown, KeySquare, Plus, RotateCcw, Users } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 import { useHasPendingRequests } from "@/components/app/GlobalLoadingBar";
 import { DataTable, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
@@ -224,6 +225,12 @@ function UsersPage() {
   const access = useAccess("users");
   const store = useStore();
   const [draft, setDraft] = useState<User | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const [resetPassword, setResetPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showOverrides, setShowOverrides] = useState(false);
@@ -428,29 +435,39 @@ function UsersPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Full name</Label>
+                <Label required>Full name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Mobile</Label>
+                  <Label required>Mobile</Label>
                   <Input
+                    {...form.fieldProps("mobile")}
+                    inputMode="numeric"
+                    placeholder="10-digit mobile - used to log in"
                     value={draft.mobile}
-                    onChange={(e) => setDraft({ ...draft, mobile: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, mobile: e.target.value.replace(/\D/g, "").slice(0, 10) })
+                    }
                   />
+                  <FieldError message={form.error("mobile")} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>{draft.id ? "Reset PIN" : "Login PIN"}</Label>
                   <PasswordInput
+                    {...form.fieldProps("pin")}
                     value={draft.pin}
                     maxLength={6}
                     disabled={!canEditUsers}
                     placeholder={draft.id ? "Leave blank to keep current" : undefined}
                     onChange={(e) => setDraft({ ...draft, pin: e.target.value.replace(/\D/g, "") })}
                   />
+                  <FieldError message={form.error("pin")} />
                 </div>
               </div>
               {draft.id ? (
@@ -458,6 +475,7 @@ function UsersPage() {
                   <div className="space-y-1.5">
                     <Label>Reset password</Label>
                     <PasswordInput
+                      {...form.fieldProps("password")}
                       value={resetPassword}
                       disabled={!canEditUsers}
                       placeholder="Leave blank to keep current"
@@ -468,6 +486,7 @@ function UsersPage() {
                     <div className="space-y-1.5">
                       <Label>Re-enter new password</Label>
                       <PasswordInput
+                        {...form.fieldProps("confirm")}
                         value={confirmPassword}
                         disabled={!canEditUsers}
                         onChange={(e) => setConfirmPassword(e.target.value)}
@@ -475,6 +494,7 @@ function UsersPage() {
                     </div>
                   ) : null}
                   <div className="sm:col-span-2">
+                    <FieldError message={form.error("password") ?? form.error("confirm")} />
                     {!canEditUsers ? (
                       <p className="text-xs text-muted-foreground">
                         You don't have permission to reset staff credentials.
@@ -492,18 +512,23 @@ function UsersPage() {
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label>Password</Label>
+                    <Label required>Password</Label>
                     <PasswordInput
+                      {...form.fieldProps("password")}
                       value={resetPassword}
                       onChange={(e) => setResetPassword(e.target.value)}
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label>Re-enter password</Label>
+                    <Label required>Re-enter password</Label>
                     <PasswordInput
+                      {...form.fieldProps("confirm")}
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                     />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <FieldError message={form.error("password") ?? form.error("confirm")} />
                   </div>
                   <p className="text-xs text-muted-foreground sm:col-span-2">
                     {resetPassword && confirmPassword && resetPassword !== confirmPassword
@@ -515,9 +540,13 @@ function UsersPage() {
               <div className="space-y-1.5">
                 <Label>Email</Label>
                 <Input
+                  {...form.fieldProps("email")}
+                  type="email"
+                  placeholder="Optional"
                   value={draft.email}
                   onChange={(e) => setDraft({ ...draft, email: e.target.value })}
                 />
+                <FieldError message={form.error("email")} />
               </div>
               <div className="space-y-1.5">
                 <Label>Role</Label>
@@ -626,17 +655,52 @@ function UsersPage() {
             </Button>
             <Button
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={
-                !(draft?.id ? access.edit : access.create) ||
-                !draft?.name.trim() ||
-                (!draft.id && resetPassword.trim().length < 6) ||
-                (!!resetPassword && resetPassword.trim().length < 6) ||
-                (!!resetPassword && resetPassword !== confirmPassword)
-              }
-              onClick={() => {
+              disabled={!(draft?.id ? access.edit : access.create)}
+              onClick={async () => {
                 if (!draft) return;
-                store.upsertUser(draft, resetPassword.trim() || undefined);
-                setDraft(null);
+                const pw = resetPassword.trim();
+                const ok = form.check([
+                  { key: "name", label: "Full name", value: draft.name },
+                  {
+                    key: "mobile",
+                    label: "Mobile",
+                    value: draft.mobile,
+                    valid: isMobile10,
+                    message: "Enter a 10-digit mobile number",
+                  },
+                  {
+                    key: "pin",
+                    label: "PIN",
+                    value: draft.pin,
+                    valid: (v) => !v || /^\d{4,6}$/.test(String(v)),
+                    message: "PIN must be 4 to 6 digits",
+                  },
+                  {
+                    key: "password",
+                    label: "Password",
+                    value: pw,
+                    valid: (v) => (draft.id ? !v || String(v).length >= 6 : String(v).length >= 6),
+                    message: draft.id
+                      ? "New password must be at least 6 characters"
+                      : "Password must be at least 6 characters",
+                  },
+                  {
+                    key: "confirm",
+                    label: "Re-enter password",
+                    value: confirmPassword,
+                    valid: (v) => !pw || v === resetPassword,
+                    message: "The two passwords don't match",
+                  },
+                  {
+                    key: "email",
+                    label: "Email",
+                    value: draft.email,
+                    valid: isEmailOrEmpty,
+                    message: "Enter a valid email or leave it blank",
+                  },
+                ]);
+                if (!ok) return;
+                if (await store.upsertUser(draft, pw || undefined)) setDraft(null);
               }}
             >
               Save user

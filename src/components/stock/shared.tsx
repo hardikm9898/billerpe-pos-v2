@@ -246,7 +246,7 @@ export function FieldRow({
       </span>
       {children}
       {error ? (
-        <span className="text-[11px] text-destructive">{error}</span>
+        <p className="text-[11px] text-destructive">{error}</p>
       ) : hint ? (
         <span className="text-[11px] text-muted-foreground">{hint}</span>
       ) : null}

@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Download, Plus, Trash2, Wallet2 } from "lucide-react";
@@ -93,6 +94,12 @@ function ExpenseEntriesPage() {
   const access = useAccess("expense");
   const store = useStore();
   const [draft, setDraft] = useState<Expense | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const [draftDateTime, setDraftDateTime] = useState(() => toDatetimeLocalValue(new Date()));
   const [exporting, setExporting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -375,13 +382,19 @@ function ExpenseEntriesPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Expense head</Label>
+                <Label required>Expense head</Label>
                 <Select
                   value={draft.headId}
-                  onValueChange={(v) => setDraft({ ...draft, headId: v })}
+                  onValueChange={(v) => {
+                    setDraft({ ...draft, headId: v });
+                    form.clearError("headId");
+                  }}
                 >
-                  <SelectTrigger>
-                    <SelectValue />
+                  <SelectTrigger
+                    data-field="headId"
+                    aria-invalid={!!form.error("headId") || undefined}
+                  >
+                    <SelectValue placeholder="Choose an expense head" />
                   </SelectTrigger>
                   <SelectContent>
                     {store.expenseHeads
@@ -393,15 +406,19 @@ function ExpenseEntriesPage() {
                       ))}
                   </SelectContent>
                 </Select>
+                <FieldError message={form.error("headId")} />
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Amount (₹)</Label>
+                  <Label required>Amount (₹)</Label>
                   <Input
+                    {...form.fieldProps("amount")}
                     type="number"
+                    min={0}
                     value={draft.amount}
                     onChange={(e) => setDraft({ ...draft, amount: Number(e.target.value) })}
                   />
+                  <FieldError message={form.error("amount")} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Payment mode</Label>
@@ -421,26 +438,28 @@ function ExpenseEntriesPage() {
                 </div>
               </div>
               <div className="space-y-1.5">
-                <Label>Date &amp; time</Label>
+                <Label required>Date &amp; time</Label>
                 <Input
+                  {...form.fieldProps("date")}
                   type="datetime-local"
                   value={draftDateTime}
                   max={nowLocal}
                   onChange={(e) => setDraftDateTime(e.target.value)}
                 />
+                <FieldError message={form.error("date")} />
                 <p className="text-xs text-muted-foreground">
                   Backdate a forgotten entry if needed - a future date isn&apos;t allowed.
                 </p>
               </div>
               <div className="space-y-1.5">
-                <Label>
-                  Note <span className="text-destructive">*</span>
-                </Label>
+                <Label required>Note</Label>
                 <Input
+                  {...form.fieldProps("note")}
                   value={draft.note}
                   onChange={(e) => setDraft({ ...draft, note: e.target.value })}
                   placeholder="What was this for?"
                 />
+                <FieldError message={form.error("note")} />
               </div>
             </div>
           ) : null}
@@ -460,13 +479,7 @@ function ExpenseEntriesPage() {
             </Button>
             <Button
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={
-                !(draft?.id ? access.edit : access.create) ||
-                !draft ||
-                draft.amount <= 0 ||
-                !draft.note.trim() ||
-                saving
-              }
+              disabled={!(draft?.id ? access.edit : access.create) || !draft || saving}
               onClick={() => {
                 if (!draft) return;
                 // Backend rejects a blank reason with one combined "these 5
@@ -474,20 +487,35 @@ function ExpenseEntriesPage() {
                 // validate the specific field here so the user gets a
                 // precise error instead of a dialog that just closes
                 // unhelpfully. Confirmed live as the actual bug report.
-                if (!draft.note.trim()) {
-                  toast.error("Note is required", {
-                    description: "Enter what this expense was for before saving.",
-                  });
-                  return;
-                }
-                if (!draft.headId) {
-                  toast.error("Select an expense head");
-                  return;
-                }
-                if (new Date(draftDateTime).getTime() > Date.now()) {
-                  toast.error("Expense date can't be in the future");
-                  return;
-                }
+                const valid = form.check([
+                  {
+                    key: "headId",
+                    label: "Expense head",
+                    value: draft.headId,
+                    message: "Choose an expense head",
+                  },
+                  {
+                    key: "amount",
+                    label: "Amount",
+                    value: draft.amount,
+                    valid: (v) => typeof v === "number" && v > 0,
+                    message: "Amount must be more than ₹0",
+                  },
+                  {
+                    key: "date",
+                    label: "Date & time",
+                    value: draftDateTime,
+                    valid: (v) => !!v && new Date(String(v)).getTime() <= Date.now(),
+                    message: "Enter a date that isn't in the future",
+                  },
+                  {
+                    key: "note",
+                    label: "Note",
+                    value: draft.note,
+                    message: "Note is required - what was this expense for?",
+                  },
+                ]);
+                if (!valid) return;
                 const isoDate = new Date(draftDateTime).toISOString();
                 const currentDraft = draft;
                 const run = async () => {

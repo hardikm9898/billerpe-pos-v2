@@ -1,6 +1,7 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { createFileRoute } from "@tanstack/react-router";
 import { LifeBuoy, Send } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -23,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { nowStamp } from "@/mock/format";
+import { ApiError, supportApi, type RawSupportTicket } from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/support/raise-ticket")({
@@ -53,46 +54,101 @@ interface Ticket {
 const categories = ["Billing", "Printer", "Sync / Offline", "Stock", "Reports", "Other"];
 const priorities = ["Low", "Normal", "High", "Service blocking"];
 
+const STATUS: Record<RawSupportTicket["status"], Ticket["status"]> = {
+  new: "Pending",
+  open: "Accepted",
+  close: "Completed",
+};
+const PRIORITY: Record<RawSupportTicket["priority"], string> = {
+  low: "Low",
+  medium: "Normal",
+  high: "High",
+};
+
+function toTicket(t: RawSupportTicket): Ticket {
+  const d = new Date(t.createdAt);
+  return {
+    id: `TKT-${t.id}`,
+    subject: (t.issue ?? "").split("\n")[0] || "—",
+    category: t.ticket_type || "Other",
+    priority: PRIORITY[t.priority] ?? "Low",
+    raisedAt: Number.isNaN(d.getTime())
+      ? ""
+      : d.toLocaleString("en-IN", {
+          day: "2-digit",
+          month: "2-digit",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+    status: STATUS[t.status] ?? "Pending",
+  };
+}
+
 function RaiseTicketPage() {
   const store = useStore();
   const [subject, setSubject] = useState("");
   const [category, setCategory] = useState(categories[0] ?? "Billing");
   const [priority, setPriority] = useState("Normal");
   const [details, setDetails] = useState("");
-  const [tickets, setTickets] = useState<Ticket[]>([
-    {
-      id: "TKT-2041",
-      subject: "Beverage counter printer keeps showing paper out",
-      category: "Printer",
-      priority: "High",
-      raisedAt: "17/08/2026 06:40 pm",
-      status: "Accepted",
-    },
-    {
-      id: "TKT-2038",
-      subject: "Two settlements stuck in the sync queue",
-      category: "Sync / Offline",
-      priority: "Normal",
-      raisedAt: "16/08/2026 11:12 am",
-      status: "Completed",
-    },
-  ]);
+  const form = useFormCheck();
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [sending, setSending] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const { tickets: rows } = await supportApi.list();
+      setTickets(rows.map(toTicket));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof ApiError ? err.message : "Couldn't load your tickets");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   const paged = usePagedRows(tickets, 10);
 
-  const submit = () => {
-    const ticket: Ticket = {
-      id: `TKT-${2042 + tickets.length}`,
-      subject: subject.trim(),
-      category,
-      priority,
-      raisedAt: nowStamp(),
-      status: "Pending",
-    };
-    setTickets([ticket, ...tickets]);
-    setSubject("");
-    setDetails("");
-    toast.success("Ticket raised", { description: `${ticket.id} · our team will call you back.` });
+  const submit = async () => {
+    const valid = form.check([
+      { key: "subject", label: "Subject", value: subject },
+      {
+        key: "details",
+        label: "What happened?",
+        value: details,
+        message: "Describe what happened so support can help",
+      },
+    ]);
+    if (!valid) return;
+    setSending(true);
+    try {
+      const res = await supportApi.raise({
+        subject: subject.trim(),
+        details: details.trim(),
+        category,
+        priority,
+      });
+      setSubject("");
+      setDetails("");
+      toast.success("Ticket raised", {
+        description: `${res.ticket ? `TKT-${res.ticket.id}` : "Your ticket"} · the BillerPe team will call you back.`,
+      });
+      void load();
+    } catch (err) {
+      // The form keeps what was typed so it can be sent again.
+      toast.error("Ticket not sent", {
+        description:
+          err instanceof ApiError ? err.message : "Check the internet connection and try again.",
+      });
+    } finally {
+      setSending(false);
+    }
   };
 
   return (
@@ -106,16 +162,18 @@ function RaiseTicketPage() {
       <SectionCard title="New ticket" bodyClassName="p-3 sm:p-4">
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label>Subject</Label>
+            <Label required>Subject</Label>
             <Input
+              {...form.fieldProps("subject")}
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
               placeholder="Briefly describe the issue"
             />
+            <FieldError message={form.error("subject")} />
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <Label>Category</Label>
+              <Label required>Category</Label>
               <Select value={category} onValueChange={setCategory}>
                 <SelectTrigger>
                   <SelectValue />
@@ -130,7 +188,7 @@ function RaiseTicketPage() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>Priority</Label>
+              <Label required>Priority</Label>
               <Select value={priority} onValueChange={setPriority}>
                 <SelectTrigger>
                   <SelectValue />
@@ -146,30 +204,49 @@ function RaiseTicketPage() {
             </div>
           </div>
           <div className="space-y-1.5">
-            <Label>What happened?</Label>
+            <Label required>What happened?</Label>
             <Textarea
+              {...form.fieldProps("details")}
               value={details}
               onChange={(e) => setDetails(e.target.value)}
               rows={5}
               placeholder="Steps you took, what you expected and what happened instead"
             />
+            <FieldError message={form.error("details")} />
           </div>
           <p className="rounded-lg bg-surface-muted px-3 py-2 text-xs text-muted-foreground">
-            Attached automatically: {store.currentUser.name} · {store.currentUser.role} · Counter
-            POS · connection {store.connection}
+            Sent to the BillerPe support team with your outlet, your name ({store.currentUser.name}
+            ), mobile and role attached. Needs an internet connection.
           </p>
           <div className="flex justify-end">
-            <Button disabled={!subject.trim()} onClick={submit}>
-              <Send className="size-4" /> Submit ticket
+            <Button disabled={sending} onClick={() => void submit()}>
+              <Send className="size-4" /> {sending ? "Sending…" : "Submit ticket"}
             </Button>
           </div>
         </div>
       </SectionCard>
 
       <SectionCard title="Your tickets" bodyClassName="p-3 sm:p-4">
+        {loadError ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-warning-soft px-3 py-2 text-xs text-warning">
+            <span>{loadError}</span>
+            <Button size="sm" variant="outline" onClick={() => void load()}>
+              Try again
+            </Button>
+          </div>
+        ) : null}
         <DataTable
           rows={paged.pageRows}
           keyFn={(t) => t.id}
+          empty={
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              {loading
+                ? "Loading your tickets…"
+                : loadError
+                  ? "Tickets can't be shown right now."
+                  : "No tickets raised yet."}
+            </p>
+          }
           columns={[
             {
               key: "id",

@@ -674,6 +674,9 @@ export function resolveMenu(
   const opsType: OpsOrderType = orderType === "Dine In" ? "Dine-in" : "Pickup";
   const direct = menus.find((m) => {
     if (m.isDefault) return false;
+    // A second menu with no sections and no order types isn't assigned to
+    // anything yet - it must not take over every order from the default.
+    if (m.tableCategoryIds.length === 0 && m.orderTypes.length === 0) return false;
     const tableOk =
       m.tableCategoryIds.length === 0 || (!!table && m.tableCategoryIds.includes(table.categoryId));
     const typeOk = m.orderTypes.length === 0 || m.orderTypes.includes(opsType);
@@ -857,23 +860,23 @@ interface Ctx extends State {
   cancelReservation: (id: string) => Promise<void>;
   /* waitlist queue */
   loadQueueFromServer: () => Promise<void>;
-  addToQueue: (name: string, mobile: string, partySize: number) => Promise<void>;
+  addToQueue: (name: string, mobile: string, partySize: number) => Promise<boolean>;
   seatQueueEntry: (id: string) => Promise<void>;
   markQueueEntryNoShow: (id: string) => Promise<void>;
   cancelQueueEntry: (id: string) => Promise<void>;
   callQueueEntry: (id: string) => Promise<void>;
   clearQueue: () => Promise<void>;
   /* cash */
-  openSession: (float: number) => void;
-  addCash: (amount: number, reason: string) => void;
+  openSession: (float: number) => Promise<boolean>;
+  addCash: (amount: number, reason: string) => Promise<boolean>;
   withdrawCash: (amount: number, reason: string) => boolean;
   attachExpense: (headId: string, amount: number, note: string, date?: string) => Promise<boolean>;
-  closeSession: (counted: number, reason: string) => void;
+  closeSession: (counted: number, reason: string) => Promise<boolean>;
   sessionBalance: () => number;
   openSessionRecord: () => CashSession | undefined;
   loadCashSessionsFromServer: () => Promise<void>;
   /* generic crud */
-  upsertMenuItem: (item: MenuItem) => void;
+  upsertMenuItem: (item: MenuItem) => Promise<boolean>;
   removeMenuItem: (id: string) => void;
   setMenuItemsActive: (ids: string[], active: boolean) => void;
   removeMenuItems: (ids: string[]) => void;
@@ -889,24 +892,24 @@ interface Ctx extends State {
     menuId: string,
     onProgress?: (done: number, total: number) => void,
   ) => Promise<void>;
-  upsertMenuCategory: (c: MenuCategory) => void;
+  upsertMenuCategory: (c: MenuCategory) => Promise<boolean>;
   removeMenuCategory: (id: string) => void;
   removeMenuCategories: (ids: string[]) => void;
-  upsertVariant: (v: VariantOption) => void;
+  upsertVariant: (v: VariantOption) => Promise<boolean>;
   removeVariant: (id: string) => void;
-  upsertAddonGroup: (g: AddonGroup) => void;
+  upsertAddonGroup: (g: AddonGroup) => Promise<boolean>;
   removeAddonGroup: (id: string) => void;
   loadMenuFromServer: () => Promise<void>;
-  upsertTable: (t: RestaurantTable) => void;
+  upsertTable: (t: RestaurantTable) => Promise<boolean>;
   removeTable: (id: string) => void;
   removeTables: (ids: string[]) => void;
-  addTables: (tables: RestaurantTable[]) => void;
-  upsertTableCategory: (c: TableCategory) => void;
+  addTables: (tables: RestaurantTable[]) => Promise<boolean>;
+  upsertTableCategory: (c: TableCategory) => Promise<boolean>;
   removeTableCategory: (id: string) => void;
   loadTablesFromServer: () => Promise<void>;
   refreshOrderFromServer: (orderId: string) => Promise<void>;
   reconcileVanishedOrders: (backendIds: number[]) => Promise<void>;
-  upsertUser: (u: User, newPassword?: string) => void;
+  upsertUser: (u: User, newPassword?: string) => Promise<boolean>;
   loadUsersFromServer: () => Promise<void>;
   loadInvoiceFormatFromServer: () => Promise<void>;
   loadKotFormatFromServer: () => Promise<void>;
@@ -962,15 +965,16 @@ interface Ctx extends State {
   upsertExpenseHead: (h: ExpenseHead) => Promise<boolean>;
   removeExpenseHead: (id: string) => Promise<void>;
   removeExpenseHeads: (ids: string[]) => Promise<void>;
-  upsertRawMaterial: (m: RawMaterial) => void;
-  upsertSupplier: (s: Supplier) => void;
+  upsertRawMaterial: (m: RawMaterial) => Promise<boolean>;
+  upsertSupplier: (s: Supplier) => Promise<boolean>;
   upsertPurchaseOrder: (p: PurchaseOrder) => void;
   receivePurchaseOrder: (id: string) => void;
   addWastage: (w: Omit<Wastage, "id">) => void;
   produceSemiFinished: (id: string, batches: number) => void;
   /* stock module */
-  upsertUnit: (u: StockUnit) => void;
-  savePurchase: (po: PurchaseOrder, opts?: { receive?: boolean }) => void;
+  upsertUnit: (u: StockUnit) => Promise<boolean>;
+  /** Resolves true once saved (and, when receiving, confirmed by the exe). */
+  savePurchase: (po: PurchaseOrder, opts?: { receive?: boolean }) => Promise<boolean>;
   payPurchaseOrder: (id: string, amount: number) => void;
   cancelPurchaseOrder: (id: string) => void;
   poTotals: (po: PurchaseOrder) => {
@@ -979,21 +983,24 @@ interface Ctx extends State {
     discount: number;
     grand: number;
   };
-  saveStockCount: (rows: { materialId: string; countedQty: number }[], note?: string) => void;
+  saveStockCount: (
+    rows: { materialId: string; countedQty: number }[],
+    note?: string,
+  ) => Promise<boolean>;
   addWastageBatch: (
     rows: { materialId: string; qty: number; reason: string; notes?: string }[],
-  ) => void;
-  upsertSemiFinished: (sf: SemiFinished) => void;
+  ) => Promise<boolean>;
+  upsertSemiFinished: (sf: SemiFinished) => Promise<boolean>;
   removeSemiFinished: (id: string) => void;
-  recordProduction: (semiId: string, qty: number, notes?: string) => void;
+  recordProduction: (semiId: string, qty: number, notes?: string) => Promise<boolean>;
   semiUnitCost: (semiId: string) => number;
-  upsertRecipe: (r: Recipe) => void;
+  upsertRecipe: (r: Recipe) => Promise<boolean>;
   removeRecipe: (id: string) => void;
   recipeGroupCost: (g: RecipeGroup) => number;
   createRequisition: (
     items: { materialId: string; orderedQty: number; unitPrice: number }[],
     remarks?: string,
-  ) => void;
+  ) => Promise<boolean>;
   setRequisitionStatus: (id: string, status: RequisitionStatus) => void;
   setRequisitionQty: (id: string, materialId: string, qty: number) => void;
   removeRequisition: (id: string) => void;
@@ -1002,7 +1009,7 @@ interface Ctx extends State {
   setConnection: (state: ConnectionState) => void;
   loadServerStatusFromServer: () => Promise<void>;
   forceSyncServer: () => Promise<void>;
-  upsertPrinter: (p: Printer) => void;
+  upsertPrinter: (p: Printer) => Promise<boolean>;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   toggleNotificationSetting: (trigger: string, channel: "whatsapp" | "sms" | "inApp") => void;
@@ -1010,7 +1017,7 @@ interface Ctx extends State {
   setDeliveryChargeRule: (rule: BillChargeRule) => void;
   setPackagingChargeRule: (rule: BillChargeRule) => void;
   setServiceCharge: (rule: ServiceChargeRule) => void;
-  upsertTaxRule: (rule: TaxRule) => void;
+  upsertTaxRule: (rule: TaxRule) => Promise<boolean>;
   removeTaxRule: (id: string) => void;
   toggleTaxRule: (id: string) => void;
   setInvoiceFormat: (fmt: InvoiceFormat) => void;
@@ -1021,16 +1028,16 @@ interface Ctx extends State {
   uploadHotelLogo: (file: File) => Promise<string | undefined>;
   setQrOnSettle: (on: boolean) => void;
   setGstCalculation: (on: boolean) => void;
-  upsertPromo: (promo: PromoCode) => void;
+  upsertPromo: (promo: PromoCode) => Promise<boolean>;
   togglePromo: (id: string) => void;
-  upsertKitchen: (kitchen: Kitchen) => void;
+  upsertKitchen: (kitchen: Kitchen) => Promise<boolean>;
   removeKitchen: (id: string) => void;
   setDefaultKitchen: (id: string) => void;
   resolveKitchenForCategory: (categoryId: string) => Kitchen | undefined;
   removePrinter: (id: string) => void;
   setDefaultKotPrinter: (id: string) => void;
   resolveKotPrinterForCategory: (categoryId: string) => Printer | undefined;
-  upsertPaymentMode: (mode: PaymentModeConfig) => void;
+  upsertPaymentMode: (mode: PaymentModeConfig) => Promise<boolean>;
   removePaymentMode: (id: string) => void;
   setPaymentModeActive: (id: string, active: boolean) => void;
   saveDefaultPaymentMode: (
@@ -1045,7 +1052,7 @@ interface Ctx extends State {
    * button already had ("Cash" as the last resort), just with real
    * defaults inserted ahead of it now. */
   resolveDefaultPaymentMode: (orderType: OpsOrderType, tableCategoryId?: string) => string;
-  upsertMenu: (menu: Menu) => void;
+  upsertMenu: (menu: Menu) => Promise<boolean>;
   removeMenu: (id: string) => void;
   setDefaultMenu: (id: string) => void;
   setOrderMenu: (orderId: string, menuId: string) => void;
@@ -1056,9 +1063,9 @@ interface Ctx extends State {
   setDefaultOrderType: (type: OrderType) => void;
   setGuestCount: (orderId: string, guests: number) => void;
   addCustomLine: (orderId: string, name: string, price: number, qty: number) => void;
-  upsertCustomer: (customer: Customer) => void;
+  upsertCustomer: (customer: Customer) => Promise<boolean>;
   toggleCustomer: (id: string) => void;
-  settleDueBills: (ids: string[], payments: PaymentSplit[]) => void;
+  settleDueBills: (ids: string[], payments: PaymentSplit[]) => Promise<boolean>;
   setMaxOfflineDays: (days: number) => void;
   sendEBill: (orderId: string) => Promise<boolean>;
   printBill: (orderId: string) => Promise<void>;
@@ -5293,8 +5300,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const { queue } = await queueApi.add({ name, mobile, party_size: partySize });
         patch((p) => ({ ...p, queue: queue.map(mapRawQueueEntry) }));
         toast.success(`${name} added to the waitlist`, { description: `Party of ${partySize}` });
+        return true;
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not add to the waitlist");
+        return false;
       }
     },
 
@@ -5372,11 +5381,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           await cashSessionApi.open(float);
           await value.loadCashSessionsFromServer();
           toast.success("Cash session opened", { description: `Opening float ₹${float}` });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not open cash session");
+          return false;
         }
       };
-      void run();
+      return run();
     },
 
     addCash: (amount, reason) => {
@@ -5385,11 +5396,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           await cashSessionApi.addMovement({ type: "Add", amount, reason });
           await value.loadCashSessionsFromServer();
           toast.success(`₹${amount} added to drawer`, { description: reason });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not add cash");
+          return false;
         }
       };
-      void run();
+      return run();
     },
 
     withdrawCash: (amount, reason) => {
@@ -5459,7 +5472,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
     closeSession: (counted, reason) => {
       const open = s.cashSessions.find((c) => c.status === "Open");
-      if (!open) return;
+      if (!open) return Promise.resolve(false);
       const expected = open.movements.reduce((sum, m) => sum + m.amount, 0);
       const run = async () => {
         try {
@@ -5481,11 +5494,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 ? "No variance recorded."
                 : `Variance ₹${counted - expected} recorded with explanation.`,
           });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not close cash session");
+          return false;
         }
       };
-      void run();
+      return run();
     },
 
     sessionBalance: () => {
@@ -5585,11 +5600,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadMenuFromServer();
           toast.success("Menu item saved", { description: item.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save menu item");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeMenuItem: (id) => {
       value.removeMenuItems([id]);
@@ -5761,11 +5778,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           );
           await value.loadMenuFromServer();
           toast.success("Category saved", { description: c.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save category");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeMenuCategory: (id) => {
       if (s.menuItems.some((i) => i.categoryId === id && i.active)) {
@@ -5823,11 +5842,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadMenuFromServer();
           toast.success("Variant saved", { description: v.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save variant");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeVariant: (id) => {
       // No delete endpoint exists for variants - soft-delete via the edit
@@ -5869,11 +5890,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadMenuFromServer();
           toast.success("Addon group saved", { description: g.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save addon group");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeAddonGroup: () => {
       // No delete or soft-delete path exists: there's no remove endpoint,
@@ -6108,7 +6131,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const isNew = !s.tables.some((x) => x.id === t.id);
       if (isNew && !t.name.trim()) {
         toast.error("Table name is required");
-        return;
+        return Promise.resolve(false);
       }
 
       const run = async () => {
@@ -6131,11 +6154,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadTablesFromServer();
           toast.success("Table saved", { description: t.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save table");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeTable: (id) => {
       value.removeTables([id]);
@@ -6170,7 +6195,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Table names must end in a number", {
           description: "For example T1, T2, T3 - the number is what increases.",
         });
-        return;
+        return Promise.resolve(false);
       }
       const nums = parts.map((p) => Number(p![2]));
       const categoryId = tables[0]?.categoryId;
@@ -6188,11 +6213,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           });
           await value.loadTablesFromServer();
           toast.success(`${tables.length} table(s) added`);
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not add tables");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     upsertTableCategory: (c) => {
       const isNew = !s.tableCategories.some((x) => x.id === c.id);
@@ -6212,11 +6239,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadTablesFromServer();
           toast.success("Table category saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save table category");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeTableCategory: (id) => {
       if (s.tables.some((t) => t.categoryId === id)) {
@@ -6820,11 +6849,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           await value.loadUsersFromServer();
           log("User Saved", u.name, "—", `${u.role} · ${u.status}`);
           toast.success("User saved", { description: `${u.name} · ${u.role}` });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save user");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     upsertExpense: (e, date) => {
       const headBackendId = e.headId.startsWith("eh-")
@@ -7007,7 +7038,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const consumptionUnitId = s.units.find((u) => u.shortName === m.unit)?.id;
       if (!purchaseUnitId || !consumptionUnitId) {
         toast.error("Select a valid purchase and consumption unit");
-        return;
+        return Promise.resolve(false);
       }
       const payload = {
         raw_material_name: m.name,
@@ -7038,16 +7069,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             }),
           }));
           toast.success("Raw material saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save raw material");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     upsertSupplier: (sup) => {
       if (!sup.name.trim()) {
         toast.error("Supplier name is required");
-        return;
+        return Promise.resolve(false);
       }
       const previousIds = new Set(s.suppliers.map((x) => x.id));
       const previousById = new Map(s.suppliers.map((x) => [x.id, x]));
@@ -7081,11 +7114,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             }),
           }));
           toast.success("Supplier saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save supplier");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     upsertPurchaseOrder: (po) => {
       patch((p) => ({
@@ -7153,11 +7188,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : await stockUnitApi.create({ unitName: u.unitName, shortName: u.shortName });
           patch((p) => ({ ...p, units: units.map(mapRawUnit) }));
           toast.success("Unit saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save unit");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     poTotals,
     savePurchase: (po, opts) => {
@@ -7167,46 +7204,70 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const isNew = !s.purchaseOrders.some((x) => x.id === po.id);
       const id = po.id || uid("po");
       const record: PurchaseOrder = { ...po, id, status: receive ? "Received" : po.status };
-      patch((p) => {
-        const already = p.purchaseOrders.find((x) => x.id === id);
-        const wasReceived = already?.status === "Received";
-        const applyStock = receive && !wasReceived;
-        const moves: StockMovement[] = [];
-        const rawMaterials = p.rawMaterials.map((m) => {
-          const l = record.lines.find((x) => x.materialId === m.id);
-          if (!l || !applyStock) return m;
-          const inQty = l.qty * m.conversion;
-          const inCost = l.rate / m.conversion;
-          const newStock = m.stock + inQty;
-          // weighted average costing
-          const rate = newStock > 0 ? (m.stock * m.rate + inQty * inCost) / newStock : inCost;
-          moves.push(movement("Purchase", "raw", m.id, inQty, l.qty * l.rate, record.poNo, who));
-          return { ...m, stock: newStock, rate: Math.round(rate * 10000) / 10000 };
+
+      // Checked before anything changes, for both "Save as ordered" and
+      // "Save & receive" (the form shows the same problems next to each field).
+      const problems: string[] = [];
+      if (!s.suppliers.some((x) => x.id === record.supplierId)) problems.push("choose a supplier");
+      if (!record.date) problems.push("enter the invoice date");
+      if (!record.lines.length) problems.push("add at least one invoice line");
+      record.lines.forEach((l, i) => {
+        if (!s.rawMaterials.some((m) => m.id === l.materialId))
+          problems.push(`line ${i + 1}: choose a material`);
+        if (!(l.qty > 0)) problems.push(`line ${i + 1}: quantity must be more than 0`);
+        if (!(l.rate >= 0)) problems.push(`line ${i + 1}: rate can't be negative`);
+      });
+      if (problems.length) {
+        toast.error("Please fix the purchase order", { description: problems.join(" · ") });
+        return Promise.resolve(false);
+      }
+
+      // Shows the purchase on screen (and, when received, the stock and the
+      // supplier's balance). For a receipt this now runs only after the exe
+      // has saved it - it used to run first, so a refused receipt still
+      // showed as received with stock added.
+      const applyLocal = () => {
+        patch((p) => {
+          const already = p.purchaseOrders.find((x) => x.id === id);
+          const wasReceived = already?.status === "Received";
+          const applyStock = receive && !wasReceived;
+          const moves: StockMovement[] = [];
+          const rawMaterials = p.rawMaterials.map((m) => {
+            const l = record.lines.find((x) => x.materialId === m.id);
+            if (!l || !applyStock) return m;
+            const inQty = l.qty * m.conversion;
+            const inCost = l.rate / m.conversion;
+            const newStock = m.stock + inQty;
+            // weighted average costing
+            const rate = newStock > 0 ? (m.stock * m.rate + inQty * inCost) / newStock : inCost;
+            moves.push(movement("Purchase", "raw", m.id, inQty, l.qty * l.rate, record.poNo, who));
+            return { ...m, stock: newStock, rate: Math.round(rate * 10000) / 10000 };
+          });
+          const due = Math.max(0, totals.grand - (record.paidAmount ?? 0));
+          const prevDue = already
+            ? Math.max(0, poTotals(already).grand - (already.paidAmount ?? 0))
+            : 0;
+          return {
+            ...p,
+            purchaseOrders: already
+              ? p.purchaseOrders.map((x) => (x.id === id ? record : x))
+              : [record, ...p.purchaseOrders],
+            rawMaterials,
+            stockMovements: [...moves, ...p.stockMovements],
+            suppliers: p.suppliers.map((sup) =>
+              sup.id === record.supplierId
+                ? { ...sup, outstanding: Math.max(0, sup.outstanding - prevDue + due) }
+                : sup,
+            ),
+          };
         });
-        const due = Math.max(0, totals.grand - (record.paidAmount ?? 0));
-        const prevDue = already
-          ? Math.max(0, poTotals(already).grand - (already.paidAmount ?? 0))
-          : 0;
-        return {
-          ...p,
-          purchaseOrders: already
-            ? p.purchaseOrders.map((x) => (x.id === id ? record : x))
-            : [record, ...p.purchaseOrders],
-          rawMaterials,
-          stockMovements: [...moves, ...p.stockMovements],
-          suppliers: p.suppliers.map((sup) =>
-            sup.id === record.supplierId
-              ? { ...sup, outstanding: Math.max(0, sup.outstanding - prevDue + due) }
-              : sup,
-          ),
-        };
-      });
-      log(isNew ? "Purchase Created" : "Purchase Updated", record.poNo, "—", record.status);
-      toast.success(receive ? `${record.poNo} received` : `${record.poNo} saved`, {
-        description: receive
-          ? "Stock, supplier outstanding and reports updated."
-          : "Draft saved. Stock updates on receipt.",
-      });
+        log(isNew ? "Purchase Created" : "Purchase Updated", record.poNo, "—", record.status);
+        toast.success(receive ? `${record.poNo} received` : `${record.poNo} saved`, {
+          description: receive
+            ? "Stock, supplier outstanding and reports updated."
+            : "Draft saved. Stock updates on receipt.",
+        });
+      };
 
       // The one moment this actually talks to the backend - creating a
       // purchase order there immediately updates real stock (see
@@ -7216,11 +7277,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // above, same pattern as the rest of this app: local state drives
       // the UI immediately, this syncs it to the backend and reconciles
       // once that resolves.
-      if (!receive) return;
+      if (!receive) {
+        applyLocal();
+        return Promise.resolve(true);
+      }
       const supplierId = Number(record.supplierId);
       if (!supplierId) {
         toast.error("Select a valid supplier before receiving");
-        return;
+        return Promise.resolve(false);
       }
       const rawMaterialData = record.lines.map((l) => {
         const material = s.rawMaterials.find((m) => m.id === l.materialId);
@@ -7245,7 +7309,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("One or more materials has no purchase unit configured", {
           description: "Set a purchase unit on it under Stock › Raw Materials first.",
         });
-        return;
+        return Promise.resolve(false);
       }
       const payload = {
         supplier_id: supplierId,
@@ -7276,10 +7340,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const { purchaseOrders } = await purchaseOrderApi.getAll("2000-01-01", "2100-01-01");
             const created = purchaseOrders.find((o) => !previousBackendIds.has(o.id));
             if (!created) {
-              toast.error("Purchase order saved locally but couldn't be confirmed on the server", {
+              toast.error("The purchase was sent but couldn't be confirmed on the server", {
                 description: "Reload the Purchase Orders screen to check.",
               });
-              return;
+              return false;
             }
             realId = created.id;
           } else {
@@ -7298,20 +7362,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               paidAmount,
             });
           }
-          await value.loadPurchaseOrdersFromServer();
+          applyLocal();
+          await Promise.all([
+            value.loadPurchaseOrdersFromServer(),
+            value.loadRawMaterialsFromServer(),
+          ]);
           patch((p) => ({
             ...p,
             // Drop the temporary local-only record now superseded by the
             // backend-derived one loadPurchaseOrdersFromServer just added.
             purchaseOrders: p.purchaseOrders.filter((x) => x.id !== id || !!x.backendId),
           }));
+          return true;
         } catch (err) {
           toast.error(
-            err instanceof ApiError ? err.message : "Could not sync purchase order to the server",
+            err instanceof ApiError
+              ? err.message
+              : "Could not save the purchase order to the server",
           );
+          return false;
         }
       };
-      void runSync();
+      return runSync();
     },
     payPurchaseOrder: (id, amount) => {
       const po = s.purchaseOrders.find((x) => x.id === id);
@@ -7398,7 +7470,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.info("Nothing to save", {
           description: "No counted quantity differs from system stock.",
         });
-        return;
+        return Promise.resolve(false);
       }
       patch((p) => {
         const adjustments: StockAdjustment[] = [];
@@ -7473,22 +7545,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             }
           }
           await value.loadRawMaterialsFromServer();
+          return true;
         } catch (err) {
           toast.error(
             err instanceof ApiError
               ? err.message
               : "Reconciled locally but the backend sync failed",
           );
+          return false;
         }
       };
-      void run();
+      return run();
     },
     addWastageBatch: (rows) => {
       const who = currentUser.name;
       const valid = rows.filter((r) => r.materialId && r.qty > 0);
       if (!valid.length) {
         toast.error("Add at least one wastage row");
-        return;
+        return Promise.resolve(false);
       }
       patch((p) => {
         const moves: StockMovement[] = [];
@@ -7548,30 +7622,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("One or more materials has no consumption unit configured", {
           description: "Recorded locally, but not synced to the server.",
         });
-        return;
+        return Promise.resolve(false);
       }
       const run = async () => {
         try {
           await wastageApi.create(items);
           await value.loadWastageFromServer();
           await value.loadRawMaterialsFromServer();
+          return true;
         } catch (err) {
           toast.error(
             err instanceof ApiError ? err.message : "Recorded locally but the backend sync failed",
           );
+          return false;
         }
       };
-      void run();
+      return run();
     },
     upsertSemiFinished: (sf) => {
       if (!sf.components.length) {
         toast.error("Add at least one raw material to the recipe");
-        return;
+        return Promise.resolve(false);
       }
       const unitId = s.units.find((u) => u.shortName === sf.unit)?.id;
       if (!unitId) {
         toast.error("Select a valid unit");
-        return;
+        return Promise.resolve(false);
       }
       const payload = {
         name: sf.name,
@@ -7596,11 +7672,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadSemiFinishedFromServer();
           toast.success("Semi-finished item saved");
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save semi-finished item");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeSemiFinished: (id) => {
       const backendId = id ? Number(id.replace("sf-", "")) : undefined;
@@ -7623,7 +7701,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     semiUnitCost,
     recordProduction: (semiId, qty, notes) => {
       const sf = s.semiFinished.find((x) => x.id === semiId);
-      if (!sf || qty <= 0) return;
+      if (!sf || qty <= 0) return Promise.resolve(false);
       const who = currentUser.name;
       const cost = semiUnitCost(semiId) * qty;
       patch((p) => {
@@ -7667,7 +7745,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("This item hasn't been saved to the server yet", {
           description: "Save it first, then record production - stock won't sync until then.",
         });
-        return;
+        return Promise.resolve(false);
       }
       const run = async () => {
         try {
@@ -7678,18 +7756,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           });
           await value.loadSemiFinishedFromServer();
           await value.loadRawMaterialsFromServer();
+          return true;
         } catch (err) {
           toast.error(
             err instanceof ApiError ? err.message : "Recorded locally but the backend sync failed",
           );
+          return false;
         }
       };
-      void run();
+      return run();
     },
     upsertRecipe: (r) => {
       if (!r.menuItemId) {
         toast.error("Select a menu item for this recipe");
-        return;
+        return Promise.resolve(false);
       }
       const base = (r.groups ?? []).find((g) => g.kind === "base");
       const rawMaterialData = (base?.lines ?? []).map((l) =>
@@ -7699,7 +7779,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       );
       if (!rawMaterialData.length) {
         toast.error("Add at least one ingredient to the recipe");
-        return;
+        return Promise.resolve(false);
       }
       // Variant/addon groups have no backend equivalent yet (no real
       // Variant/Addon picker in this editor) - only the base group is
@@ -7722,11 +7802,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               : "Recipe saved",
             { description: r.itemName },
           );
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save recipe");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeRecipe: (id) => {
       const menuId = id.startsWith("recipe-") ? Number(id.replace("recipe-", "")) : undefined;
@@ -7760,7 +7842,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const valid = items.filter((i) => i.orderedQty > 0);
       if (!valid.length) {
         toast.error("Add at least one material");
-        return;
+        return Promise.resolve(false);
       }
       const run = async () => {
         try {
@@ -7769,11 +7851,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.success("Requisition placed", {
             description: `REQ-2026-${String(req_no).padStart(3, "0")} · awaiting merchant approval`,
           });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not place requisition");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     setRequisitionStatus: (id, status) => {
       const req = s.requisitions.find((r) => r.id === id);
@@ -7919,7 +8003,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const created = after.printerSettings.find((x) => !beforeIds.has(x.id));
             if (!created) {
               toast.error("Printer was created but couldn't be found afterward");
-              return;
+              return false;
             }
             backendId = created.id;
           } else {
@@ -7941,11 +8025,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           await value.loadPrintersFromServer();
           log("Printer Saved", pr.name, "—", `${pr.printType ?? "KOT"} · ${printer_size}`);
           toast.success("Printer saved", { description: pr.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save printer");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     markNotificationRead: (id) =>
       patch((p) => ({
@@ -8128,7 +8214,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Tax value must be greater than 0", {
           description: "The backend rejects a zero or negative amount outright.",
         });
-        return;
+        return Promise.resolve(false);
       }
       const isNew = !s.taxRules.some((t) => t.id === rule.id);
       const orderTypeMap: Record<OpsOrderType, "dinin" | "pickup"> = {
@@ -8161,11 +8247,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadTaxRulesFromServer();
           toast.success("Tax rule saved", { description: rule.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save tax rule");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeTaxRule: (id) => {
       patch((p) => ({ ...p, taxRules: p.taxRules.filter((t) => t.id !== id) }));
@@ -8286,7 +8374,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     upsertPromo: (promo) => {
       if (!promo.name.trim() || !promo.code.trim()) {
         toast.error("Enter a name and code");
-        return;
+        return Promise.resolve(false);
       }
       const backendId = promo.id.startsWith("promo-")
         ? Number(promo.id.replace("promo-", ""))
@@ -8306,11 +8394,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadPromoCodesFromServer();
           toast.success("Promo code saved", { description: promo.code });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save promo code");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     togglePromo: (id) => {
       const promo = s.promoCodes.find((x) => x.id === id);
@@ -8357,7 +8447,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const match = created.find((k) => k.kitchen_name === kitchen.name);
             if (!match) {
               toast.error("Kitchen was created but couldn't be found afterward");
-              return;
+              return false;
             }
             backendId = match.id;
           } else {
@@ -8372,11 +8462,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           await value.loadKitchensFromServer();
           log("Kitchen Saved", kitchen.name, "—", kitchen.orderTypes.join(", "));
           toast.success("Kitchen saved", { description: kitchen.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save kitchen");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeKitchen: (id) => {
       const target = s.kitchens.find((k) => k.id === id);
@@ -8469,11 +8561,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadPaymentModesFromServer();
           toast.success("Payment mode saved", { description: mode.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save payment mode");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removePaymentMode: (id) => {
       const target = s.paymentModes.find((m) => m.id === id);
@@ -8586,11 +8680,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadMenuFromServer();
           toast.success("Menu saved", { description: menu.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save menu");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     removeMenu: (id) => {
       const target = s.menus.find((m) => m.id === id);
@@ -8740,11 +8836,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           await value.loadCustomersFromServer();
           toast.success("Customer saved", { description: customer.name });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save customer");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     toggleCustomer: (id) =>
       patch((p) => ({
@@ -8752,23 +8850,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         customers: p.customers.map((c) => (c.id === id ? { ...c, active: c.active === false } : c)),
       })),
     settleDueBills: (ids, payments) => {
-      if (guardBlocked()) return;
+      if (guardBlocked()) return Promise.resolve(false);
       const known = new Set(["Cash", "UPI", "Card"]);
       const unknownMode = payments.find((p) => !known.has(p.mode));
       if (unknownMode) {
         toast.error(`"${unknownMode.mode}" isn't a payment mode the backend supports here`, {
           description: "Only Cash, UPI, and Card can be recorded against a due bill.",
         });
-        return;
+        return Promise.resolve(false);
       }
       const bills = ids
         .map((id) => s.dueBills.find((b) => b.id === id))
         .filter((b): b is DueBill => !!b && b.status === "Due");
-      if (!bills.length) return;
+      if (!bills.length) return Promise.resolve(false);
       const missingBackendId = bills.find((b) => !b.backendOrderId);
       if (missingBackendId) {
         toast.error("This due bill has no backend record to settle");
-        return;
+        return Promise.resolve(false);
       }
       // allSettleDue (the only bulk endpoint) always settles each order's
       // FULL due in one mode - there's no way to send a per-mode split
@@ -8780,7 +8878,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Can't split across payment modes when settling multiple bills at once", {
           description: "Settle them one at a time to use more than one payment mode.",
         });
-        return;
+        return Promise.resolve(false);
       }
 
       const mode = payments.length > 1 ? "Split" : payments[0].mode;
@@ -8848,11 +8946,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.success(bills.length > 1 ? `${bills.length} bills settled` : "Bill settled", {
             description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
           });
+          return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not settle due bill(s)");
+          return false;
         }
       };
-      void run();
+      return run();
     },
     setMaxOfflineDays: (days) => {
       patch((p) => ({ ...p, maxOfflineDays: days }));

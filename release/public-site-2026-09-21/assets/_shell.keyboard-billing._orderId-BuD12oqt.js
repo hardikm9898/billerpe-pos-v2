@@ -1,0 +1,1 @@
+import{mt as e}from"./api-DhpF6WRe.js";import{r as t}from"./keyboard-display-DH1mXGxo.js";import{s as n}from"./index-C61ckYt7.js";var r=e();function i(){let{orderId:e}=n.useParams();return(0,r.jsx)(t,{orderId:e})}export{i as component};

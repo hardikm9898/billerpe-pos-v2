@@ -1,3 +1,4 @@
+import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
 import { searchMenuItems } from "@/lib/menuSearch";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -306,6 +307,11 @@ function OrderCartPage() {
   const [customQty, setCustomQty] = useState(1);
   const [chargesOpen, setChargesOpen] = useState(false);
   const [packagingOverride, setPackagingOverride] = useState(0);
+  const bForm = useFormCheck();
+  const bFormReset = bForm.reset;
+  useEffect(() => {
+    if (!customItemOpen && !chargesOpen && !discountOpen) bFormReset();
+  }, [customItemOpen, chargesOpen, discountOpen, bFormReset]);
   const [removeTarget, setRemoveTarget] = useState<OrderLine | null>(null);
   const [removeReason, setRemoveReason] = useState("");
 
@@ -1017,28 +1023,39 @@ function OrderCartPage() {
           </DialogHeader>
           <div className="space-y-3">
             <div>
-              <Label htmlFor="customName">Item name</Label>
+              <Label htmlFor="customName" required>
+                Item name
+              </Label>
               <Input
+                {...bForm.fieldProps("customName")}
                 id="customName"
                 className="mt-1.5"
                 value={customName}
                 onChange={(e) => setCustomName(e.target.value)}
                 placeholder="e.g. Special request"
               />
+              <FieldError message={bForm.error("customName")} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label htmlFor="customPrice">Price (₹)</Label>
+                <Label htmlFor="customPrice" required>
+                  Price (₹)
+                </Label>
                 <Input
+                  {...bForm.fieldProps("customPrice")}
                   id="customPrice"
                   type="number"
+                  min={0}
                   className="num mt-1.5"
                   value={customPrice}
                   onChange={(e) => setCustomPrice(Number(e.target.value) || 0)}
                 />
+                <FieldError message={bForm.error("customPrice")} />
               </div>
               <div>
-                <Label htmlFor="customQty">Qty</Label>
+                <Label htmlFor="customQty" required>
+                  Qty
+                </Label>
                 <Input
                   id="customQty"
                   type="number"
@@ -1052,9 +1069,19 @@ function OrderCartPage() {
           </div>
           <DialogFooter>
             <Button
-              disabled={!customName.trim() || customPrice <= 0}
               onClick={() => {
-                store.addCustomLine(order.id, customName, customPrice, customQty);
+                const valid = bForm.check([
+                  { key: "customName", label: "Item name", value: customName },
+                  {
+                    key: "customPrice",
+                    label: "Price",
+                    value: customPrice,
+                    valid: (v) => typeof v === "number" && v > 0,
+                    message: "Price must be more than ₹0",
+                  },
+                ]);
+                if (!valid) return;
+                store.addCustomLine(order.id, customName.trim(), customPrice, customQty);
                 setCustomItemOpen(false);
               }}
             >
@@ -1076,16 +1103,29 @@ function OrderCartPage() {
           <div>
             <Label htmlFor="packagingOverride">Packaging (₹)</Label>
             <Input
+              {...bForm.fieldProps("packaging")}
               id="packagingOverride"
               type="number"
+              min={0}
               className="num mt-1.5"
               value={packagingOverride}
               onChange={(e) => setPackagingOverride(Number(e.target.value) || 0)}
             />
+            <FieldError message={bForm.error("packaging")} />
           </div>
           <DialogFooter>
             <Button
               onClick={() => {
+                const valid = bForm.check([
+                  {
+                    key: "packaging",
+                    label: "Packaging",
+                    value: packagingOverride,
+                    valid: (v) => typeof v === "number" && v >= 0,
+                    message: "Packaging can't be negative",
+                  },
+                ]);
+                if (!valid) return;
                 store.setCharges(order.id, packagingOverride);
                 setChargesOpen(false);
               }}
@@ -1209,12 +1249,21 @@ function OrderCartPage() {
               </button>
             ))}
           </div>
-          <Input
-            type="number"
-            className="num"
-            value={discountValue}
-            onChange={(e) => setDiscountValue(Number(e.target.value) || 0)}
-          />
+          <div className="space-y-1.5">
+            <Label htmlFor="discountValue" required>
+              {discountType === "percent" ? "Percent off" : "Amount off (₹)"}
+            </Label>
+            <Input
+              {...bForm.fieldProps("discount")}
+              id="discountValue"
+              type="number"
+              min={0}
+              className="num"
+              value={discountValue}
+              onChange={(e) => setDiscountValue(Number(e.target.value) || 0)}
+            />
+            <FieldError message={bForm.error("discount")} />
+          </div>
           {store.promoCodes.filter((p) => p.active).length ? (
             <div>
               <Label className="text-xs text-muted-foreground">Promo codes</Label>
@@ -1254,6 +1303,20 @@ function OrderCartPage() {
             </Button>
             <Button
               onClick={() => {
+                const subtotal = order.itemised
+                  ? order.lines.reduce((sum, l) => sum + lineTotal(l), 0)
+                  : (order.fallbackTotal ?? 0);
+                const problem = discountProblem(discountType, discountValue, subtotal);
+                const valid = bForm.check([
+                  {
+                    key: "discount",
+                    label: "Discount",
+                    value: discountValue,
+                    valid: () => !problem,
+                    message: problem ?? "",
+                  },
+                ]);
+                if (!valid) return;
                 store.applyDiscount(
                   order.id,
                   discountType === "percent" ? `${discountValue}%` : `Flat ₹${discountValue}`,

@@ -1,3 +1,4 @@
+import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
 import { searchMenuItems } from "@/lib/menuSearch";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -1353,10 +1354,27 @@ function DiscountDialog({
   const store = useStore();
   const [mode, setMode] = useState<"percent" | "flat">("percent");
   const [value, setValue] = useState(10);
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    if (open) setProblem(null);
+  }, [open]);
 
   const apply = (label: string, type: "percent" | "flat", amountValue: number) => {
     store.applyDiscount(order.id, label, type, amountValue);
     onOpenChange(false);
+  };
+  // A typed-in discount is checked first; promo codes and "remove" aren't.
+  const applyManual = () => {
+    const subtotal = order.itemised
+      ? order.lines.reduce((sum, l) => sum + lineTotal(l), 0)
+      : (order.fallbackTotal ?? 0);
+    const why = discountProblem(mode, value, subtotal);
+    setProblem(why);
+    if (why) {
+      toast.error("Please fix the discount", { description: why });
+      return;
+    }
+    apply(mode === "percent" ? `${value}% off` : "Flat discount", mode, value);
   };
 
   return (
@@ -1381,20 +1399,26 @@ function DiscountDialog({
           ))}
         </div>
         <div className="space-y-1.5">
-          <Label>{mode === "percent" ? "Percent off" : "Amount off"}</Label>
+          <Label required>{mode === "percent" ? "Percent off" : "Amount off (₹)"}</Label>
           <Input
             autoFocus
             type="number"
+            min={0}
             value={value}
-            onChange={(e) => setValue(Number(e.target.value))}
+            aria-invalid={!!problem || undefined}
+            onChange={(e) => {
+              setValue(Number(e.target.value));
+              setProblem(null);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
                 e.preventDefault();
-                apply(mode === "percent" ? `${value}% off` : "Flat discount", mode, value);
+                applyManual();
               }
             }}
             className={focusRing}
           />
+          <FieldError message={problem ?? undefined} />
         </div>
         {store.promoCodes.filter((p) => p.active).length ? (
           <div>
@@ -1423,13 +1447,7 @@ function DiscountDialog({
               Remove discount
             </Button>
           ) : null}
-          <Button
-            onClick={() =>
-              apply(mode === "percent" ? `${value}% off` : "Flat discount", mode, value)
-            }
-          >
-            Apply
-          </Button>
+          <Button onClick={applyManual}>Apply</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -1882,6 +1900,27 @@ function CustomItemDialog({
   onAdded: () => void;
 }) {
   const store = useStore();
+  const form = useFormCheck();
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!open) formReset();
+  }, [open, formReset]);
+  const add = () => {
+    const valid = form.check([
+      { key: "kbCustomName", label: "Item name", value: name },
+      {
+        key: "kbCustomPrice",
+        label: "Price",
+        value: price,
+        valid: (v) => typeof v === "number" && v > 0,
+        message: "Price must be more than ₹0",
+      },
+    ]);
+    if (!valid) return;
+    store.addCustomLine(order.id, name.trim(), price, qty);
+    onOpenChange(false);
+    onAdded();
+  };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-sm">
@@ -1891,27 +1930,32 @@ function CustomItemDialog({
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label>Item name</Label>
+            <Label required>Item name</Label>
             <Input
+              {...form.fieldProps("kbCustomName")}
               autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Special request"
               className={focusRing}
             />
+            <FieldError message={form.error("kbCustomName")} />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Price (₹)</Label>
+              <Label required>Price (₹)</Label>
               <Input
+                {...form.fieldProps("kbCustomPrice")}
                 type="number"
+                min={0}
                 value={price}
                 onChange={(e) => setPrice(Number(e.target.value) || 0)}
                 className={cn("num", focusRing)}
               />
+              <FieldError message={form.error("kbCustomPrice")} />
             </div>
             <div className="space-y-1.5">
-              <Label>Qty</Label>
+              <Label required>Qty</Label>
               <Input
                 type="number"
                 min={1}
@@ -1923,14 +1967,7 @@ function CustomItemDialog({
           </div>
         </div>
         <DialogFooter>
-          <Button
-            disabled={!name.trim() || price <= 0}
-            onClick={() => {
-              store.addCustomLine(order.id, name, price, qty);
-              onOpenChange(false);
-              onAdded();
-            }}
-          >
+          <Button onClick={add}>
             <Plus className="size-4" /> Add to order
           </Button>
         </DialogFooter>

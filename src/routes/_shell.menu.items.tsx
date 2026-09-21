@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import {
@@ -135,6 +136,12 @@ function MenuItemsPage() {
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("all");
   const [draft, setDraft] = useState<MenuItem | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const [selected, setSelected] = useState<string[]>([]);
   const [importOpen, setImportOpen] = useState(false);
   const [importRows, setImportRows] = useState<ImportRow[]>([]);
@@ -483,24 +490,32 @@ function MenuItemsPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Item name</Label>
+                <Label required>Item name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   placeholder="e.g. Paneer Tikka"
                 />
+                <FieldError message={form.error("name")} />
               </div>
               {/* Kitchen routing follows the category (Operations -> Kitchen
                   Settings), so there is no Kitchen field on the item. */}
               <div className="grid gap-4">
                 <div className="space-y-1.5">
-                  <Label>Category</Label>
+                  <Label required>Category</Label>
                   <Select
                     value={draft.categoryId}
-                    onValueChange={(v) => setDraft({ ...draft, categoryId: v })}
+                    onValueChange={(v) => {
+                      setDraft({ ...draft, categoryId: v });
+                      form.clearError("categoryId");
+                    }}
                   >
-                    <SelectTrigger>
-                      <SelectValue />
+                    <SelectTrigger
+                      data-field="categoryId"
+                      aria-invalid={!!form.error("categoryId") || undefined}
+                    >
+                      <SelectValue placeholder="Choose a category" />
                     </SelectTrigger>
                     <SelectContent>
                       {menuCategories.map((c) => (
@@ -510,16 +525,20 @@ function MenuItemsPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <FieldError message={form.error("categoryId")} />
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Base price (₹)</Label>
+                  <Label required>Base price (₹)</Label>
                   <Input
+                    {...form.fieldProps("price")}
                     type="number"
+                    min={0}
                     value={draft.price}
                     onChange={(e) => setDraft({ ...draft, price: Number(e.target.value) })}
                   />
+                  <FieldError message={form.error("price")} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Dietary type</Label>
@@ -672,6 +691,9 @@ function MenuItemsPage() {
                       </Select>
                       <Input
                         type="number"
+                        min={0}
+                        placeholder="Price ₹"
+                        aria-label="Variant price"
                         value={row.price}
                         onChange={(e) => {
                           const price = Number(e.target.value || 0);
@@ -759,18 +781,31 @@ function MenuItemsPage() {
               </Button>
               <Button
                 title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-                disabled={
-                  !(draft?.id ? access.edit : access.create) ||
-                  !draft?.name.trim() ||
-                  !draft?.categoryId
-                }
-                onClick={() => {
+                disabled={!(draft?.id ? access.edit : access.create)}
+                onClick={async () => {
                   if (!draft) return;
-                  store.upsertMenuItem({
+                  const ok = form.check([
+                    { key: "name", label: "Item name", value: draft.name },
+                    {
+                      key: "categoryId",
+                      label: "Category",
+                      value: draft.categoryId,
+                      message: "Choose a category",
+                    },
+                    {
+                      key: "price",
+                      label: "Base price",
+                      value: draft.price,
+                      valid: (v) => typeof v === "number" && v > 0,
+                      message: "Base price must be more than ₹0",
+                    },
+                  ]);
+                  if (!ok) return;
+                  const saved = await store.upsertMenuItem({
                     ...draft,
                     veg: draft.dietary ? draft.dietary !== "Non-Veg" : draft.veg,
                   });
-                  setDraft(null);
+                  if (saved) setDraft(null);
                 }}
               >
                 Save item

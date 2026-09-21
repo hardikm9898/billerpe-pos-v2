@@ -1,7 +1,8 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { LayoutGrid, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 import { DataTable, Page, PageHeader, SectionCard } from "@/components/kit";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,12 @@ function TableCategoriesPage() {
   const access = useAccess("tables");
   const store = useStore();
   const [draft, setDraft] = useState<TableCategory | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const tableCount = (id: string) => store.tables.filter((t) => t.categoryId === id).length;
 
   return (
@@ -97,12 +104,14 @@ function TableCategoriesPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Category name</Label>
+                <Label required>Category name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   placeholder="e.g. Garden Seating"
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="space-y-1.5">
                 <Label>Sort order</Label>
@@ -142,11 +151,12 @@ function TableCategoriesPage() {
               </Button>
               <Button
                 title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-                disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
-                onClick={() => {
+                disabled={!(draft?.id ? access.edit : access.create)}
+                onClick={async () => {
                   if (!draft) return;
-                  store.upsertTableCategory(draft);
-                  setDraft(null);
+                  if (!form.check([{ key: "name", label: "Category name", value: draft.name }]))
+                    return;
+                  if (await store.upsertTableCategory(draft)) setDraft(null);
                 }}
               >
                 Save

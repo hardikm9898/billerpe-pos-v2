@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import {
   ArrowRight,
@@ -12,7 +13,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 
 import {
   DataTable,
@@ -59,6 +60,12 @@ export function PurchaseOrdersScreen() {
   const [viewId, setViewId] = useState<string | null>(null);
   const [payFor, setPayFor] = useState<PurchaseOrder | null>(null);
   const [payAmount, setPayAmount] = useState(0);
+  const payForm = useFormCheck();
+  const payFormOpen = !!payFor;
+  const payFormReset = payForm.reset;
+  useEffect(() => {
+    if (!payFormOpen) payFormReset();
+  }, [payFormOpen, payFormReset]);
 
   const supplierName = (id: string) => store.suppliers.find((s) => s.id === id)?.name ?? "—";
   const rows = store.purchaseOrders.filter((p) =>
@@ -332,9 +339,11 @@ export function PurchaseOrdersScreen() {
           <DialogHeader>
             <DialogTitle>Record payment</DialogTitle>
           </DialogHeader>
-          <FieldRow label="Amount">
+          <FieldRow label="Amount (₹)" required error={payForm.error("payAmount")}>
             <Input
+              {...payForm.fieldProps("payAmount")}
               type="number"
+              min={0}
               value={payAmount}
               onChange={(e) => setPayAmount(Number(e.target.value || 0))}
             />
@@ -346,7 +355,22 @@ export function PurchaseOrdersScreen() {
             <Button
               hidden={!access.create}
               onClick={() => {
-                if (payFor && payAmount > 0) store.payPurchaseOrder(payFor.id, payAmount);
+                if (!payFor) return;
+                const due = Math.max(0, store.poTotals(payFor).grand - (payFor.paidAmount ?? 0));
+                const valid = payForm.check([
+                  {
+                    key: "payAmount",
+                    label: "Amount",
+                    value: payAmount,
+                    valid: (v) => typeof v === "number" && v > 0 && v <= due,
+                    message:
+                      payAmount > due
+                        ? `Amount can't be more than the ₹${due.toLocaleString("en-IN")} due`
+                        : "Enter an amount more than ₹0",
+                  },
+                ]);
+                if (!valid) return;
+                store.payPurchaseOrder(payFor.id, payAmount);
                 setPayFor(null);
               }}
             >
@@ -402,7 +426,91 @@ function PurchaseEditor({
 }) {
   const access = useAccess("stock-transactions");
   const store = useStore();
+  const poForm = useFormCheck();
+  const poOpen = !!draft;
+  const poReset = poForm.reset;
+  useEffect(() => {
+    if (!poOpen) poReset();
+  }, [poOpen, poReset]);
   if (!draft) return null;
+
+  const save = async (receive: boolean) => {
+    const grand = store.poTotals(draft).grand;
+    const valid = poForm.check([
+      {
+        key: "supplierId",
+        label: "Supplier",
+        value: draft.supplierId,
+        message: "Choose the supplier",
+      },
+      {
+        key: "date",
+        label: "Invoice date",
+        value: draft.date,
+        valid: (v) => /^\d{2}\/\d{2}\/\d{4}$/.test(String(v ?? "")),
+        message: "Pick the invoice date",
+      },
+      {
+        key: "gstin",
+        label: "Supplier GSTIN",
+        value: draft.gstin,
+        valid: (v) => !String(v ?? "").trim() || /^[0-9A-Z]{15}$/i.test(String(v).trim()),
+        message: "GSTIN must be 15 letters/digits, or leave it blank",
+      },
+      {
+        key: "lines",
+        label: "Invoice lines",
+        value: draft.lines,
+        message: "Add at least one material line",
+      },
+      ...draft.lines.flatMap((l, i) => [
+        {
+          key: `material-${i}`,
+          label: `Line ${i + 1} material`,
+          value: store.rawMaterials.some((m) => m.id === l.materialId),
+          valid: (v: unknown) => v === true,
+          message: `Line ${i + 1}: choose a material`,
+        },
+        {
+          key: `qty-${i}`,
+          label: `Line ${i + 1} quantity`,
+          value: l.qty,
+          valid: (v: unknown) => typeof v === "number" && v > 0,
+          message: `Line ${i + 1}: quantity must be more than 0`,
+        },
+        {
+          key: `rate-${i}`,
+          label: `Line ${i + 1} rate`,
+          value: l.rate,
+          valid: (v: unknown) => typeof v === "number" && v >= 0,
+          message: `Line ${i + 1}: rate can't be negative`,
+        },
+      ]),
+      {
+        key: "discount",
+        label: "Discount",
+        value: draft.discountValue ?? 0,
+        valid: (v) =>
+          typeof v === "number" && v >= 0 && (draft.discountType !== "percent" || v <= 100),
+        message:
+          draft.discountType === "percent"
+            ? "Discount must be between 0 and 100%"
+            : "Discount can't be negative",
+      },
+      {
+        key: "paid",
+        label: "Amount paid",
+        value: draft.paidAmount ?? 0,
+        valid: (v) => typeof v === "number" && v >= 0 && v <= grand,
+        message: `Amount paid must be between ₹0 and the ₹${grand.toLocaleString("en-IN")} total`,
+      },
+    ]);
+    if (!valid) return;
+    const ok = receive
+      ? await store.savePurchase(draft, { receive: true })
+      : await store.savePurchase({ ...draft, status: "Ordered" });
+    if (ok) setDraft(null);
+  };
 
   const setLine = (i: number, patch: Partial<PurchaseLine>) =>
     setDraft({
@@ -437,18 +545,27 @@ function PurchaseEditor({
         </SheetHeader>
         <div className="space-y-4 px-4 pb-24">
           <div className="grid gap-3 sm:grid-cols-2">
-            <FieldRow label="Supplier" required hint="Who you bought from">
+            <FieldRow
+              label="Supplier"
+              required
+              hint="Who you bought from"
+              error={poForm.error("supplierId")}
+            >
               <Select
                 value={draft.supplierId}
-                onValueChange={(v) =>
+                onValueChange={(v) => {
                   setDraft({
                     ...draft,
                     supplierId: v,
                     gstin: store.suppliers.find((s) => s.id === v)?.gstin ?? "",
-                  })
-                }
+                  });
+                  poForm.clearError("supplierId");
+                }}
               >
-                <SelectTrigger>
+                <SelectTrigger
+                  data-field="supplierId"
+                  aria-invalid={!!poForm.error("supplierId") || undefined}
+                >
                   <SelectValue placeholder="Choose supplier" />
                 </SelectTrigger>
                 <SelectContent>
@@ -467,10 +584,11 @@ function PurchaseEditor({
                 onChange={(e) => setDraft({ ...draft, invoiceNo: e.target.value })}
               />
             </FieldRow>
-            <FieldRow label="Invoice date" required>
+            <FieldRow label="Invoice date" required error={poForm.error("date")}>
               {/* A real date picker - this was a plain text box. The draft
                   keeps DD/MM/YYYY like every other date in the app. */}
               <Input
+                {...poForm.fieldProps("date")}
                 type="date"
                 value={/^\d{2}\/\d{2}\/\d{4}$/.test(draft.date) ? dmyToIso(draft.date) : ""}
                 onChange={(e) =>
@@ -478,8 +596,13 @@ function PurchaseEditor({
                 }
               />
             </FieldRow>
-            <FieldRow label="Supplier GSTIN" hint="Filled from the supplier; optional">
+            <FieldRow
+              label="Supplier GSTIN"
+              hint="Filled from the supplier; optional"
+              error={poForm.error("gstin")}
+            >
               <Input
+                {...poForm.fieldProps("gstin")}
                 placeholder="15-character GSTIN"
                 value={draft.gstin ?? ""}
                 onChange={(e) => setDraft({ ...draft, gstin: e.target.value })}
@@ -489,8 +612,18 @@ function PurchaseEditor({
 
           <div className="rounded-xl border border-border">
             <div className="flex items-center justify-between border-b border-border px-3 py-2">
-              <p className="text-sm font-semibold">Invoice lines</p>
-              <Button size="sm" variant="outline" onClick={addLine}>
+              <p className="text-sm font-semibold">
+                Invoice lines <span className="text-destructive">*</span>
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                data-field="lines"
+                onClick={() => {
+                  addLine();
+                  poForm.clearError("lines");
+                }}
+              >
                 <Plus className="size-4" /> Add line
               </Button>
             </div>
@@ -500,10 +633,11 @@ function PurchaseEditor({
                 return (
                   <div key={i} className="rounded-xl border border-border bg-surface-muted/40 p-2">
                     <div className="grid items-end gap-2 sm:grid-cols-[minmax(0,1.4fr)_110px_120px_100px_auto]">
-                      <FieldRow label="Material" required>
+                      <FieldRow label="Material" required error={poForm.error(`material-${i}`)}>
                         <Select
                           value={l.materialId}
                           onValueChange={(v) => {
+                            poForm.clearError(`material-${i}`);
                             const nm = store.rawMaterials.find((x) => x.id === v);
                             setLine(i, {
                               materialId: v,
@@ -511,8 +645,11 @@ function PurchaseEditor({
                             });
                           }}
                         >
-                          <SelectTrigger>
-                            <SelectValue />
+                          <SelectTrigger
+                            data-field={`material-${i}`}
+                            aria-invalid={!!poForm.error(`material-${i}`) || undefined}
+                          >
+                            <SelectValue placeholder="Choose material" />
                           </SelectTrigger>
                           <SelectContent>
                             {store.rawMaterials.map((x) => (
@@ -526,8 +663,10 @@ function PurchaseEditor({
                       <FieldRow
                         label={`Quantity${m?.purchaseUnit ? ` (${m.purchaseUnit})` : ""}`}
                         required
+                        error={poForm.error(`qty-${i}`)}
                       >
                         <Input
+                          {...poForm.fieldProps(`qty-${i}`)}
                           type="number"
                           min={0}
                           aria-label="Quantity"
@@ -538,8 +677,10 @@ function PurchaseEditor({
                       <FieldRow
                         label={`Rate ₹${m?.purchaseUnit ? ` / ${m.purchaseUnit}` : ""}`}
                         required
+                        error={poForm.error(`rate-${i}`)}
                       >
                         <Input
+                          {...poForm.fieldProps(`rate-${i}`)}
                           type="number"
                           min={0}
                           aria-label="Rate"
@@ -585,6 +726,9 @@ function PurchaseEditor({
                   </div>
                 );
               })}
+              {poForm.error("lines") ? (
+                <p className="text-xs text-destructive">{poForm.error("lines")}</p>
+              ) : null}
               {draft.lines.length ? null : (
                 <EmptyState
                   icon={FileText}
@@ -597,7 +741,11 @@ function PurchaseEditor({
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <FieldRow label="Discount on the bill" hint="Flat ₹ or a percent of the subtotal">
+            <FieldRow
+              label="Discount on the bill"
+              hint="Flat ₹ or a percent of the subtotal"
+              error={poForm.error("discount")}
+            >
               <div className="flex gap-2">
                 <Select
                   value={draft.discountType ?? "flat"}
@@ -614,6 +762,7 @@ function PurchaseEditor({
                   </SelectContent>
                 </Select>
                 <Input
+                  {...poForm.fieldProps("discount")}
                   type="number"
                   min={0}
                   aria-label="Discount value"
@@ -628,9 +777,12 @@ function PurchaseEditor({
             <FieldRow
               label="Amount paid now (₹)"
               hint="Leave 0 if the bill is unpaid; the rest is owed to the supplier"
+              error={poForm.error("paid")}
             >
               <Input
+                {...poForm.fieldProps("paid")}
                 type="number"
+                min={0}
                 value={draft.paidAmount ?? 0}
                 onChange={(e) => {
                   const paid = Number(e.target.value || 0);
@@ -657,10 +809,7 @@ function PurchaseEditor({
             title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
             variant="outline"
             className="flex-1"
-            onClick={() => {
-              store.savePurchase({ ...draft, status: "Ordered" });
-              setDraft(null);
-            }}
+            onClick={() => void save(false)}
           >
             Save as ordered
           </Button>
@@ -668,10 +817,7 @@ function PurchaseEditor({
             className="flex-1"
             disabled={!(draft?.id ? access.edit : access.create)}
             title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-            onClick={() => {
-              store.savePurchase(draft, { receive: true });
-              setDraft(null);
-            }}
+            onClick={() => void save(true)}
           >
             Save & receive
           </Button>
@@ -690,6 +836,7 @@ export function StockInHandScreen() {
   const [q, setQ] = useState("");
   const [counts, setCounts] = useState<Record<string, string>>({});
   const [note, setNote] = useState("");
+  const countForm = useFormCheck();
 
   const rows = store.rawMaterials.filter((m) =>
     m.name.toLowerCase().includes(q.trim().toLowerCase()),
@@ -751,6 +898,7 @@ export function StockInHandScreen() {
                       className="h-9 w-28"
                       placeholder={fmtQty(m.stock)}
                       value={counts[m.id] ?? ""}
+                      {...countForm.fieldProps(`count-${m.id}`)}
                       onChange={(e) => setCounts({ ...counts, [m.id]: e.target.value })}
                     />
                     <span className="text-xs text-muted-foreground">{m.unit}</span>
@@ -795,6 +943,7 @@ export function StockInHandScreen() {
                     className="h-9 w-28"
                     placeholder={fmtQty(m.stock)}
                     value={counts[m.id] ?? ""}
+                    {...countForm.fieldProps(`count-${m.id}`)}
                     onChange={(e) => setCounts({ ...counts, [m.id]: e.target.value })}
                   />
                 </div>
@@ -874,21 +1023,46 @@ export function StockInHandScreen() {
               </p>
             </div>
             <Input
+              {...countForm.fieldProps("note")}
+              aria-label="Reason for the adjustment (required)"
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="Reason / note"
+              placeholder="Reason / note *"
               className="h-9 w-full sm:w-56"
             />
-            <Button variant="outline" onClick={() => setCounts({})}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setCounts({});
+                countForm.reset();
+              }}
+            >
               Discard
             </Button>
             <Button
               hidden={!access.edit}
-              onClick={() => {
-                store.saveStockCount(
+              onClick={async () => {
+                const valid = countForm.check([
+                  ...changed.map(([id, v]) => ({
+                    key: `count-${id}`,
+                    label: store.rawMaterials.find((m) => m.id === id)?.name ?? "Count",
+                    value: v,
+                    valid: (x: unknown) => Number.isFinite(Number(x)) && Number(x) >= 0,
+                    message: `${store.rawMaterials.find((m) => m.id === id)?.name ?? "Count"}: enter a count of 0 or more`,
+                  })),
+                  {
+                    key: "note",
+                    label: "Reason",
+                    value: note,
+                    message: "Write why the stock is being adjusted",
+                  },
+                ]);
+                if (!valid) return;
+                const ok = await store.saveStockCount(
                   changed.map(([id, v]) => ({ materialId: id, countedQty: Number(v) })),
-                  note,
+                  note.trim(),
                 );
+                if (!ok) return;
                 setCounts({});
                 setNote("");
               }}
@@ -916,6 +1090,11 @@ export function WastageScreen() {
   const store = useStore();
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<WastageRow[]>([]);
+  const wForm = useFormCheck();
+  const wReset = wForm.reset;
+  useEffect(() => {
+    if (!open) wReset();
+  }, [open, wReset]);
 
   const monthCost = store.wastages.reduce((s, w) => {
     const m = store.rawMaterials.find((x) => x.id === w.materialId);
@@ -1030,27 +1209,39 @@ export function WastageScreen() {
               const m = store.rawMaterials.find((x) => x.id === r.materialId);
               return (
                 <div key={i} className="rounded-xl border border-border p-3">
-                  <div className="grid gap-2 sm:grid-cols-[minmax(0,1.3fr)_110px_auto]">
-                    <Select
-                      value={r.materialId}
-                      onValueChange={(v) =>
-                        setRows(rows.map((x, j) => (j === i ? { ...x, materialId: v } : x)))
-                      }
+                  <div className="grid items-end gap-2 sm:grid-cols-[minmax(0,1.3fr)_130px_auto]">
+                    <FieldRow label="Material" required error={wForm.error(`material-${i}`)}>
+                      <Select
+                        value={r.materialId}
+                        onValueChange={(v) => {
+                          setRows(rows.map((x, j) => (j === i ? { ...x, materialId: v } : x)));
+                          wForm.clearError(`material-${i}`);
+                        }}
+                      >
+                        <SelectTrigger
+                          data-field={`material-${i}`}
+                          aria-invalid={!!wForm.error(`material-${i}`) || undefined}
+                        >
+                          <SelectValue placeholder="Choose material" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {store.rawMaterials.map((x) => (
+                            <SelectItem key={x.id} value={x.id}>
+                              {x.name}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldRow>
+                    <FieldRow
+                      label={`Quantity${m?.unit ? ` (${m.unit})` : ""}`}
+                      required
+                      error={wForm.error(`qty-${i}`)}
                     >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {store.rawMaterials.map((x) => (
-                          <SelectItem key={x.id} value={x.id}>
-                            {x.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <div className="flex items-center gap-1">
                       <Input
+                        {...wForm.fieldProps(`qty-${i}`)}
                         type="number"
+                        min={0}
                         value={r.qty}
                         onChange={(e) =>
                           setRows(
@@ -1060,33 +1251,41 @@ export function WastageScreen() {
                           )
                         }
                       />
-                      <span className="w-8 text-xs text-muted-foreground">{m?.unit}</span>
-                    </div>
+                    </FieldRow>
                     <Button
                       size="sm"
                       variant="ghost"
+                      aria-label="Remove this row"
+                      title="Remove this row"
                       onClick={() => setRows(rows.filter((_, j) => j !== i))}
                     >
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                    <Input
-                      placeholder="Reason"
-                      value={r.reason}
-                      onChange={(e) =>
-                        setRows(
-                          rows.map((x, j) => (j === i ? { ...x, reason: e.target.value } : x)),
-                        )
-                      }
-                    />
-                    <Input
-                      placeholder="Notes (optional)"
-                      value={r.notes}
-                      onChange={(e) =>
-                        setRows(rows.map((x, j) => (j === i ? { ...x, notes: e.target.value } : x)))
-                      }
-                    />
+                    <FieldRow label="Reason" required error={wForm.error(`reason-${i}`)}>
+                      <Input
+                        {...wForm.fieldProps(`reason-${i}`)}
+                        placeholder="e.g. Spoiled, Spilled, Expired"
+                        value={r.reason}
+                        onChange={(e) =>
+                          setRows(
+                            rows.map((x, j) => (j === i ? { ...x, reason: e.target.value } : x)),
+                          )
+                        }
+                      />
+                    </FieldRow>
+                    <FieldRow label="Notes">
+                      <Input
+                        placeholder="Optional"
+                        value={r.notes}
+                        onChange={(e) =>
+                          setRows(
+                            rows.map((x, j) => (j === i ? { ...x, notes: e.target.value } : x)),
+                          )
+                        }
+                      />
+                    </FieldRow>
                   </div>
                   {m ? (
                     <p className="num mt-2 text-[11px] text-muted-foreground">
@@ -1097,7 +1296,18 @@ export function WastageScreen() {
                 </div>
               );
             })}
-            <Button variant="outline" onClick={addRow} className="w-full">
+            {wForm.error("rows") ? (
+              <p className="text-xs text-destructive">{wForm.error("rows")}</p>
+            ) : null}
+            <Button
+              variant="outline"
+              data-field="rows"
+              onClick={() => {
+                addRow();
+                wForm.clearError("rows");
+              }}
+              className="w-full"
+            >
               <Plus className="size-4" /> Add another item
             </Button>
           </div>
@@ -1110,8 +1320,46 @@ export function WastageScreen() {
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                store.addWastageBatch(rows);
+              onClick={async () => {
+                const valid = wForm.check([
+                  {
+                    key: "rows",
+                    label: "Items",
+                    value: rows,
+                    message: "Add at least one wasted item",
+                  },
+                  ...rows.flatMap((r, i) => {
+                    const m = store.rawMaterials.find((x) => x.id === r.materialId);
+                    return [
+                      {
+                        key: `material-${i}`,
+                        label: `Row ${i + 1} material`,
+                        value: !!m,
+                        valid: (v: unknown) => v === true,
+                        message: `Row ${i + 1}: choose a material`,
+                      },
+                      {
+                        key: `qty-${i}`,
+                        label: `Row ${i + 1} quantity`,
+                        value: r.qty,
+                        valid: (v: unknown) =>
+                          typeof v === "number" && v > 0 && (!m || v <= m.stock),
+                        message:
+                          m && r.qty > m.stock
+                            ? `Row ${i + 1}: only ${fmtQty(m.stock)} ${m.unit} of ${m.name} is in stock`
+                            : `Row ${i + 1}: quantity must be more than 0`,
+                      },
+                      {
+                        key: `reason-${i}`,
+                        label: `Row ${i + 1} reason`,
+                        value: r.reason,
+                        message: `Row ${i + 1}: write why it was wasted`,
+                      },
+                    ];
+                  }),
+                ]);
+                if (!valid) return;
+                if (!(await store.addWastageBatch(rows))) return;
                 setRows([]);
                 setOpen(false);
               }}
@@ -1134,6 +1382,11 @@ export function RequisitionsScreen() {
   const [cart, setCart] = useState<Record<string, number>>({});
   const [remarks, setRemarks] = useState("");
   const [q, setQ] = useState("");
+  const reqForm = useFormCheck();
+  const reqReset = reqForm.reset;
+  useEffect(() => {
+    if (!open) reqReset();
+  }, [open, reqReset]);
 
   const cartItems = Object.entries(cart).filter(([, qty]) => qty > 0);
   const cartValue = cartItems.reduce((s, [id, qty]) => {
@@ -1293,7 +1546,14 @@ export function RequisitionsScreen() {
           </SheetHeader>
           <div className="space-y-3 px-4 pb-24">
             <Toolbar value={q} onChange={setQ} placeholder="Search materials…" />
-            <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">
+              Materials <span className="text-destructive">*</span> — set a quantity for at least
+              one
+            </p>
+            {reqForm.error("items") ? (
+              <p className="text-xs text-destructive">{reqForm.error("items")}</p>
+            ) : null}
+            <div className="space-y-2" data-field="items" tabIndex={-1}>
               {store.rawMaterials
                 .filter((m) => m.name.toLowerCase().includes(q.trim().toLowerCase()))
                 .map((m) => {
@@ -1325,7 +1585,10 @@ export function RequisitionsScreen() {
                           label="Increase quantity"
                           variant="outline"
                           className="size-8"
-                          onClick={() => setCart({ ...cart, [m.id]: qty + 1 })}
+                          onClick={() => {
+                            setCart({ ...cart, [m.id]: qty + 1 });
+                            reqForm.clearError("items");
+                          }}
                         >
                           <Plus className="size-3.5" />
                         </IconButton>
@@ -1347,8 +1610,17 @@ export function RequisitionsScreen() {
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                store.createRequisition(
+              onClick={async () => {
+                const valid = reqForm.check([
+                  {
+                    key: "items",
+                    label: "Materials",
+                    value: cartItems,
+                    message: "Add at least one material with a quantity",
+                  },
+                ]);
+                if (!valid) return;
+                const ok = await store.createRequisition(
                   cartItems.map(([id, qty]) => {
                     const m = store.rawMaterials.find((x) => x.id === id)!;
                     return {
@@ -1359,7 +1631,7 @@ export function RequisitionsScreen() {
                   }),
                   remarks,
                 );
-                setOpen(false);
+                if (ok) setOpen(false);
               }}
             >
               Place request

@@ -1,3 +1,4 @@
+import { FieldError, isMobile10, useFormCheck } from "@/lib/formCheck";
 import { createFileRoute } from "@tanstack/react-router";
 import { KeyRound, ListOrdered, RefreshCw, ServerCog } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -92,6 +93,12 @@ function SystemPage() {
   const [reauthMobile, setReauthMobile] = useState("");
   const [reauthPassword, setReauthPassword] = useState("");
   const [reauthLoading, setReauthLoading] = useState(false);
+  const reForm = useFormCheck();
+  const reFormOpen = reauthOpen;
+  const reFormReset = reForm.reset;
+  useEffect(() => {
+    if (!reFormOpen) reFormReset();
+  }, [reFormOpen, reFormReset]);
   const orderNos = store.orders.map((o) => o.orderNo);
   const lowestOrderNo = orderNos.length ? Math.min(...orderNos) : 1;
   const highestOrderNo = orderNos.length ? Math.max(...orderNos) : 1;
@@ -110,6 +117,17 @@ function SystemPage() {
   const cloudSessionBroken = Boolean(status?.registered && status.sync?.registrationRequired);
 
   async function handleReauth() {
+    const valid = reForm.check([
+      {
+        key: "reauthMobile",
+        label: "Mobile number",
+        value: reauthMobile,
+        valid: isMobile10,
+        message: "Enter the owner's 10-digit mobile number",
+      },
+      { key: "reauthPassword", label: "Password", value: reauthPassword },
+    ]);
+    if (!valid) return;
     setReauthLoading(true);
     try {
       await registerThisPc(reauthMobile, reauthPassword);
@@ -338,34 +356,40 @@ function SystemPage() {
           </DialogHeader>
           <div className="space-y-3">
             <div>
-              <Label htmlFor="reauthMobile">Owner/admin mobile number</Label>
+              <Label htmlFor="reauthMobile" required>
+                Owner/admin mobile number
+              </Label>
               <Input
+                {...reForm.fieldProps("reauthMobile")}
                 id="reauthMobile"
+                inputMode="numeric"
                 className="mt-1.5"
                 value={reauthMobile}
                 maxLength={10}
                 onChange={(e) => setReauthMobile(e.target.value.replace(/\D/g, ""))}
                 placeholder="10-digit mobile number"
               />
+              <FieldError message={reForm.error("reauthMobile")} />
             </div>
             <div>
-              <Label htmlFor="reauthPassword">Owner/admin password</Label>
+              <Label htmlFor="reauthPassword" required>
+                Owner/admin password
+              </Label>
               <PasswordInput
+                {...reForm.fieldProps("reauthPassword")}
                 id="reauthPassword"
                 className="mt-1.5"
                 value={reauthPassword}
                 onChange={(e) => setReauthPassword(e.target.value)}
               />
+              <FieldError message={reForm.error("reauthPassword")} />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setReauthOpen(false)}>
               Cancel
             </Button>
-            <Button
-              disabled={reauthLoading || !reauthMobile || !reauthPassword}
-              onClick={handleReauth}
-            >
+            <Button disabled={reauthLoading} onClick={handleReauth}>
               {reauthLoading ? "Re-authenticating…" : "Re-authenticate"}
             </Button>
           </DialogFooter>

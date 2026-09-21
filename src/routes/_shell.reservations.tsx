@@ -1,3 +1,4 @@
+import { FieldError, isEmailOrEmpty, isMobile10, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { CalendarDays, Trash2 } from "lucide-react";
@@ -118,6 +119,12 @@ function ReservationsPage() {
   const access = useAccess("reservations");
   const store = useStore();
   const [draft, setDraft] = useState<Draft | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
 
   useEffect(() => {
     void store.loadReservationsFromServer();
@@ -207,6 +214,44 @@ function ReservationsPage() {
 
   const submit = async () => {
     if (!draft) return;
+    const valid = form.check([
+      { key: "customerName", label: "Guest name", value: draft.customerName },
+      {
+        key: "mobile",
+        label: "Mobile",
+        value: draft.mobile,
+        valid: isMobile10,
+        message: "Enter a 10-digit mobile number",
+      },
+      {
+        key: "email",
+        label: "Email",
+        value: draft.email,
+        valid: isEmailOrEmpty,
+        message: "Enter a valid email or leave it blank",
+      },
+      {
+        key: "party",
+        label: "Party size",
+        value: draft.party,
+        valid: (v) => typeof v === "number" && v >= 1,
+        message: "Party size must be at least 1",
+      },
+      {
+        key: "tableIds",
+        label: "Table(s)",
+        value: draft.tableIds,
+        message: "Choose at least one table",
+      },
+      {
+        key: "advance",
+        label: "Advance",
+        value: draft.advance,
+        valid: (v) => typeof v === "number" && v >= 0 && v <= (draft.totalAmount || 0),
+        message: "Advance can't be negative or more than the total amount",
+      },
+    ]);
+    if (!valid) return;
     const payload = {
       customerName: draft.customerName,
       mobile: draft.mobile,
@@ -333,40 +378,55 @@ function ReservationsPage() {
             <div className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Guest name</Label>
+                  <Label required>Guest name</Label>
                   <Input
+                    {...form.fieldProps("customerName")}
                     value={draft.customerName}
                     onChange={(e) => setDraft({ ...draft, customerName: e.target.value })}
                   />
+                  <FieldError message={form.error("customerName")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Mobile</Label>
+                  <Label required>Mobile</Label>
                   <Input
+                    {...form.fieldProps("mobile")}
+                    inputMode="numeric"
+                    placeholder="10-digit mobile"
                     value={draft.mobile}
-                    onChange={(e) => setDraft({ ...draft, mobile: e.target.value })}
+                    onChange={(e) =>
+                      setDraft({ ...draft, mobile: e.target.value.replace(/\D/g, "").slice(0, 10) })
+                    }
                   />
+                  <FieldError message={form.error("mobile")} />
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
                   <Label>Email</Label>
                   <Input
+                    {...form.fieldProps("email")}
+                    type="email"
+                    placeholder="Optional"
                     value={draft.email}
                     onChange={(e) => setDraft({ ...draft, email: e.target.value })}
                   />
+                  <FieldError message={form.error("email")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Party size</Label>
+                  <Label required>Party size</Label>
                   <Input
+                    {...form.fieldProps("party")}
                     type="number"
+                    min={1}
                     value={draft.party}
                     onChange={(e) => setDraft({ ...draft, party: Number(e.target.value) })}
                   />
+                  <FieldError message={form.error("party")} />
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="space-y-1.5">
-                  <Label>Date</Label>
+                  <Label required>Date</Label>
                   <Input
                     type="date"
                     min={todayIso()}
@@ -375,7 +435,7 @@ function ReservationsPage() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Start time</Label>
+                  <Label required>Start time</Label>
                   <Input
                     type="time"
                     value={draft.startTime}
@@ -383,7 +443,7 @@ function ReservationsPage() {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>End time</Label>
+                  <Label required>End time</Label>
                   <Input
                     type="time"
                     value={draft.endTime}
@@ -393,7 +453,8 @@ function ReservationsPage() {
               </div>
               {scheduleError ? <p className="text-xs text-destructive">{scheduleError}</p> : null}
               <div className="space-y-1.5">
-                <Label>Table(s)</Label>
+                <Label required>Table(s)</Label>
+                <FieldError message={form.error("tableIds")} />
                 <div className="grid max-h-40 grid-cols-2 gap-2 overflow-y-auto rounded-lg border border-border p-2 sm:grid-cols-3">
                   {bookableTables.map((t) => (
                     <label key={t.id} className="flex items-center gap-2 text-sm">
@@ -423,10 +484,13 @@ function ReservationsPage() {
                 <div className="space-y-1.5">
                   <Label>Advance</Label>
                   <Input
+                    {...form.fieldProps("advance")}
                     type="number"
+                    min={0}
                     value={draft.advance}
                     onChange={(e) => setDraft({ ...draft, advance: Number(e.target.value) })}
                   />
+                  <FieldError message={form.error("advance")} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>GST no. (optional)</Label>
@@ -444,14 +508,7 @@ function ReservationsPage() {
             </Button>
             <Button
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={
-                !(draft?.id ? access.edit : access.create) ||
-                !draft?.customerName.trim() ||
-                !draft?.mobile.trim() ||
-                !draft?.tableIds.length ||
-                !!scheduleError ||
-                !!clash
-              }
+              disabled={!(draft?.id ? access.edit : access.create) || !!scheduleError || !!clash}
               onClick={() => void submit()}
             >
               {draft?.id ? "Save changes" : "Book table"}

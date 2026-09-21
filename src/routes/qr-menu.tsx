@@ -1145,12 +1145,15 @@ function QrMenuPage() {
               </DrawerHeader>
               <div className="space-y-3 px-4">
                 <div className="space-y-1.5">
-                  <Label htmlFor="qr-mobile">Mobile number</Label>
+                  <Label htmlFor="qr-mobile" required>
+                    Mobile number
+                  </Label>
                   <Input
                     id="qr-mobile"
                     inputMode="numeric"
                     autoComplete="tel"
                     autoFocus
+                    aria-invalid={!!mobileError || undefined}
                     value={customerMobile}
                     onChange={(e) => {
                       setCustomerMobile(e.target.value.replace(/\D/g, "").slice(0, 10));

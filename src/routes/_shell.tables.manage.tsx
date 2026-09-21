@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Grid2x2, ListPlus, Plus, Trash2 } from "lucide-react";
@@ -56,6 +57,12 @@ function ManageTablesPage() {
   const access = useAccess("tables");
   const store = useStore();
   const [draft, setDraft] = useState<RestaurantTable | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
   const [cat, setCat] = useState("all");
   const [selected, setSelected] = useState<string[]>([]);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -64,6 +71,12 @@ function ManageTablesPage() {
   const [bulkSeats, setBulkSeats] = useState(4);
   const [bulkPrefix, setBulkPrefix] = useState("T");
   const [bulkStart, setBulkStart] = useState(1);
+  const bulkForm = useFormCheck();
+  const bulkFormOpen = bulkOpen;
+  const bulkFormReset = bulkForm.reset;
+  useEffect(() => {
+    if (!bulkFormOpen) bulkFormReset();
+  }, [bulkFormOpen, bulkFormReset]);
 
   const rows = store.tables.filter((t) => cat === "all" || t.categoryId === cat);
   const paged = usePagedRows(rows, 10);
@@ -217,22 +230,30 @@ function ManageTablesPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Table name</Label>
+                <Label required>Table name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   placeholder="e.g. OutDoor T5"
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Section</Label>
+                  <Label required>Section</Label>
                   <Select
                     value={draft.categoryId}
-                    onValueChange={(v) => setDraft({ ...draft, categoryId: v })}
+                    onValueChange={(v) => {
+                      setDraft({ ...draft, categoryId: v });
+                      form.clearError("categoryId");
+                    }}
                   >
-                    <SelectTrigger>
-                      <SelectValue />
+                    <SelectTrigger
+                      data-field="categoryId"
+                      aria-invalid={!!form.error("categoryId") || undefined}
+                    >
+                      <SelectValue placeholder="Choose a section" />
                     </SelectTrigger>
                     <SelectContent>
                       {sortedCategories.map((c) => (
@@ -242,14 +263,18 @@ function ManageTablesPage() {
                       ))}
                     </SelectContent>
                   </Select>
+                  <FieldError message={form.error("categoryId")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Seats</Label>
+                  <Label required>Seats</Label>
                   <Input
+                    {...form.fieldProps("seats")}
                     type="number"
+                    min={1}
                     value={draft.seats}
                     onChange={(e) => setDraft({ ...draft, seats: Number(e.target.value) })}
                   />
+                  <FieldError message={form.error("seats")} />
                 </div>
               </div>
             </div>
@@ -277,11 +302,27 @@ function ManageTablesPage() {
               </Button>
               <Button
                 title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-                disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
-                onClick={() => {
+                disabled={!(draft?.id ? access.edit : access.create)}
+                onClick={async () => {
                   if (!draft) return;
-                  store.upsertTable(draft);
-                  setDraft(null);
+                  const ok = form.check([
+                    { key: "name", label: "Table name", value: draft.name },
+                    {
+                      key: "categoryId",
+                      label: "Section",
+                      value: draft.categoryId,
+                      message: "Choose a section",
+                    },
+                    {
+                      key: "seats",
+                      label: "Seats",
+                      value: draft.seats,
+                      valid: (v) => typeof v === "number" && v >= 1,
+                      message: "Seats must be at least 1",
+                    },
+                  ]);
+                  if (!ok) return;
+                  if (await store.upsertTable(draft)) setDraft(null);
                 }}
               >
                 Save table
@@ -298,16 +339,20 @@ function ManageTablesPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label>Section</Label>
+              <Label required>Section</Label>
               <Select
                 value={bulkCat}
                 onValueChange={(v) => {
                   setBulkCat(v);
                   setBulkStart(nextStartFor(v));
+                  bulkForm.clearError("bulkCat");
                 }}
               >
-                <SelectTrigger>
-                  <SelectValue />
+                <SelectTrigger
+                  data-field="bulkCat"
+                  aria-invalid={!!bulkForm.error("bulkCat") || undefined}
+                >
+                  <SelectValue placeholder="Choose a section" />
                 </SelectTrigger>
                 <SelectContent>
                   {sortedCategories.map((c) => (
@@ -317,10 +362,11 @@ function ManageTablesPage() {
                   ))}
                 </SelectContent>
               </Select>
+              <FieldError message={bulkForm.error("bulkCat")} />
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label>Number of tables</Label>
+                <Label required>Number of tables</Label>
                 <Input
                   type="number"
                   min={1}
@@ -329,7 +375,7 @@ function ManageTablesPage() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Seats (each)</Label>
+                <Label required>Seats (each)</Label>
                 <Input
                   type="number"
                   min={1}
@@ -363,8 +409,25 @@ function ManageTablesPage() {
               Cancel
             </Button>
             <Button
-              disabled={!bulkCat || bulkCount < 1}
-              onClick={() => {
+              onClick={async () => {
+                const ok = bulkForm.check([
+                  { key: "bulkCat", label: "Section", value: bulkCat, message: "Choose a section" },
+                  {
+                    key: "bulkCount",
+                    label: "Number of tables",
+                    value: bulkCount,
+                    valid: (v) => typeof v === "number" && v >= 1,
+                    message: "Add at least 1 table",
+                  },
+                  {
+                    key: "bulkSeats",
+                    label: "Seats (each)",
+                    value: bulkSeats,
+                    valid: (v) => typeof v === "number" && v >= 1,
+                    message: "Seats must be at least 1",
+                  },
+                ]);
+                if (!ok) return;
                 const tables: RestaurantTable[] = Array.from({ length: bulkCount }, (_, i) => ({
                   id: "",
                   name: `${bulkPrefix}${bulkStart + i}`,
@@ -372,8 +435,7 @@ function ManageTablesPage() {
                   seats: bulkSeats,
                   status: "Free" as const,
                 }));
-                store.addTables(tables);
-                setBulkOpen(false);
+                if (await store.addTables(tables)) setBulkOpen(false);
               }}
             >
               <ListPlus className="size-4" /> Add {bulkCount} table(s)

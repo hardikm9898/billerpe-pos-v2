@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { ChefHat, ImageUp, Plus, Receipt, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
@@ -73,6 +74,7 @@ const SAMPLE_DISCOUNT = 100;
 export function CalculationSection() {
   const store = useStore();
   const [rule, setRule] = useState(store.serviceCharge);
+  const scForm = useFormCheck();
 
   const base = rule.calculationOn === "core" ? SAMPLE_SUBTOTAL : SAMPLE_SUBTOTAL - SAMPLE_DISCOUNT;
   const qualifies =
@@ -138,12 +140,17 @@ export function CalculationSection() {
               </Select>
             </div>
             <div className="space-y-1.5">
-              <Label>{rule.type === "percent" ? "Percentage (%)" : "Amount (₹)"}</Label>
+              <Label required={rule.active}>
+                {rule.type === "percent" ? "Percentage (%)" : "Amount (₹)"}
+              </Label>
               <Input
+                {...scForm.fieldProps("value")}
                 type="number"
+                min={0}
                 value={rule.value}
                 onChange={(e) => setRule((r) => ({ ...r, value: Number(e.target.value) }))}
               />
+              <FieldError message={scForm.error("value")} />
             </div>
             <div className="space-y-1.5">
               <Label>Calculate on</Label>
@@ -182,12 +189,15 @@ export function CalculationSection() {
             </div>
             {rule.condition !== "always" ? (
               <div className="space-y-1.5">
-                <Label>Threshold (₹)</Label>
+                <Label required>Threshold (₹)</Label>
                 <Input
+                  {...scForm.fieldProps("threshold")}
                   type="number"
+                  min={0}
                   value={rule.threshold}
                   onChange={(e) => setRule((r) => ({ ...r, threshold: Number(e.target.value) }))}
                 />
+                <FieldError message={scForm.error("threshold")} />
               </div>
             ) : null}
           </div>
@@ -222,7 +232,39 @@ export function CalculationSection() {
           </div>
 
           <div className="mt-4 flex justify-end">
-            <Button onClick={() => store.setServiceCharge(rule)}>Save rule</Button>
+            <Button
+              onClick={() => {
+                const valid = scForm.check([
+                  {
+                    key: "value",
+                    label: "Charge",
+                    value: rule.value,
+                    valid: (v) =>
+                      typeof v === "number" &&
+                      (rule.active ? v > 0 : v >= 0) &&
+                      (rule.type !== "percent" || v <= 100),
+                    message:
+                      rule.type === "percent"
+                        ? "Enter a percentage between 0 and 100"
+                        : "Enter an amount more than ₹0",
+                  },
+                  ...(rule.condition !== "always"
+                    ? [
+                        {
+                          key: "threshold",
+                          label: "Threshold",
+                          value: rule.threshold,
+                          valid: (v: unknown) => typeof v === "number" && v > 0,
+                          message: "Enter the bill amount the rule depends on",
+                        },
+                      ]
+                    : []),
+                ]);
+                if (valid) store.setServiceCharge(rule);
+              }}
+            >
+              Save rule
+            </Button>
           </div>
         </SectionCard>
 
@@ -298,6 +340,12 @@ const emptyTax = (): TaxRule => ({
 export function TaxSection() {
   const store = useStore();
   const [draft, setDraft] = useState<TaxRule | null>(null);
+  const taxForm = useFormCheck();
+  const taxFormOpen = !!draft;
+  const taxFormReset = taxForm.reset;
+  useEffect(() => {
+    if (!taxFormOpen) taxFormReset();
+  }, [taxFormOpen, taxFormReset]);
   const gstOn = store.invoiceFormat.gstCalculation;
 
   const activeTotal = store.taxRules
@@ -419,24 +467,29 @@ export function TaxSection() {
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5 sm:col-span-2">
-                  <Label>Tax name</Label>
+                  <Label required>Tax name</Label>
                   <Input
+                    {...taxForm.fieldProps("name")}
                     value={draft.name}
                     placeholder="CGST"
                     onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   />
+                  <FieldError message={taxForm.error("name")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Value</Label>
+                  <Label required>{draft.type === "percent" ? "Value (%)" : "Value (₹)"}</Label>
                   <Input
+                    {...taxForm.fieldProps("value")}
                     type="number"
+                    min={0}
                     value={draft.value}
                     onChange={(e) => setDraft({ ...draft, value: Number(e.target.value) })}
                   />
+                  <FieldError message={taxForm.error("value")} />
                 </div>
               </div>
               <div className="space-y-1.5">
-                <Label>Type</Label>
+                <Label required>Type</Label>
                 <Select
                   value={draft.type}
                   onValueChange={(v) => setDraft({ ...draft, type: v as "percent" | "fixed" })}
@@ -498,9 +551,24 @@ export function TaxSection() {
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                if (draft) store.upsertTaxRule(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const valid = taxForm.check([
+                  { key: "name", label: "Tax name", value: draft.name },
+                  {
+                    key: "value",
+                    label: "Value",
+                    value: draft.value,
+                    valid: (v) =>
+                      typeof v === "number" && v > 0 && (draft.type !== "percent" || v <= 100),
+                    message:
+                      draft.type === "percent"
+                        ? "Enter a percentage between 0 and 100"
+                        : "Enter an amount more than ₹0",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertTaxRule(draft)) setDraft(null);
               }}
             >
               Save tax
@@ -528,6 +596,7 @@ const CONTENT_LABEL: Record<string, string> = {
 export function InvoiceFormatSection() {
   const store = useStore();
   const [fmt, setFmt] = useState(store.invoiceFormat);
+  const fmtForm = useFormCheck();
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const logoInputRef = useRef<HTMLInputElement>(null);
@@ -746,15 +815,34 @@ export function InvoiceFormatSection() {
               </div>
               <div className="space-y-1.5">
                 <Label>GST number</Label>
-                <Input value={fmt.gstNo} onChange={(e) => update({ gstNo: e.target.value })} />
+                <Input
+                  {...fmtForm.fieldProps("gstNo")}
+                  placeholder="Optional, 15 characters"
+                  value={fmt.gstNo}
+                  onChange={(e) => update({ gstNo: e.target.value.toUpperCase() })}
+                />
+                <FieldError message={fmtForm.error("gstNo")} />
               </div>
               <div className="space-y-1.5">
                 <Label>FSSAI number</Label>
-                <Input value={fmt.fssaiNo} onChange={(e) => update({ fssaiNo: e.target.value })} />
+                <Input
+                  {...fmtForm.fieldProps("fssaiNo")}
+                  inputMode="numeric"
+                  placeholder="Optional, 14 digits"
+                  value={fmt.fssaiNo}
+                  onChange={(e) => update({ fssaiNo: e.target.value })}
+                />
+                <FieldError message={fmtForm.error("fssaiNo")} />
               </div>
               <div className="space-y-1.5">
                 <Label>UPI ID for the bill QR</Label>
-                <Input value={fmt.upiId} onChange={(e) => update({ upiId: e.target.value })} />
+                <Input
+                  {...fmtForm.fieldProps("upiId")}
+                  placeholder="e.g. outlet@okbank"
+                  value={fmt.upiId}
+                  onChange={(e) => update({ upiId: e.target.value })}
+                />
+                <FieldError message={fmtForm.error("upiId")} />
               </div>
               <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-3">
                 <div>
@@ -889,7 +977,36 @@ export function InvoiceFormatSection() {
           </SectionCard>
 
           <div className="flex justify-end">
-            <Button onClick={() => store.setInvoiceFormat(fmt)}>
+            <Button
+              onClick={() => {
+                const blankOr = (re: RegExp) => (v: unknown) =>
+                  !String(v ?? "").trim() || re.test(String(v).trim());
+                const valid = fmtForm.check([
+                  {
+                    key: "gstNo",
+                    label: "GST number",
+                    value: fmt.gstNo,
+                    valid: blankOr(/^[0-9A-Z]{15}$/i),
+                    message: "GST number must be 15 letters/digits, or leave it blank",
+                  },
+                  {
+                    key: "fssaiNo",
+                    label: "FSSAI number",
+                    value: fmt.fssaiNo,
+                    valid: (v) => blankOr(/^\d{14}$/)(String(v ?? "").replace(/\s/g, "")),
+                    message: "FSSAI number must be 14 digits, or leave it blank",
+                  },
+                  {
+                    key: "upiId",
+                    label: "UPI ID",
+                    value: fmt.upiId,
+                    valid: blankOr(/^[\w.-]{2,}@[a-z][\w.-]*$/i),
+                    message: "Enter a UPI ID like name@bank, or leave it blank",
+                  },
+                ]);
+                if (valid) store.setInvoiceFormat(fmt);
+              }}
+            >
               <Receipt className="size-4" /> Save invoice format
             </Button>
           </div>
@@ -1173,6 +1290,12 @@ const emptyPromo = (): PromoCode => ({
 export function PromoSection() {
   const store = useStore();
   const [draft, setDraft] = useState<PromoCode | null>(null);
+  const promoForm = useFormCheck();
+  const promoFormOpen = !!draft;
+  const promoFormReset = promoForm.reset;
+  useEffect(() => {
+    if (!promoFormOpen) promoFormReset();
+  }, [promoFormOpen, promoFormReset]);
   const active = useMemo(() => store.promoCodes.filter((p) => p.active), [store.promoCodes]);
 
   return (
@@ -1245,23 +1368,28 @@ export function PromoSection() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Display name</Label>
+                <Label required>Display name</Label>
                 <Input
+                  {...promoForm.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                <FieldError message={promoForm.error("name")} />
               </div>
               <div className="space-y-1.5">
-                <Label>Code</Label>
+                <Label required>Code</Label>
                 <Input
+                  {...promoForm.fieldProps("code")}
+                  placeholder="e.g. WELCOME10"
                   value={draft.code}
                   className="font-mono uppercase"
                   onChange={(e) => setDraft({ ...draft, code: e.target.value.toUpperCase() })}
                 />
+                <FieldError message={promoForm.error("code")} />
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Type</Label>
+                  <Label required>Type</Label>
                   <Select
                     value={draft.type}
                     onValueChange={(v) => setDraft({ ...draft, type: v as "percent" | "fixed" })}
@@ -1276,12 +1404,15 @@ export function PromoSection() {
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Value</Label>
+                  <Label required>{draft.type === "percent" ? "Value (%)" : "Value (₹)"}</Label>
                   <Input
+                    {...promoForm.fieldProps("value")}
                     type="number"
+                    min={0}
                     value={draft.value}
                     onChange={(e) => setDraft({ ...draft, value: Number(e.target.value) })}
                   />
+                  <FieldError message={promoForm.error("value")} />
                 </div>
               </div>
             </div>
@@ -1291,9 +1422,31 @@ export function PromoSection() {
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                if (draft) store.upsertPromo(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const valid = promoForm.check([
+                  { key: "name", label: "Display name", value: draft.name },
+                  {
+                    key: "code",
+                    label: "Code",
+                    value: draft.code,
+                    valid: (v) => /^[A-Z0-9_-]{3,20}$/.test(String(v ?? "").trim()),
+                    message: "Code needs 3-20 letters or digits (no spaces)",
+                  },
+                  {
+                    key: "value",
+                    label: "Value",
+                    value: draft.value,
+                    valid: (v) =>
+                      typeof v === "number" && v > 0 && (draft.type !== "percent" || v <= 100),
+                    message:
+                      draft.type === "percent"
+                        ? "Enter a percentage between 0 and 100"
+                        : "Enter an amount more than ₹0",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertPromo({ ...draft, code: draft.code.trim() })) setDraft(null);
               }}
             >
               Save promo
@@ -1452,6 +1605,12 @@ function DefaultPaymentModeCard() {
 export function PaymentModesSection() {
   const store = useStore();
   const [draft, setDraft] = useState<PaymentModeConfig | null>(null);
+  const modeForm = useFormCheck();
+  const modeFormOpen = !!draft;
+  const modeFormReset = modeForm.reset;
+  useEffect(() => {
+    if (!modeFormOpen) modeFormReset();
+  }, [modeFormOpen, modeFormReset]);
 
   return (
     <div className="space-y-4">
@@ -1529,13 +1688,15 @@ export function PaymentModesSection() {
           </DialogHeader>
           {draft ? (
             <div className="space-y-1.5">
-              <Label>Name</Label>
+              <Label required>Name</Label>
               <Input
+                {...modeForm.fieldProps("name")}
                 value={draft.name}
                 disabled={!draft.deletable}
                 placeholder="e.g. Paytm Wallet"
                 onChange={(e) => setDraft({ ...draft, name: e.target.value })}
               />
+              <FieldError message={modeForm.error("name")} />
               {!draft.deletable ? (
                 <p className="text-xs text-muted-foreground">
                   Protected default modes can't be renamed.
@@ -1548,10 +1709,26 @@ export function PaymentModesSection() {
               Cancel
             </Button>
             <Button
-              disabled={!draft?.name.trim()}
-              onClick={() => {
-                if (draft) store.upsertPaymentMode(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const taken = store.paymentModes.some(
+                  (m) =>
+                    m.id !== draft.id &&
+                    m.name.trim().toLowerCase() === draft.name.trim().toLowerCase(),
+                );
+                const valid = modeForm.check([
+                  {
+                    key: "name",
+                    label: "Name",
+                    value: draft.name,
+                    valid: (v) => !!String(v ?? "").trim() && !taken,
+                    message: taken
+                      ? "A payment mode with this name already exists"
+                      : "Name is required",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertPaymentMode(draft)) setDraft(null);
               }}
             >
               Save mode

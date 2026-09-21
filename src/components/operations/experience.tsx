@@ -1,3 +1,4 @@
+import { FieldError, isMobile10, useFormCheck } from "@/lib/formCheck";
 import {
   Download,
   Grid2X2,
@@ -564,6 +565,12 @@ export function CustomerSection() {
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Customer | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
 
   const rows = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -686,25 +693,35 @@ export function CustomerSection() {
           {draft ? (
             <div className="space-y-3">
               <div className="space-y-1.5">
-                <Label>Name</Label>
+                <Label required>Name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <div className="space-y-1.5">
-                <Label>Mobile</Label>
+                <Label required>Mobile</Label>
                 <Input
+                  {...form.fieldProps("phone")}
+                  inputMode="numeric"
+                  placeholder="10-digit mobile"
                   value={draft.phone}
-                  onChange={(e) => setDraft({ ...draft, phone: e.target.value })}
+                  onChange={(e) =>
+                    setDraft({ ...draft, phone: e.target.value.replace(/\D/g, "").slice(0, 10) })
+                  }
                 />
+                <FieldError message={form.error("phone")} />
               </div>
               <div className="space-y-1.5">
                 <Label>GSTIN (optional)</Label>
                 <Input
+                  {...form.fieldProps("gstin")}
                   value={draft.gstin ?? ""}
                   onChange={(e) => setDraft({ ...draft, gstin: e.target.value })}
                 />
+                <FieldError message={form.error("gstin")} />
               </div>
               <div className="space-y-1.5">
                 <Label>Address (optional)</Label>
@@ -720,9 +737,28 @@ export function CustomerSection() {
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                if (draft) store.upsertCustomer(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const valid = form.check([
+                  { key: "name", label: "Name", value: draft.name },
+                  {
+                    key: "phone",
+                    label: "Mobile",
+                    value: draft.phone,
+                    valid: isMobile10,
+                    message: "Enter a 10-digit mobile number",
+                  },
+                  {
+                    key: "gstin",
+                    label: "GSTIN",
+                    value: draft.gstin,
+                    valid: (v) =>
+                      !String(v ?? "").trim() || /^[0-9A-Z]{15}$/i.test(String(v).trim()),
+                    message: "GSTIN must be 15 letters/digits, or leave it blank",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertCustomer(draft)) setDraft(null);
               }}
             >
               Save customer

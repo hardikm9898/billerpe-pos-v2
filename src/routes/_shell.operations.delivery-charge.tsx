@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { createFileRoute } from "@tanstack/react-router";
 import { Truck } from "lucide-react";
 import { useState } from "react";
@@ -82,6 +83,7 @@ function RuleEditor({
   onSave: (rule: BillChargeRule) => void;
 }) {
   const [rule, setRule] = useState(initial);
+  const form = useFormCheck();
 
   return (
     <SectionCard title={title} bodyClassName="p-3 sm:p-4">
@@ -113,12 +115,17 @@ function RuleEditor({
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label>{rule.type === "percent" ? "Percentage (%)" : "Amount (₹)"}</Label>
+          <Label required={rule.active}>
+            {rule.type === "percent" ? "Percentage (%)" : "Amount (₹)"}
+          </Label>
           <Input
+            {...form.fieldProps("value")}
             type="number"
+            min={0}
             value={rule.value}
             onChange={(e) => setRule((r) => ({ ...r, value: Number(e.target.value) }))}
           />
+          <FieldError message={form.error("value")} />
         </div>
         <div className="space-y-1.5">
           <Label>Calculate on</Label>
@@ -153,12 +160,15 @@ function RuleEditor({
         </div>
         {rule.condition !== "always" ? (
           <div className="space-y-1.5">
-            <Label>Threshold (₹)</Label>
+            <Label required>Threshold (₹)</Label>
             <Input
+              {...form.fieldProps("threshold")}
               type="number"
+              min={0}
               value={rule.threshold}
               onChange={(e) => setRule((r) => ({ ...r, threshold: Number(e.target.value) }))}
             />
+            <FieldError message={form.error("threshold")} />
           </div>
         ) : null}
       </div>
@@ -193,7 +203,38 @@ function RuleEditor({
       </div>
 
       <div className="mt-4 flex justify-end">
-        <Button size="sm" onClick={() => onSave(rule)}>
+        <Button
+          size="sm"
+          onClick={() => {
+            const valid = form.check([
+              {
+                key: "value",
+                label: "Charge",
+                value: rule.value,
+                valid: (v) =>
+                  typeof v === "number" &&
+                  (rule.active ? v > 0 : v >= 0) &&
+                  (rule.type !== "percent" || v <= 100),
+                message:
+                  rule.type === "percent"
+                    ? "Enter a percentage between 0 and 100"
+                    : "Enter an amount more than ₹0",
+              },
+              ...(rule.condition !== "always"
+                ? [
+                    {
+                      key: "threshold",
+                      label: "Threshold",
+                      value: rule.threshold,
+                      valid: (v: unknown) => typeof v === "number" && v > 0,
+                      message: "Enter the bill amount the rule depends on",
+                    },
+                  ]
+                : []),
+            ]);
+            if (valid) onSave(rule);
+          }}
+        >
           Save rule
         </Button>
       </div>

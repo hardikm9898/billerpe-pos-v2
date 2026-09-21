@@ -195,5 +195,5 @@ export const OPS_UNCONFIRMED = [
     title: "Bill rounding is hardcoded",
     note: "Every bill is rounded to the nearest rupee outside this module. It is surfaced here as read-only information, not as an editable rule.",
   },
-];import type { PermissionModule } from "@/mock/types";
-
+];
+import type { PermissionModule } from "@/mock/types";

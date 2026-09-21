@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { ArrowDownCircle, ArrowUpCircle, Lock, Wallet } from "lucide-react";
@@ -61,6 +62,12 @@ function CashSessionPage() {
   const [mode, setMode] = useState<Mode>(null);
   const [amount, setAmount] = useState("");
   const [reason, setReason] = useState("");
+  const form = useFormCheck();
+  const formOpen = !!mode;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
 
   const close = () => {
     setMode(null);
@@ -247,7 +254,7 @@ function CashSessionPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label>
+              <Label required>
                 {mode === "open"
                   ? "Opening float (₹)"
                   : mode === "close"
@@ -255,11 +262,14 @@ function CashSessionPage() {
                     : "Amount (₹)"}
               </Label>
               <Input
+                {...form.fieldProps("amount")}
                 type="number"
+                min={0}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 autoFocus
               />
+              <FieldError message={form.error("amount")} />
             </div>
 
             {mode === "withdraw" ? (
@@ -289,11 +299,14 @@ function CashSessionPage() {
 
             {mode !== "open" ? (
               <div className="space-y-1.5">
-                <Label>
+                <Label required={!(mode === "close" && variance === 0)}>
                   {mode === "close" ? "Variance explanation" : "Reason"}
                   {mode === "close" && variance === 0 ? " (optional)" : ""}
                 </Label>
                 <Textarea
+                  data-field="reason"
+                  aria-invalid={!!form.error("reason") || undefined}
+                  onInput={() => form.clearError("reason")}
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
                   placeholder={
@@ -302,6 +315,7 @@ function CashSessionPage() {
                       : "Why is this movement happening?"
                   }
                 />
+                <FieldError message={form.error("reason")} />
               </div>
             ) : null}
           </div>
@@ -310,23 +324,49 @@ function CashSessionPage() {
               Cancel
             </Button>
             <Button
-              disabled={
-                Number(amount) < 0 ||
-                amount === "" ||
-                (mode === "add" && (!reason.trim() || Number(amount) <= 0)) ||
-                (mode === "withdraw" && (!reason.trim() || Number(amount) <= 0)) ||
-                (mode === "close" && variance !== 0 && !reason.trim())
-              }
-              onClick={() => {
+              onClick={async () => {
                 const value = Number(amount);
-                if (mode === "open") store.openSession(value);
-                if (mode === "add") store.addCash(value, reason.trim());
-                if (mode === "withdraw") {
-                  const ok = store.withdrawCash(value, reason.trim());
-                  if (!ok) return;
-                }
-                if (mode === "close") store.closeSession(value, reason.trim());
-                close();
+                const movement = mode === "add" || mode === "withdraw";
+                const valid = form.check([
+                  {
+                    key: "amount",
+                    label: "Amount",
+                    value: amount,
+                    valid: (v) => v !== "" && (movement ? Number(v) > 0 : Number(v) >= 0),
+                    message: movement ? "Enter an amount more than ₹0" : "Enter an amount (₹0 or more)",
+                  },
+                  ...(mode === "withdraw"
+                    ? [
+                        {
+                          key: "amount",
+                          label: "Amount",
+                          value: value,
+                          valid: (v: unknown) => Number(v) <= balance,
+                          message: `You can't withdraw more than the drawer balance (₹${balance})`,
+                        },
+                      ]
+                    : []),
+                  ...(movement || (mode === "close" && variance !== 0)
+                    ? [
+                        {
+                          key: "reason",
+                          label: mode === "close" ? "Variance explanation" : "Reason",
+                          value: reason,
+                          message:
+                            mode === "close"
+                              ? "Explain why the counted cash differs from expected"
+                              : "Write why this cash is being moved",
+                        },
+                      ]
+                    : []),
+                ]);
+                if (!valid) return;
+                let ok = true;
+                if (mode === "open") ok = await store.openSession(value);
+                if (mode === "add") ok = await store.addCash(value, reason.trim());
+                if (mode === "withdraw") ok = !!store.withdrawCash(value, reason.trim());
+                if (mode === "close") ok = await store.closeSession(value, reason.trim());
+                if (ok) close();
               }}
             >
               Confirm

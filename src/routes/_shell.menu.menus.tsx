@@ -1,7 +1,8 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { BookOpen, Plus, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 import { Page, PageHeader, SectionCard, StatCard } from "@/components/kit";
 import { AssignmentSummary, ChipSelect, Notice } from "@/components/operations/shared";
@@ -41,6 +42,12 @@ function MenusPage() {
   const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<Menu | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
 
   const tcName = (id: string) => store.tableCategories.find((c) => c.id === id)?.name ?? id;
   const defaultMenu = store.menus.find((m) => m.isDefault) ?? store.menus[0];
@@ -74,10 +81,11 @@ function MenusPage() {
       />
 
       <Notice tone="info" title="A secondary menu needs both axes to match">
-        Leave table categories or order types empty to not filter on that axis. Build out a menu's
-        catalogue from the Menu Categories / Menu Items / Addons / Variants pages — pick the menu
-        there first. <span className="font-semibold">{defaultMenu?.name ?? "none set"}</span> is the
-        default that every order falls back to. A brand-new menu starts completely empty.
+        Leave table categories or order types empty to not filter on that axis - but a second menu
+        with neither set is not used until you assign it (orders keep the default). Build out a
+        menu's catalogue from the Menu Categories / Menu Items / Addons / Variants pages — pick the
+        menu there first. <span className="font-semibold">{defaultMenu?.name ?? "none set"}</span>{" "}
+        is the default that every order falls back to. A brand-new menu starts completely empty.
       </Notice>
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -161,12 +169,14 @@ function MenusPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Menu name</Label>
+                <Label required>Menu name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   placeholder="e.g. Bar Menu"
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <ChipSelect
                 label="Table categories"
@@ -206,11 +216,11 @@ function MenusPage() {
             </Button>
             <Button
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
-              onClick={() => {
+              disabled={!(draft?.id ? access.edit : access.create)}
+              onClick={async () => {
                 if (!draft) return;
-                store.upsertMenu(draft);
-                setDraft(null);
+                if (!form.check([{ key: "name", label: "Menu name", value: draft.name }])) return;
+                if (await store.upsertMenu(draft)) setDraft(null);
               }}
             >
               Save menu

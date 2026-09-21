@@ -1,7 +1,8 @@
+import { isMobile10, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { ChevronDown, Package, Pencil, Plus, Ruler, Truck } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 
 import { DataTable, EmptyState, Money, SectionCard, StatCard } from "@/components/kit";
 import {
@@ -53,6 +54,12 @@ export function RawMaterialsScreen() {
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<RawMaterial | null>(null);
+  const matForm = useFormCheck();
+  const matFormOpen = !!draft;
+  const matFormReset = matForm.reset;
+  useEffect(() => {
+    if (!matFormOpen) matFormReset();
+  }, [matFormOpen, matFormReset]);
 
   const rows = useMemo(
     () =>
@@ -204,8 +211,9 @@ export function RawMaterialsScreen() {
           </DialogHeader>
           {draft ? (
             <div className="grid gap-3">
-              <FieldRow label="Material name">
+              <FieldRow label="Material name" required error={matForm.error("name")}>
                 <Input
+                  {...matForm.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   placeholder="e.g. Paneer"
@@ -218,8 +226,10 @@ export function RawMaterialsScreen() {
                     onChange={(e) => setDraft({ ...draft, category: e.target.value })}
                   />
                 </FieldRow>
-                <FieldRow label="Purchase price (per purchase unit)">
+                <FieldRow label="Purchase price (per purchase unit)" error={matForm.error("price")}>
                   <Input
+                    {...matForm.fieldProps("price")}
+                    min={0}
                     type="number"
                     value={Math.round(draft.rate * draft.conversion * 100) / 100}
                     onChange={(e) =>
@@ -232,10 +242,13 @@ export function RawMaterialsScreen() {
                 </FieldRow>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
-                <FieldRow label="Purchase unit">
+                <FieldRow label="Purchase unit" required error={matForm.error("purchaseUnit")}>
                   <Select
                     value={draft.purchaseUnit}
-                    onValueChange={(v) => setDraft({ ...draft, purchaseUnit: v })}
+                    onValueChange={(v) => {
+                      setDraft({ ...draft, purchaseUnit: v });
+                      matForm.clearError("purchaseUnit");
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -249,8 +262,14 @@ export function RawMaterialsScreen() {
                     </SelectContent>
                   </Select>
                 </FieldRow>
-                <FieldRow label="Consumption unit">
-                  <Select value={draft.unit} onValueChange={(v) => setDraft({ ...draft, unit: v })}>
+                <FieldRow label="Consumption unit" required error={matForm.error("unit")}>
+                  <Select
+                    value={draft.unit}
+                    onValueChange={(v) => {
+                      setDraft({ ...draft, unit: v });
+                      matForm.clearError("unit");
+                    }}
+                  >
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
@@ -272,7 +291,11 @@ export function RawMaterialsScreen() {
                     exit={{ opacity: 0, height: 0 }}
                     className="overflow-hidden"
                   >
-                    <FieldRow label={`Conversion — 1 ${draft.purchaseUnit} equals`}>
+                    <FieldRow
+                      label={`Conversion — 1 ${draft.purchaseUnit} equals`}
+                      required
+                      error={matForm.error("conversion")}
+                    >
                       <div className="flex items-center gap-2">
                         <Input
                           type="number"
@@ -328,10 +351,39 @@ export function RawMaterialsScreen() {
             <Button
               disabled={!(draft?.id ? access.edit : access.create)}
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              onClick={() => {
-                if (!draft?.name.trim()) return;
-                store.upsertRawMaterial(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const valid = matForm.check([
+                  { key: "name", label: "Material name", value: draft.name },
+                  {
+                    key: "purchaseUnit",
+                    label: "Purchase unit",
+                    value: draft.purchaseUnit,
+                    message: "Choose a purchase unit",
+                  },
+                  {
+                    key: "unit",
+                    label: "Consumption unit",
+                    value: draft.unit,
+                    message: "Choose a consumption unit",
+                  },
+                  {
+                    key: "conversion",
+                    label: "Conversion",
+                    value: draft.conversion,
+                    valid: (v) => typeof v === "number" && v > 0,
+                    message: "Conversion must be more than 0",
+                  },
+                  {
+                    key: "price",
+                    label: "Purchase price",
+                    value: draft.rate,
+                    valid: (v) => typeof v !== "number" || v >= 0,
+                    message: "Purchase price can't be negative",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertRawMaterial(draft)) setDraft(null);
               }}
             >
               Save material
@@ -347,6 +399,12 @@ export function UnitsScreen() {
   const access = useAccess("stock-masters");
   const store = useStore();
   const [draft, setDraft] = useState<StockUnit | null>(null);
+  const unitForm = useFormCheck();
+  const unitFormOpen = !!draft;
+  const unitFormReset = unitForm.reset;
+  useEffect(() => {
+    if (!unitFormOpen) unitFormReset();
+  }, [unitFormOpen, unitFormReset]);
   const usage = (short: string) =>
     store.rawMaterials.filter((m) => m.unit === short || m.purchaseUnit === short).length;
 
@@ -413,15 +471,17 @@ export function UnitsScreen() {
           </DialogHeader>
           {draft ? (
             <div className="grid gap-3">
-              <FieldRow label="Unit name">
+              <FieldRow label="Unit name" required error={unitForm.error("unitName")}>
                 <Input
+                  {...unitForm.fieldProps("unitName")}
                   value={draft.unitName}
                   onChange={(e) => setDraft({ ...draft, unitName: e.target.value })}
                   placeholder="Kilogram"
                 />
               </FieldRow>
-              <FieldRow label="Short name">
+              <FieldRow label="Short name" required error={unitForm.error("shortName")}>
                 <Input
+                  {...unitForm.fieldProps("shortName")}
                   value={draft.shortName}
                   onChange={(e) => setDraft({ ...draft, shortName: e.target.value })}
                   placeholder="kg"
@@ -436,10 +496,14 @@ export function UnitsScreen() {
             <Button
               disabled={!(draft?.id ? access.edit : access.create)}
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              onClick={() => {
-                if (!draft?.unitName.trim() || !draft.shortName.trim()) return;
-                store.upsertUnit(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const valid = unitForm.check([
+                  { key: "unitName", label: "Unit name", value: draft.unitName },
+                  { key: "shortName", label: "Short name", value: draft.shortName },
+                ]);
+                if (!valid) return;
+                if (await store.upsertUnit(draft)) setDraft(null);
               }}
             >
               Save unit
@@ -456,6 +520,12 @@ export function SuppliersScreen() {
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Supplier | null>(null);
+  const supForm = useFormCheck();
+  const supFormOpen = !!draft;
+  const supFormReset = supForm.reset;
+  useEffect(() => {
+    if (!supFormOpen) supFormReset();
+  }, [supFormOpen, supFormReset]);
 
   const rows = store.suppliers.filter((s) =>
     `${s.name} ${s.contact} ${s.gstin}`.toLowerCase().includes(q.trim().toLowerCase()),
@@ -564,8 +634,9 @@ export function SuppliersScreen() {
           </DialogHeader>
           {draft ? (
             <div className="grid gap-3">
-              <FieldRow label="Supplier name">
+              <FieldRow label="Supplier name" required error={supForm.error("name")}>
                 <Input
+                  {...supForm.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
@@ -577,15 +648,20 @@ export function SuppliersScreen() {
                     onChange={(e) => setDraft({ ...draft, contact: e.target.value })}
                   />
                 </FieldRow>
-                <FieldRow label="Phone">
+                <FieldRow label="Phone" error={supForm.error("phone")}>
                   <Input
+                    {...supForm.fieldProps("phone")}
+                    inputMode="numeric"
+                    placeholder="Optional, 10 digits"
                     value={draft.phone}
                     onChange={(e) => setDraft({ ...draft, phone: e.target.value })}
                   />
                 </FieldRow>
               </div>
-              <FieldRow label="GSTIN">
+              <FieldRow label="GSTIN" error={supForm.error("gstin")}>
                 <Input
+                  {...supForm.fieldProps("gstin")}
+                  placeholder="Optional, 15 characters"
                   value={draft.gstin}
                   onChange={(e) => setDraft({ ...draft, gstin: e.target.value })}
                 />
@@ -599,10 +675,28 @@ export function SuppliersScreen() {
             <Button
               disabled={!(draft?.id ? access.edit : access.create)}
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              onClick={() => {
-                if (!draft?.name.trim()) return;
-                store.upsertSupplier(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const valid = supForm.check([
+                  { key: "name", label: "Supplier name", value: draft.name },
+                  {
+                    key: "phone",
+                    label: "Phone",
+                    value: draft.phone,
+                    valid: (v) => !String(v ?? "").trim() || isMobile10(String(v).trim()),
+                    message: "Enter a 10-digit phone number or leave it blank",
+                  },
+                  {
+                    key: "gstin",
+                    label: "GSTIN",
+                    value: draft.gstin,
+                    valid: (v) =>
+                      !String(v ?? "").trim() || /^[0-9A-Z]{15}$/i.test(String(v).trim()),
+                    message: "GSTIN must be 15 letters/digits, or leave it blank",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertSupplier(draft)) setDraft(null);
               }}
             >
               Save supplier
@@ -731,6 +825,12 @@ export function SemiEditor({
 }) {
   const access = useAccess("stock-recipes");
   const store = useStore();
+  const sfForm = useFormCheck();
+  const sfOpen = !!draft;
+  const sfReset = sfForm.reset;
+  useEffect(() => {
+    if (!sfOpen) sfReset();
+  }, [sfOpen, sfReset]);
   return (
     <Dialog open={!!draft} onOpenChange={(o) => !o && setDraft(null)}>
       <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto">
@@ -743,16 +843,23 @@ export function SemiEditor({
           <div className="grid gap-3">
             <div className="grid gap-3 sm:grid-cols-3">
               <div className="sm:col-span-2">
-                <FieldRow label="Item name">
+                <FieldRow label="Item name" required error={sfForm.error("name")}>
                   <Input
+                    {...sfForm.fieldProps("name")}
                     value={draft.name}
                     onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                     placeholder="e.g. Onion-Tomato Masala Base"
                   />
                 </FieldRow>
               </div>
-              <FieldRow label="Unit">
-                <Select value={draft.unit} onValueChange={(v) => setDraft({ ...draft, unit: v })}>
+              <FieldRow label="Unit" required error={sfForm.error("unit")}>
+                <Select
+                  value={draft.unit}
+                  onValueChange={(v) => {
+                    setDraft({ ...draft, unit: v });
+                    sfForm.clearError("unit");
+                  }}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -889,10 +996,14 @@ export function SemiEditor({
           <Button
             disabled={!(draft?.id ? access.edit : access.create)}
             title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-            onClick={() => {
-              if (!draft?.name.trim()) return;
-              store.upsertSemiFinished(draft);
-              setDraft(null);
+            onClick={async () => {
+              if (!draft) return;
+              const valid = sfForm.check([
+                { key: "name", label: "Item name", value: draft.name },
+                { key: "unit", label: "Unit", value: draft.unit, message: "Choose a unit" },
+              ]);
+              if (!valid) return;
+              if (await store.upsertSemiFinished(draft)) setDraft(null);
             }}
           >
             Save item

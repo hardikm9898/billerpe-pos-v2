@@ -1,3 +1,4 @@
+import { FieldError, isMobile10, useFormCheck } from "@/lib/formCheck";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { Fingerprint, KeyRound, LogIn, ServerCrash, ShieldCheck } from "lucide-react";
@@ -85,7 +86,6 @@ function LoginPage() {
   const navigate = useNavigate();
   const [tab, setTab] = useState<Tab>("password");
   const [forgot, setForgot] = useState(false);
-  const [step, setStep] = useState(1);
   const [pin, setPin] = useState("");
   const [pinMobile, setPinMobile] = useState("");
   const [pinLoading, setPinLoading] = useState(false);
@@ -95,6 +95,11 @@ function LoginPage() {
   const [regMobile, setRegMobile] = useState("");
   const [regPassword, setRegPassword] = useState("");
   const [regLoading, setRegLoading] = useState(false);
+  const form = useFormCheck();
+  const formReset = form.reset;
+  useEffect(() => {
+    formReset();
+  }, [tab, formReset]);
 
   const registered = store.deviceRegistered;
 
@@ -188,8 +193,12 @@ function LoginPage() {
               </div>
               <div className="mt-3 space-y-3">
                 <div>
-                  <Label htmlFor="regMobile">Owner/admin mobile number</Label>
+                  <Label htmlFor="regMobile" required>
+                    Owner/admin mobile number
+                  </Label>
                   <Input
+                    {...form.fieldProps("regMobile")}
+                    inputMode="numeric"
                     id="regMobile"
                     className="mt-1.5"
                     value={regMobile}
@@ -197,20 +206,36 @@ function LoginPage() {
                     onChange={(e) => setRegMobile(e.target.value.replace(/\D/g, ""))}
                     placeholder="10-digit mobile number"
                   />
+                  <FieldError message={form.error("regMobile")} />
                 </div>
                 <div>
-                  <Label htmlFor="regPassword">Owner/admin password</Label>
+                  <Label htmlFor="regPassword" required>
+                    Owner/admin password
+                  </Label>
                   <PasswordInput
+                    {...form.fieldProps("regPassword")}
                     id="regPassword"
                     className="mt-1.5"
                     value={regPassword}
                     onChange={(e) => setRegPassword(e.target.value)}
                   />
+                  <FieldError message={form.error("regPassword")} />
                 </div>
                 <Button
                   className="w-full"
-                  disabled={regLoading || !regMobile || !regPassword}
+                  disabled={regLoading}
                   onClick={async () => {
+                    const valid = form.check([
+                      {
+                        key: "regMobile",
+                        label: "Mobile number",
+                        value: regMobile,
+                        valid: isMobile10,
+                        message: "Enter the owner's 10-digit mobile number",
+                      },
+                      { key: "regPassword", label: "Password", value: regPassword },
+                    ]);
+                    if (!valid) return;
                     setRegLoading(true);
                     try {
                       const { pulled } = await registerThisPc(regMobile, regPassword);
@@ -260,8 +285,12 @@ function LoginPage() {
             {tab === "password" ? (
               <>
                 <div>
-                  <Label htmlFor="pwMobile">Mobile number</Label>
+                  <Label htmlFor="pwMobile" required>
+                    Mobile number
+                  </Label>
                   <Input
+                    {...form.fieldProps("pwMobile")}
+                    inputMode="numeric"
                     id="pwMobile"
                     className="mt-1.5"
                     value={pwMobile}
@@ -269,20 +298,36 @@ function LoginPage() {
                     onChange={(e) => setPwMobile(e.target.value.replace(/\D/g, ""))}
                     placeholder="10-digit mobile number"
                   />
+                  <FieldError message={form.error("pwMobile")} />
                 </div>
                 <div>
-                  <Label htmlFor="pw">Password</Label>
+                  <Label htmlFor="pw" required>
+                    Password
+                  </Label>
                   <PasswordInput
+                    {...form.fieldProps("pw")}
                     id="pw"
                     className="mt-1.5"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                   />
+                  <FieldError message={form.error("pw")} />
                 </div>
                 <Button
                   className="w-full"
-                  disabled={pwLoading || !pwMobile || !password}
+                  disabled={pwLoading}
                   onClick={async () => {
+                    const valid = form.check([
+                      {
+                        key: "pwMobile",
+                        label: "Mobile number",
+                        value: pwMobile,
+                        valid: isMobile10,
+                        message: "Enter your 10-digit mobile number",
+                      },
+                      { key: "pw", label: "Password", value: password },
+                    ]);
+                    if (!valid) return;
                     setPwLoading(true);
                     try {
                       const { token } = await authApi.restaurantLogin(
@@ -304,10 +349,7 @@ function LoginPage() {
                 <button
                   type="button"
                   className="w-full text-center text-xs text-primary"
-                  onClick={() => {
-                    setForgot(true);
-                    setStep(1);
-                  }}
+                  onClick={() => setForgot(true)}
                 >
                   Forgot Password?
                 </button>
@@ -317,8 +359,12 @@ function LoginPage() {
             {tab === "pin" ? (
               <>
                 <div>
-                  <Label htmlFor="pinMobile">Mobile number</Label>
+                  <Label htmlFor="pinMobile" required>
+                    Mobile number
+                  </Label>
                   <Input
+                    {...form.fieldProps("pinMobile")}
+                    inputMode="numeric"
                     id="pinMobile"
                     className="mt-1.5"
                     value={pinMobile}
@@ -326,10 +372,15 @@ function LoginPage() {
                     onChange={(e) => setPinMobile(e.target.value.replace(/\D/g, ""))}
                     placeholder="10-digit mobile number"
                   />
+                  <FieldError message={form.error("pinMobile")} />
                 </div>
                 <div>
-                  <Label htmlFor="pin">Quick login PIN</Label>
+                  <Label htmlFor="pin" required>
+                    Quick login PIN
+                  </Label>
                   <PasswordInput
+                    {...form.fieldProps("pin")}
+                    inputMode="numeric"
                     id="pin"
                     className="mt-1.5 num text-center text-lg tracking-[0.6em]"
                     value={pin}
@@ -337,14 +388,32 @@ function LoginPage() {
                     onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
                     placeholder="••••"
                   />
+                  <FieldError message={form.error("pin")} />
                   <p className="mt-1.5 text-xs text-muted-foreground">
                     Verified against the live BillerPe backend (uat-backend) - not demo data.
                   </p>
                 </div>
                 <Button
                   className="w-full"
-                  disabled={pinLoading || !pinMobile || !pin}
+                  disabled={pinLoading}
                   onClick={async () => {
+                    const valid = form.check([
+                      {
+                        key: "pinMobile",
+                        label: "Mobile number",
+                        value: pinMobile,
+                        valid: isMobile10,
+                        message: "Enter your 10-digit mobile number",
+                      },
+                      {
+                        key: "pin",
+                        label: "PIN",
+                        value: pin,
+                        valid: (v) => /^\d{4,6}$/.test(String(v ?? "")),
+                        message: "Enter your 4-6 digit PIN",
+                      },
+                    ]);
+                    if (!valid) return;
                     setPinLoading(true);
                     try {
                       const { token } = await authApi.pinLogin(
@@ -376,32 +445,24 @@ function LoginPage() {
       <Dialog open={forgot} onOpenChange={setForgot}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Reset password — step {step} of 3</DialogTitle>
+            <DialogTitle>Forgot your password?</DialogTitle>
             <DialogDescription>
-              {step === 1
-                ? "Enter your registered mobile number."
-                : step === 2
-                  ? "Enter the 6-digit verification code."
-                  : "Choose a new password."}
+              Passwords are reset by your outlet's owner or admin.
             </DialogDescription>
           </DialogHeader>
-          {step === 1 ? <Input defaultValue="9099001122" /> : null}
-          {step === 2 ? <Input defaultValue="123456" className="num tracking-[0.4em]" /> : null}
-          {step === 3 ? <Input type="password" placeholder="New password" /> : null}
+          <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
+            <li>
+              <span className="text-foreground">Staff:</span> ask the owner/admin to open{" "}
+              <span className="font-medium text-foreground">Users</span>, edit your account and set
+              a new password (or PIN).
+            </li>
+            <li>
+              <span className="text-foreground">Owner:</span> sign in with your quick login PIN, or
+              contact BillerPe support to reset the cloud login.
+            </li>
+          </ul>
           <DialogFooter>
-            <Button
-              onClick={() => {
-                if (step < 3) {
-                  setStep(step + 1);
-                  return;
-                }
-                setForgot(false);
-                setStep(1);
-                toast.success("Password updated", { description: "You can sign in now." });
-              }}
-            >
-              {step < 3 ? "Continue" : "Update password"}
-            </Button>
+            <Button onClick={() => setForgot(false)}>OK</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

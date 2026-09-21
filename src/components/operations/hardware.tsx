@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { Link } from "@tanstack/react-router";
 import { ChefHat, Plus, Printer as PrinterIcon, TestTube2, Trash2, Utensils } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -51,6 +52,12 @@ const emptyKitchen = (): Kitchen => ({
 export function KitchenSection() {
   const store = useStore();
   const [draft, setDraft] = useState<Kitchen | null>(null);
+  const kForm = useFormCheck();
+  const kFormOpen = !!draft;
+  const kFormReset = kForm.reset;
+  useEffect(() => {
+    if (!kFormOpen) kFormReset();
+  }, [kFormOpen, kFormReset]);
 
   const mcName = (id: string) => store.menuCategories.find((c) => c.id === id)?.name ?? id;
   const tblName = (id: string) => {
@@ -197,13 +204,15 @@ export function KitchenSection() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Kitchen name</Label>
+                <Label required>Kitchen name</Label>
                 <Input
+                  {...kForm.fieldProps("name")}
                   value={draft.name}
                   placeholder="Tandoor Section"
                   disabled={!!draft.id}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
+                <FieldError message={kForm.error("name")} />
                 {draft.id ? (
                   <p className="text-xs text-muted-foreground">
                     Can't be renamed after creation — the backend has no endpoint for it.
@@ -260,9 +269,26 @@ export function KitchenSection() {
               Cancel
             </Button>
             <Button
-              onClick={() => {
-                if (draft) store.upsertKitchen(draft);
-                setDraft(null);
+              onClick={async () => {
+                if (!draft) return;
+                const taken =
+                  !draft.id &&
+                  store.kitchens.some(
+                    (k) => k.name.trim().toLowerCase() === draft.name.trim().toLowerCase(),
+                  );
+                const valid = kForm.check([
+                  {
+                    key: "name",
+                    label: "Kitchen name",
+                    value: draft.name,
+                    valid: (v) => !!String(v ?? "").trim() && !taken,
+                    message: taken
+                      ? "A kitchen with this name already exists"
+                      : "Kitchen name is required",
+                  },
+                ]);
+                if (!valid) return;
+                if (await store.upsertKitchen(draft)) setDraft(null);
               }}
             >
               Save kitchen
@@ -294,6 +320,12 @@ const emptyPrinter = (): Printer => ({
 export function PrinterSection() {
   const store = useStore();
   const [draft, setDraft] = useState<Printer | null>(null);
+  const pForm = useFormCheck();
+  const pFormOpen = !!draft;
+  const pFormReset = pForm.reset;
+  useEffect(() => {
+    if (!pFormOpen) pFormReset();
+  }, [pFormOpen, pFormReset]);
 
   // Real Windows printers installed on this PC, fetched from the EXE only
   // while the dialog is actually open - this is ephemeral "what's plugged
@@ -459,7 +491,7 @@ export function PrinterSection() {
             <div className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-1.5 sm:col-span-2">
-                  <Label>Printer name</Label>
+                  <Label required>Printer name</Label>
                   {localPrinters.length > 0 ? (
                     <Select
                       value={
@@ -467,9 +499,15 @@ export function PrinterSection() {
                       }
                       onValueChange={(v) => {
                         if (v !== "__custom__") setDraft({ ...draft, name: v });
+                        pForm.clearError("name");
                       }}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger
+                        data-field={
+                          localPrinters.some((p) => p.name === draft.name) ? "name" : undefined
+                        }
+                        aria-invalid={!!pForm.error("name") || undefined}
+                      >
                         <SelectValue placeholder="Select an installed printer" />
                       </SelectTrigger>
                       <SelectContent>
@@ -485,12 +523,14 @@ export function PrinterSection() {
                   {localPrinters.length === 0 ||
                   !localPrinters.some((p) => p.name === draft.name) ? (
                     <Input
+                      {...pForm.fieldProps("name")}
                       className="mt-1.5"
                       value={draft.name}
                       placeholder="Tandoor KOT"
                       onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                     />
                   ) : null}
+                  <FieldError message={pForm.error("name")} />
                   {localPrinters.length === 0 ? (
                     <p className="text-xs text-muted-foreground">
                       Couldn't load installed printers from the Local Server - the name must match
@@ -515,13 +555,15 @@ export function PrinterSection() {
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Copies</Label>
+                  <Label required>Copies</Label>
                   <Input
+                    {...pForm.fieldProps("copies")}
                     type="number"
                     min={1}
                     value={draft.copies ?? 1}
                     onChange={(e) => setDraft({ ...draft, copies: Number(e.target.value) })}
                   />
+                  <FieldError message={pForm.error("copies")} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Prints</Label>
@@ -608,8 +650,26 @@ export function PrinterSection() {
                 // so it always took the update path with Number("pr-...")
                 // -> NaN -> a null id sent to the backend, which correctly
                 // reported "Printer Not Found" for every single add.
-                if (draft) store.upsertPrinter(draft);
-                setDraft(null);
+                if (!draft) return;
+                const valid = pForm.check([
+                  {
+                    key: "name",
+                    label: "Printer name",
+                    value: draft.name,
+                    message: "Choose or type the printer name",
+                  },
+                  {
+                    key: "copies",
+                    label: "Copies",
+                    value: draft.copies ?? 1,
+                    valid: (v) => Number.isInteger(v) && Number(v) >= 1 && Number(v) <= 10,
+                    message: "Copies must be a whole number from 1 to 10",
+                  },
+                ]);
+                if (!valid) return;
+                void store.upsertPrinter(draft).then((ok) => {
+                  if (ok) setDraft(null);
+                });
               }}
             >
               Save printer

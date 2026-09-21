@@ -1,3 +1,4 @@
+import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Layers, Plus, Trash2 } from "lucide-react";
@@ -43,6 +44,12 @@ function MenuVariantsPage() {
   const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<VariantOption | null>(null);
+  const form = useFormCheck();
+  const formOpen = !!draft;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!formOpen) formReset();
+  }, [formOpen, formReset]);
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
@@ -192,12 +199,14 @@ function MenuVariantsPage() {
           {draft ? (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label>Variant name</Label>
+                <Label required>Variant name</Label>
                 <Input
+                  {...form.fieldProps("name")}
                   value={draft.name}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                   placeholder="e.g. Half"
                 />
+                <FieldError message={form.error("name")} />
               </div>
               <p className="text-xs text-muted-foreground">
                 Price is set per menu item when this variant is attached to it, on that item's own
@@ -211,11 +220,12 @@ function MenuVariantsPage() {
             </Button>
             <Button
               title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
-              onClick={() => {
+              disabled={!(draft?.id ? access.edit : access.create)}
+              onClick={async () => {
                 if (!draft) return;
-                store.upsertVariant(draft);
-                setDraft(null);
+                if (!form.check([{ key: "name", label: "Variant name", value: draft.name }]))
+                  return;
+                if (await store.upsertVariant(draft)) setDraft(null);
               }}
             >
               Save variant

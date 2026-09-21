@@ -175,6 +175,7 @@ export function CustomerDetailsDialog({
   const save = () => {
     if (phoneError || gstinError) {
       setShowErrors(true);
+      document.getElementById(phoneError ? "cust-mobile" : "cust-gstin")?.focus();
       return;
     }
     onSave({ phone, name: name.trim(), address: address.trim(), gstin });
@@ -195,7 +196,9 @@ export function CustomerDetailsDialog({
 
         <div className="space-y-3">
           <div className="space-y-1.5">
-            <Label htmlFor="cust-mobile">Mobile</Label>
+            <Label htmlFor="cust-mobile" required>
+              Mobile
+            </Label>
             <div className="relative">
               <Input
                 id="cust-mobile"
@@ -204,6 +207,7 @@ export function CustomerDetailsDialog({
                 inputMode="numeric"
                 placeholder="10-digit mobile number"
                 value={phone}
+                aria-invalid={(showErrors && !!phoneError) || undefined}
                 onChange={(e) => handlePhoneInput(e.target.value)}
                 onFocus={() => setListOpen(true)}
                 onBlur={() => setTimeout(() => setListOpen(false), 150)}
@@ -318,6 +322,7 @@ export function CustomerDetailsDialog({
               ref={gstinRef}
               autoComplete="off"
               value={gstin}
+              aria-invalid={(showErrors && !!gstinError) || undefined}
               maxLength={15}
               onChange={(e) => setGstin(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, ""))}
               onKeyDown={(e) => {
