@@ -31,6 +31,8 @@ export type ChangeFeedHandlers = {
   onTableChange?: (tableIds: number[], action?: string) => void;
   /** Config (menu/tax/settings/users) changed on the exe - locally or pulled from the cloud. */
   onConfigChange?: (entities: string[]) => void;
+  /** The QR ordering inbox changed (new, expired, accepted or rejected). */
+  onQrOrdersChange?: () => void;
   /** Fired on every (re)connect - the caller should do one full refresh to cover anything missed. */
   onConnect?: () => void;
 };
@@ -62,6 +64,7 @@ export function connectChangeFeed(
   socket.on("configChange", (data: { entities?: string[] }) => {
     if (data && Array.isArray(data.entities)) h.onConfigChange?.(data.entities);
   });
+  socket.on("qrOrdersChanged", () => h.onQrOrdersChange?.());
   return () => {
     socket.removeAllListeners();
     socket.close();

@@ -3,7 +3,12 @@ import { Loader2, RefreshCw, ServerCrash } from "lucide-react";
 import { useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
-import { getServerState, refreshServerState, subscribeServerState } from "@/lib/api";
+import {
+  consumeOutageNeedsReload,
+  getServerState,
+  refreshServerState,
+  subscribeServerState,
+} from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 // Customer-facing pages (e-bill link, QR menu) talk to the cloud and never
@@ -48,7 +53,10 @@ export function ServerGate({ children }: { children: ReactNode }) {
     const tick = async () => {
       const next = await refreshServerState();
       if (cancelled) return;
-      timer = setTimeout(tick, next.status === "unreachable" ? RETRY_WHILE_DOWN_MS : CHECK_EVERY_MS);
+      timer = setTimeout(
+        tick,
+        next.status === "unreachable" ? RETRY_WHILE_DOWN_MS : CHECK_EVERY_MS,
+      );
     };
     void tick();
     return () => {
@@ -64,9 +72,14 @@ export function ServerGate({ children }: { children: ReactNode }) {
     }
     if (state.status !== "reachable") return;
     if (lostWhileInApp.current) {
-      // Everything on screen may be stale or half-loaded - start clean.
-      window.location.reload();
-      return;
+      lostWhileInApp.current = false;
+      // A long outage, or one that left requests waiting, may have left
+      // the screen stale or half-loaded - start clean. A short blip with
+      // nothing pending just carries on, keeping what is on screen.
+      if (consumeOutageNeedsReload()) {
+        window.location.reload();
+        return;
+      }
     }
     everReachable.current = true;
     try {
@@ -115,28 +128,30 @@ function ServerUnreachable({ lanUrls }: { lanUrls: string[] }) {
         <div className="flex size-12 items-center justify-center rounded-full bg-destructive/10">
           <ServerCrash className="size-6 text-destructive" />
         </div>
-        <h1 className="mt-4 text-xl font-semibold tracking-tight">Can't reach the BillerPe server</h1>
+        <h1 className="mt-4 text-xl font-semibold tracking-tight">
+          Can't reach the BillerPe server
+        </h1>
 
         {onPublicSite ? (
           <div className="mt-3 space-y-3 text-sm text-muted-foreground">
             <p>
-              This is the online BillerPe website. It can only connect to your restaurant's server on
-              the PC where that server is installed.
+              This is the online BillerPe website. It can only connect to your restaurant's server
+              on the PC where that server is installed.
             </p>
             <p className="font-medium text-foreground">
               On a kitchen display or any other device, open this address instead:
             </p>
             <AddressList addresses={addresses} />
             <p>
-              On the server PC itself, make sure <b>BillerPe Local Server</b> is running (look for its
-              icon near the clock, or start it from the Start menu).
+              On the server PC itself, make sure <b>BillerPe Local Server</b> is running (look for
+              its icon near the clock, or start it from the Start menu).
             </p>
           </div>
         ) : (
           <div className="mt-3 space-y-3 text-sm text-muted-foreground">
             <p>
-              BillerPe Local Server isn't responding. Billing, KOTs and settlement are paused until it
-              is back.
+              BillerPe Local Server isn't responding. Billing, KOTs and settlement are paused until
+              it is back.
             </p>
             <p>
               On the server PC, make sure <b>BillerPe Local Server</b> is running (look for its icon

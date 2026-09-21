@@ -56,6 +56,14 @@ function MenuCategoriesPage() {
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
+  // The menus may still be loading when this page opens (a refresh, a
+  // direct link): pick the default one as soon as they arrive, instead of
+  // staying on "no menu" with every action disabled.
+  useEffect(() => {
+    if (defaultMenuId && !store.menus.some((m) => m.id === viewMenuId)) {
+      setViewMenuId(defaultMenuId);
+    }
+  }, [store.menus, defaultMenuId, viewMenuId]);
 
   const menuCategories = useMemo(
     () => store.menuCategories.filter((c) => c.menuId === viewMenuId),

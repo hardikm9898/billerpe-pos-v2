@@ -30,3 +30,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Environment files. .env.production / .env.exe ARE committed on purpose:
+# every VITE_* value is compiled into the shipped JavaScript and is public
+# by definition, so keeping them in git makes a build reproducible. Anything
+# machine-specific or secret goes in .env / *.local, which never are.
+.env
+.env.*.local
+.env.local

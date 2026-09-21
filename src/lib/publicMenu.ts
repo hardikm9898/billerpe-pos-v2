@@ -22,8 +22,11 @@ const CONFIGURED_QR_BASE = (import.meta.env["VITE_PUBLIC_QR_BASE_URL"] ?? "").re
 // A hostname only this machine or this LAN can resolve. Used to decide
 // whether falling back to the current origin is safe.
 function isLocalOrigin(origin: string): boolean {
-    return /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(origin)
-        || /\.local(:\d+)?$/i.test(origin);
+  return (
+    /^https?:\/\/(localhost|127\.|0\.0\.0\.0|\[::1\]|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(
+      origin,
+    ) || /\.local(:\d+)?$/i.test(origin)
+  );
 }
 
 /**
@@ -33,10 +36,10 @@ function isLocalOrigin(origin: string): boolean {
  * dead one is not.
  */
 export function qrBaseUrl(): string | null {
-    if (CONFIGURED_QR_BASE) return CONFIGURED_QR_BASE;
-    if (typeof window === "undefined") return null;
-    const origin = window.location.origin;
-    return isLocalOrigin(origin) ? null : origin;
+  if (CONFIGURED_QR_BASE) return CONFIGURED_QR_BASE;
+  if (typeof window === "undefined") return null;
+  const origin = window.location.origin;
+  return isLocalOrigin(origin) ? null : origin;
 }
 
 // Must match the backend's DESECRET_KEY (uat-backend-v2/.env) exactly - the
@@ -193,66 +196,96 @@ export type QrCartItem = {
   variantName?: string;
   addonIds?: number[];
   addonNames?: string[];
+  // Display only (the customer's own order history). The exe re-prices
+  // every line from its own menu on accept and never reads this.
+  unitPrice?: number;
 };
 
-type QrEnvelope<T> = { error?: boolean; results?: T & { message?: string } };
+type QrEnvelope<T> = { error?: boolean; code?: number; results?: T & { message?: string } };
 
-async function postPublic<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, {
+// Carries the backend's code so the page can tell "you can't order right
+// now" (409/429 - show it, don't retry) from a network failure (retry with
+// the same client_key).
+export class QrRequestError extends Error {
+  constructor(
+    message: string,
+    public code: number | null,
+  ) {
+    super(message);
+  }
+}
+
+async function callPublic<T>(path: string, init?: RequestInit): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE_URL}${path}`, init);
+  } catch {
+    throw new QrRequestError("No internet connection - please try again.", null);
+  }
+  const json = (await res.json().catch(() => null)) as QrEnvelope<T> | null;
+  if (!json) throw new QrRequestError("Something went wrong - please try again.", null);
+  if (json.error || !json.results) {
+    throw new QrRequestError(
+      json.results?.message || "Something went wrong - please try again.",
+      json.code ?? res.status,
+    );
+  }
+  return json.results;
+}
+
+function postPublic<T>(path: string, body: unknown): Promise<T> {
+  return callPublic<T>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const json = (await res.json().catch(() => null)) as QrEnvelope<T> | null;
-  if (!json || json.error || !json.results) {
-    throw new Error(json?.results?.message || "Something went wrong - please try again.");
-  }
-  return json.results;
 }
+
+export type QrRoundStatus = "pending" | "accepted" | "rejected" | "expired";
+export type QrRound = {
+  id: number;
+  items: QrCartItem[];
+  status: QrRoundStatus;
+  submittedAt: string;
+};
+// One guest's visit at one table (uat-backend-v2 model/qrSession.js): open
+// until staff settle or cancel the table's order.
+export type QrSessionView = {
+  session: {
+    key: string;
+    status: "open" | "closed";
+    bill_ready: boolean;
+    closed_reason: string | null;
+    customer_name: string | null;
+    customer_mobile: string;
+    table_name: string | null;
+  };
+  rounds: QrRound[];
+};
 
 // `qr` is the exact ciphertext from this page's own URL, forwarded
-// unchanged - the backend (decryptQrTablePayload) re-derives hotelId/
-// tableId/qrVersion from it itself and rejects a stale/rotated one there,
-// rather than trusting whatever this page decrypted client-side.
-export async function submitQrOrder(params: {
+// unchanged - the backend re-derives hotel/table/qrVersion from it and
+// rejects a rotated one, rather than trusting this page's decryption.
+// Returns this mobile's open visit at the table (with its full history) or
+// starts one.
+export function startQrSession(params: {
   qr: string;
-  customer_name: string;
   customer_mobile: string;
+  customer_name: string;
+}): Promise<QrSessionView> {
+  return postPublic("/qrSession", params);
+}
+
+export function getQrSession(key: string): Promise<QrSessionView> {
+  return callPublic(`/qrSession/${encodeURIComponent(key)}`);
+}
+
+// client_key is made once per cart submission and reused on a retry, so a
+// double tap or a lost response is saved as one round, never two.
+export function submitQrOrder(params: {
+  session_key: string;
+  client_key: string;
   items: QrCartItem[];
-}): Promise<{ id: number }> {
+}): Promise<QrSessionView & { id: number; duplicate?: boolean }> {
   return postPublic("/qrOrder", params);
-}
-
-export async function getQrOrderStatus(
-  id: number,
-): Promise<{ status: "pending" | "accepted" | "rejected" | "expired" }> {
-  const res = await fetch(`${API_BASE_URL}/qrOrder/${id}/status`);
-  const json = (await res.json().catch(() => null)) as QrEnvelope<{
-    status: "pending" | "accepted" | "rejected" | "expired";
-  }> | null;
-  if (!json || json.error || !json.results) {
-    throw new Error("Could not check your order's status.");
-  }
-  return json.results;
-}
-
-// Lets the page know when its ordering session has genuinely ended (the
-// table's bill was settled, or the table was otherwise cleared) rather
-// than after any single round - staff accepting round 1 must not make the
-// page forget it can still take round 2 (uat-backend-v2's
-// getTableSessionStatus). `qr` is the same raw, already-URL-encoded
-// ciphertext used everywhere else on this page - it's appended to the
-// query string as-is (it's already percent-encoded, matching how it
-// arrived in window.location.search) rather than re-encoded.
-export async function getTableSessionStatus(
-  qr: string,
-): Promise<{ table_status: "R" | "F" | "P" | "H" | "B" }> {
-  const res = await fetch(`${API_BASE_URL}/qrOrder/tableStatus?qr=${qr}`);
-  const json = (await res.json().catch(() => null)) as QrEnvelope<{
-    table_status: "R" | "F" | "P" | "H" | "B";
-  }> | null;
-  if (!json || json.error || !json.results) {
-    throw new Error("Could not check this table's status.");
-  }
-  return json.results;
 }

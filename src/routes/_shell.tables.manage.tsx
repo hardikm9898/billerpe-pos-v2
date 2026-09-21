@@ -66,6 +66,7 @@ function ManageTablesPage() {
   const rows = store.tables.filter((t) => cat === "all" || t.categoryId === cat);
   const paged = usePagedRows(rows, 10);
   const catName = (id: string) => store.tableCategories.find((c) => c.id === id)?.name ?? "—";
+  const sortedCategories = [...store.tableCategories].sort((a, b) => a.sortOrder - b.sortOrder);
 
   useEffect(() => setSelected([]), [cat]);
 
@@ -85,7 +86,7 @@ function ManageTablesPage() {
     store.tables.filter((t) => t.categoryId === categoryId).length + 1;
 
   const openBulkAdd = () => {
-    const initialCat = cat !== "all" ? cat : (store.tableCategories[0]?.id ?? "");
+    const initialCat = cat !== "all" ? cat : (sortedCategories[0]?.id ?? "");
     setBulkCat(initialCat);
     setBulkStart(initialCat ? nextStartFor(initialCat) : 1);
     setBulkCount(5);
@@ -110,7 +111,7 @@ function ManageTablesPage() {
                 setDraft({
                   id: "",
                   name: "",
-                  categoryId: store.tableCategories[0]?.id ?? "",
+                  categoryId: sortedCategories[0]?.id ?? "",
                   seats: 4,
                   status: "Free",
                 })
@@ -129,7 +130,7 @@ function ManageTablesPage() {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All sections</SelectItem>
-            {store.tableCategories.map((c) => (
+            {sortedCategories.map((c) => (
               <SelectItem key={c.id} value={c.id}>
                 {c.name}
               </SelectItem>
@@ -230,7 +231,7 @@ function ManageTablesPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {store.tableCategories.map((c) => (
+                      {sortedCategories.map((c) => (
                         <SelectItem key={c.id} value={c.id}>
                           {c.name}
                         </SelectItem>
@@ -303,7 +304,7 @@ function ManageTablesPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {store.tableCategories.map((c) => (
+                  {sortedCategories.map((c) => (
                     <SelectItem key={c.id} value={c.id}>
                       {c.name}
                     </SelectItem>

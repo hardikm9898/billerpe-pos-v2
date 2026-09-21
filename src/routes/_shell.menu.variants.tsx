@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Layers, Plus, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 
 import { DataTable, Page, PageHeader, SectionCard } from "@/components/kit";
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,14 @@ function MenuVariantsPage() {
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
+  // The menus may still be loading when this page opens (a refresh, a
+  // direct link): pick the default one as soon as they arrive, instead of
+  // staying on "no menu" with every action disabled.
+  useEffect(() => {
+    if (defaultMenuId && !store.menus.some((m) => m.id === viewMenuId)) {
+      setViewMenuId(defaultMenuId);
+    }
+  }, [store.menus, defaultMenuId, viewMenuId]);
 
   const categoriesById = useMemo(
     () => new Map(store.menuCategories.map((c) => [c.id, c])),

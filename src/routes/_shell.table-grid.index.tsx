@@ -12,7 +12,7 @@ import {
   UtensilsCrossed,
   Wallet,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
 import { Money, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
@@ -30,6 +30,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, qrOrderApi, type RawPendingQrOrder } from "@/lib/api";
+import { getQrInbox, removeFromQrInbox, subscribeQrInbox } from "@/lib/qrInbox";
 import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom } from "@/mock/format";
@@ -73,7 +74,8 @@ function TableGridPage() {
   const [settleTable, setSettleTable] = useState<RestaurantTable | null>(null);
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
   const [tip, setTip] = useState(0);
-  const [qrOrders, setQrOrders] = useState<RawPendingQrOrder[]>([]);
+  // Shared app-wide inbox (lib/qrInbox.ts, started by AppShell).
+  const qrOrders = useSyncExternalStore(subscribeQrInbox, getQrInbox, getQrInbox);
   const [qrInboxOpen, setQrInboxOpen] = useState(false);
   const [qrActionBusyId, setQrActionBusyId] = useState<number | null>(null);
 
@@ -114,45 +116,6 @@ function TableGridPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Pending QR Orders inbox (billerpe-local-exe/controller/qrOrder.js's
-  // local mirror). Polled faster than the table grid's own 20s tick
-  // (10s) specifically so a new order gets a sound+toast alert promptly -
-  // a silent badge alone was easy to miss, confirmed by report ("no any
-  // bugger or alarm to ring to notify"). seenIdsRef tracks what's already
-  // been alerted on so a resolved-then-reappearing id can't double-fire,
-  // and the very first load never alerts (nothing "new" about an inbox
-  // that already had orders before this tab opened).
-  const seenQrOrderIdsRef = useRef<Set<number> | null>(null);
-  useEffect(() => {
-    const load = () =>
-      void qrOrderApi
-        .getPending()
-        .then((r) => {
-          const seen = seenQrOrderIdsRef.current;
-          if (seen) {
-            const freshOnes = r.qrOrders.filter((o) => !seen.has(o.id));
-            if (freshOnes.length > 0) {
-              playQrOrderAlert();
-              freshOnes.forEach((o) => {
-                toast(`New QR order — ${o.table_name ?? "table"}`, {
-                  description: `${o.customer_name || "Guest"} · ${o.items.length} item${o.items.length === 1 ? "" : "s"}`,
-                  duration: 10000,
-                });
-              });
-            }
-          }
-          seenQrOrderIdsRef.current = new Set(r.qrOrders.map((o) => o.id));
-          setQrOrders(r.qrOrders);
-        })
-        .catch(() => {
-          // best-effort - a failed poll just leaves the previous list
-          // showing until the next tick succeeds
-        });
-    load();
-    const id = setInterval(load, 10000);
-    return () => clearInterval(id);
-  }, []);
-
   const filtered = useMemo(
     () =>
       store.tables.filter(
@@ -163,10 +126,14 @@ function TableGridPage() {
     [store.tables, categoryId, statusFilter],
   );
 
+  const sortedCategories = useMemo(
+    () => [...store.tableCategories].sort((a, b) => a.sortOrder - b.sortOrder),
+    [store.tableCategories],
+  );
+
   const bySection = useMemo(
     () =>
-      [...store.tableCategories]
-        .sort((a, b) => a.sortOrder - b.sortOrder)
+      sortedCategories
         .map((cat) => ({
           cat,
           tables: store.tables.filter(
@@ -174,13 +141,15 @@ function TableGridPage() {
           ),
         }))
         .filter((s) => s.tables.length > 0),
-    [store.tables, store.tableCategories, statusFilter],
+    [store.tables, sortedCategories, statusFilter],
   );
 
   const runningOrders = useMemo(
     () =>
       store.orders
-        .filter((o) => o.type === "Pickup" && ["Running", "Hold", "Bill Generated"].includes(o.status))
+        .filter(
+          (o) => o.type === "Pickup" && ["Running", "Hold", "Bill Generated"].includes(o.status),
+        )
         .sort((a, b) => b.orderNo - a.orderNo),
     [store.orders],
   );
@@ -250,7 +219,7 @@ function TableGridPage() {
     setQrActionBusyId(qrOrder.id);
     try {
       const { orderId } = await qrOrderApi.accept(qrOrder.id);
-      setQrOrders((prev) => prev.filter((o) => o.id !== qrOrder.id));
+      removeFromQrInbox(qrOrder.id);
       toast.success(`Order accepted for ${qrOrder.table_name ?? "table"}`);
       // loadTablesFromServer alone was NOT enough here - confirmed live,
       // reported repeatedly: it only ever discovers an order this session
@@ -278,7 +247,7 @@ function TableGridPage() {
     setQrActionBusyId(qrOrder.id);
     try {
       await qrOrderApi.reject(qrOrder.id);
-      setQrOrders((prev) => prev.filter((o) => o.id !== qrOrder.id));
+      removeFromQrInbox(qrOrder.id);
       toast.success("Order declined");
     } catch (err) {
       toast.error("Could not decline this order", {
@@ -485,7 +454,9 @@ function TableGridPage() {
               ))}
             </ul>
           ) : (
-            <p className="px-2 py-3 text-xs text-muted-foreground">No running pickup orders right now.</p>
+            <p className="px-2 py-3 text-xs text-muted-foreground">
+              No running pickup orders right now.
+            </p>
           )}
         </SectionCard>
 
@@ -536,7 +507,7 @@ function TableGridPage() {
                 >
                   All sections
                 </button>
-                {store.tableCategories.map((c) => (
+                {sortedCategories.map((c) => (
                   <button
                     key={c.id}
                     onClick={() => setCategoryId(c.id)}
@@ -781,38 +752,4 @@ function qrElapsed(iso: string) {
   const diffMs = Date.now() - new Date(iso).getTime();
   const minutes = Math.max(0, Math.round(diffMs / 60000));
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
-}
-
-// A short double-beep via the Web Audio API - no external asset, so it
-// works the same in dev/build/packaged contexts. Browsers block audio
-// until the page has seen a user gesture; on a POS screen that's already
-// true almost immediately (staff clicking around), and this is a bonus
-// on top of the toast/badge, not the only signal, so a silent failure on
-// a truly idle tab is an acceptable miss - wrapped so it never throws
-// into the polling loop that calls it.
-function playQrOrderAlert() {
-  try {
-    const AudioCtxCtor =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtxCtor) return;
-    const ctx = new AudioCtxCtor();
-    const beep = (startAt: number) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.001, ctx.currentTime + startAt);
-      gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + startAt + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startAt + 0.35);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ctx.currentTime + startAt);
-      osc.stop(ctx.currentTime + startAt + 0.35);
-    };
-    beep(0);
-    beep(0.45);
-  } catch {
-    // ignore - the toast still shows regardless
-  }
 }

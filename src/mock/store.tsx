@@ -772,7 +772,12 @@ interface Ctx extends State {
    * `type: "flat"` (value === the flat amount) for a flat discount or a
    * promo code that isn't percent-based. */
   applyDiscount: (orderId: string, label: string, type: "percent" | "flat", value: number) => void;
-  setCustomer: (orderId: string, name: string, phone: string) => void;
+  setCustomer: (
+    orderId: string,
+    name: string,
+    phone: string,
+    extra?: { address?: string; gstin?: string },
+  ) => void;
   setCharges: (orderId: string, packaging: number) => void;
   /** Resolves { ok: true, backendId } on success (ok:false on any failure/
    * guard) - the backendId is handed back explicitly rather than read off
@@ -796,7 +801,12 @@ interface Ctx extends State {
    * undefined if the order/permission isn't there. Caller navigates to
    * that id's order screen. */
   startEditSettledOrder: (orderId: string) => string | undefined;
-  saveSettledOrderEdits: (localOrderId: string) => Promise<void>;
+  /** Rebuilds an "edit-<backendId>" copy from the exe (after a browser
+   * refresh on the edit screen). Resolves false when it can't. */
+  resumeEditSettledOrder: (backendId: number) => Promise<boolean>;
+  /** Resolves true once saved. `payments` is how the biller says the
+   * full edited bill was paid. */
+  saveSettledOrderEdits: (localOrderId: string, payments?: PaymentSplit[]) => Promise<boolean>;
   cancelEditSettledOrder: (localOrderId: string) => void;
   loadRefundDueOrdersFromServer: () => Promise<void>;
   settleRefundDue: (id: string) => void;
@@ -826,7 +836,7 @@ interface Ctx extends State {
     totalAmount: number;
     advance: number;
     gstNo: string;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   updateReservation: (
     id: string,
     r: {
@@ -842,7 +852,7 @@ interface Ctx extends State {
       advance: number;
       gstNo: string;
     },
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   cancelReservation: (id: string) => Promise<void>;
   /* waitlist queue */
   loadQueueFromServer: () => Promise<void>;
@@ -1065,7 +1075,7 @@ const TABLE_STATUS_MAP: Record<RawTable["table_status"], TableStatus> = {
 };
 
 function mapRawCategory(c: RawTableCategory): TableCategory {
-  return { id: String(c.id), name: c.table_catag_nm, sortOrder: c.id };
+  return { id: String(c.id), name: c.table_catag_nm, sortOrder: c.rank ?? c.id };
 }
 
 function mapRawTable(t: RawTable): RestaurantTable {
@@ -1468,7 +1478,9 @@ function toShortCode(sku: string | undefined, name: string, seed: string): strin
 
 // Stored by the exe (POST /userPermissionOverrides) as JSON; SQLite can hand
 // it back as a string.
-function parseOverrides(value: RawHotelUser["permission_overrides"]): PermissionOverrides | undefined {
+function parseOverrides(
+  value: RawHotelUser["permission_overrides"],
+): PermissionOverrides | undefined {
   if (!value) return undefined;
   if (typeof value === "string") {
     try {
@@ -1838,6 +1850,23 @@ export function parseOrderAddons(raw: unknown): NonNullable<OrderLine["addons"]>
 // match a session-local live counter's starting value (see startOrder's
 // own comment on why that counter exists) - the two are inherently
 // different sequences.
+// What the header's connection chip shows, from GET /localServerStatus.
+// The terminal reaching the exe at all is ServerGate's job (a blocking
+// screen when it can't); this is about the exe's own cloud connection.
+function connectionFromStatus(status: RawLocalServerStatus): ConnectionState {
+  if (!status.registered) return "sync-error";
+  const sync = status.sync;
+  if (sync.transactionsBlocked) return "offline-limit-exceeded";
+  if (sync.registrationRequired) return "sync-error";
+  const lastBeat = sync.lastHeartbeatAt ? Date.parse(sync.lastHeartbeatAt) : 0;
+  const heartbeatMs = (sync.heartbeatSeconds || 60) * 1000;
+  // Several missed heartbeats: the exe can't reach the cloud. Billing
+  // carries on locally, so this is "offline", not an error.
+  if (!lastBeat || Date.now() - lastBeat > heartbeatMs * 4) return "offline";
+  if (sync.stuckOrders?.length) return "sync-error";
+  return "online";
+}
+
 function parseBillNoAsOrderNo(bill_no: string, fallbackId: number): number {
   const numeric = bill_no.replace(/^\D+/, "");
   const parsed = Number(numeric);
@@ -1921,6 +1950,8 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
     kotRounds: maxKotRound(detail.hms_orderDetails),
     customerName: detail.hms_user_master?.name || undefined,
     customerPhone: detail.hms_user_master?.number || undefined,
+    customerAddress: detail.hms_user_master?.address || undefined,
+    customerGstin: detail.hms_user_master?.gstin || undefined,
     discount: mapRawDiscount(detail),
     payments,
     businessDate,
@@ -2014,9 +2045,7 @@ function mergeServerOrder(local: Order, fresh: Order): Order {
   // holding none of its own, which is exactly the "typed but never sent
   // anywhere" case this preservation exists for.
   const serverHasUnsent = fresh.lines.some((l) => l.kotRound === UNSENT_ROUND);
-  const draftLines = serverHasUnsent
-    ? []
-    : local.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+  const draftLines = serverHasUnsent ? [] : local.lines.filter((l) => l.kotRound === UNSENT_ROUND);
   const hasDraft = draftLines.length > 0;
   return {
     ...local,
@@ -2030,6 +2059,8 @@ function mergeServerOrder(local: Order, fresh: Order): Order {
     tableLabel: fresh.tableLabel && fresh.tableLabel !== "—" ? fresh.tableLabel : local.tableLabel,
     customerName: fresh.customerName ?? local.customerName,
     customerPhone: fresh.customerPhone ?? local.customerPhone,
+    customerAddress: fresh.customerAddress ?? local.customerAddress,
+    customerGstin: fresh.customerGstin ?? local.customerGstin,
     // A discount applied locally mid-edit (applyDiscount only patches
     // local state until the next KOT/bill call carries it) must not be
     // wiped by a refresh while the draft is still open.
@@ -2090,6 +2121,8 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
     kotRounds: maxKotRound(detail.hms_orderDetails),
     customerName: detail.hms_user_master?.name || undefined,
     customerPhone: detail.hms_user_master?.number || undefined,
+    customerAddress: detail.hms_user_master?.address || undefined,
+    customerGstin: detail.hms_user_master?.gstin || undefined,
     discount: mapRawDiscount(detail),
     ...(detail.packaging_override != null ? { packagingCharge: detail.packaging_override } : {}),
     businessDate,
@@ -2518,7 +2551,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const can = useCallback(
     (moduleName: PermissionModule, action: StandardAction) => {
       if (!s.sessionUser) return false;
-      return currentUser.role === "Owner" ? true : !!resolvedPermissions?.modules[moduleName]?.[action];
+      return currentUser.role === "Owner"
+        ? true
+        : !!resolvedPermissions?.modules[moduleName]?.[action];
     },
     [s.sessionUser, currentUser, resolvedPermissions],
   );
@@ -2611,6 +2646,56 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     at: nowStamp(),
     by,
   });
+
+  // The full dine-in bill payload the exe rebuilds an order from (adminOrder
+  // and saveAndSettle): EVERY line the order has ever had, not just new
+  // ones - see adminOrder's own comment in lib/api.ts for why.
+  const dineInBillCart = (o: Order) => {
+    const billSettings: BillSettings = {
+      serviceCharge: s.serviceCharge,
+      deliveryChargeRule: s.deliveryChargeRule,
+      packagingChargeRule: s.packagingChargeRule,
+      taxRules: s.taxRules,
+      invoiceFormat: s.invoiceFormat,
+      tables: s.tables,
+      menuItems: s.menuItems,
+    };
+    const totals = orderTotals(o, billSettings);
+    const allMenuItems = o.lines.map((l) => {
+      const mi = s.menuItems.find((m) => m.id === l.itemId);
+      return {
+        id: Number(l.itemId),
+        qty: l.qty,
+        price: l.price,
+        discount: 0,
+        addons: buildAddonsPayload(l.addons),
+        comment: l.note ?? "",
+        menu_categ_id: mi ? Number(mi.categoryId) : 0,
+        // finalizeExistingOrder (billerpe-local-exe/controller/order.js)
+        // destroys and rebuilds every OrderDetails row - without the
+        // round, every KOT round collapsed into one once billed.
+        // Unsent lines have no round yet.
+        ...(Number.isFinite(l.kotRound) ? { kotNumber: l.kotRound } : {}),
+      };
+    });
+    return {
+      totals,
+      cart: {
+        items: [{ status: "H" as const, menuItems: allMenuItems }] as [
+          { status: "H"; menuItems: typeof allMenuItems },
+        ],
+        gst: totals.tax,
+        totalDiscount: totals.discount,
+        grandAmount: totals.grand,
+        myAmount: totals.subtotal,
+        service_charger: totals.service,
+        delivery_charge: totals.delivery,
+        packaging_charge: totals.packaging,
+        ...discountPayload(o, totals),
+        taxes: buildCartTaxes(totals, s.taxRules),
+      },
+    };
+  };
 
   // Converts this app's flat per-line addon selections back into the
   // department-grouped shape the backend actually reads/writes (see
@@ -3690,6 +3775,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               : {}),
             userName: o.customerName,
             mobile: o.customerPhone,
+            gstin: o.customerGstin,
+            address: o.customerAddress,
             cart: {
               gst: totals.tax,
               totalDiscount: totals.discount,
@@ -3810,52 +3897,59 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!o || o.lines.length > 0) return;
       freeEmptyDraft(o);
     },
-    removeOrder: (id) => {
-      const o = s.orders.find((x) => x.id === id) ?? s.orderHistory.find((x) => x.id === id);
-      patch((p) => ({
-        ...p,
-        orders: p.orders.filter((x) => x.id !== id),
-        orderHistory: p.orderHistory.filter((x) => x.id !== id),
-      }));
-      toast.success("Order removed");
-      if (!o?.backendId) return;
-      const run = async () => {
-        try {
-          await orderApi.remove(o.backendId!);
-        } catch (err) {
-          toast.error(
-            err instanceof ApiError
-              ? err.message
-              : "Removed locally but the backend removal failed",
-          );
-        }
-      };
-      void run();
-    },
+    removeOrder: (id) => value.removeOrders([id]),
     removeOrders: (ids) => {
-      const backendIds = ids
-        .map(
-          (id) =>
-            (s.orders.find((x) => x.id === id) ?? s.orderHistory.find((x) => x.id === id))
-              ?.backendId,
-        )
+      const targets = ids
+        .map((id) => s.orders.find((x) => x.id === id) ?? s.orderHistory.find((x) => x.id === id))
+        .filter((o): o is Order => !!o);
+      const backendIds = targets
+        .map((o) => o.backendId)
         .filter((id): id is number => id !== undefined);
-      patch((p) => ({
-        ...p,
-        orders: p.orders.filter((o) => !ids.includes(o.id)),
-        orderHistory: p.orderHistory.filter((o) => !ids.includes(o.id)),
-      }));
-      toast.success(`${ids.length} order(s) removed`);
-      if (!backendIds.length) return;
+      // Drops the orders and frees any table one of them was still open on.
+      // Leaving the table as it was is what showed a deleted order's table
+      // as "running", with an error when it was opened.
+      const dropLocally = () =>
+        patch((p) => {
+          const tableIds = new Set(
+            targets
+              .filter((o) => o.tableId && !["Settled", "Cancelled"].includes(o.status))
+              .map((o) => o.tableId!),
+          );
+          return {
+            ...p,
+            orders: p.orders.filter((o) => !ids.includes(o.id)),
+            orderHistory: p.orderHistory.filter((o) => !ids.includes(o.id)),
+            tables: p.tables.map((t) =>
+              tableIds.has(t.id) || (t.orderId && ids.includes(t.orderId))
+                ? {
+                    ...t,
+                    status: "Free",
+                    guests: undefined,
+                    orderId: undefined,
+                    occupiedSince: undefined,
+                  }
+                : t,
+            ),
+          };
+        });
+      const done = () =>
+        toast.success(ids.length === 1 ? "Order removed" : `${ids.length} orders removed`);
+      if (!backendIds.length) {
+        dropLocally();
+        done();
+        return;
+      }
+      // The exe decides (it may refuse, e.g. food already sent to the
+      // kitchen needs a manager): only then does the order leave the screen.
       const run = async () => {
         try {
-          await orderApi.removeBulk(backendIds);
+          if (backendIds.length === 1) await orderApi.remove(backendIds[0]!, { free: true });
+          else await orderApi.removeBulk(backendIds);
+          dropLocally();
+          done();
+          void value.loadTablesFromServer();
         } catch (err) {
-          toast.error(
-            err instanceof ApiError
-              ? err.message
-              : "Removed locally but the backend removal failed",
-          );
+          toast.error(err instanceof ApiError ? err.message : "Could not remove the order");
         }
       };
       void run();
@@ -3940,6 +4034,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               : {}),
             userName: o.customerName,
             mobile: o.customerPhone,
+            gstin: o.customerGstin,
+            address: o.customerAddress,
             cart: {
               gst: totals.tax,
               totalDiscount: totals.discount,
@@ -4091,18 +4187,50 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       toast.success(value ? `Discount applied · ₹${amount}` : "Discount removed");
     },
 
-    setCustomer: (orderId, name, phone) => {
+    setCustomer: (orderId, name, phone, extra) => {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
-          o.id === orderId ? { ...o, customerName: name, customerPhone: phone } : o,
+          o.id === orderId
+            ? {
+                ...o,
+                customerName: name,
+                customerPhone: phone,
+                customerAddress: extra?.address,
+                customerGstin: extra?.gstin,
+              }
+            : o,
         ),
-        customers: p.customers.some((c) => c.phone === phone)
+        // Keeps the suggestion list current: a new mobile is added, a known
+        // one picks up any name/address/GSTIN typed now.
+        customers: !phone
           ? p.customers
-          : [{ id: uid("c"), name, phone, orders: 1, lastVisit: todayLabel }, ...p.customers],
+          : p.customers.some((c) => c.phone === phone)
+            ? p.customers.map((c) =>
+                c.phone === phone
+                  ? {
+                      ...c,
+                      name: name || c.name,
+                      address: extra?.address || c.address,
+                      gstin: extra?.gstin || c.gstin,
+                    }
+                  : c,
+              )
+            : [
+                {
+                  id: uid("c"),
+                  name,
+                  phone,
+                  orders: 1,
+                  lastVisit: todayLabel,
+                  address: extra?.address,
+                  gstin: extra?.gstin,
+                },
+                ...p.customers,
+              ],
       }));
       log("Customer Attached", `Order #${o?.orderNo}`, "—", `${name} · ${phone}`);
       toast.success("Customer details saved");
@@ -4154,38 +4282,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return { ok: false };
       }
 
-      const billSettings: BillSettings = {
-        serviceCharge: s.serviceCharge,
-        deliveryChargeRule: s.deliveryChargeRule,
-        packagingChargeRule: s.packagingChargeRule,
-        taxRules: s.taxRules,
-        invoiceFormat: s.invoiceFormat,
-        tables: s.tables,
-        menuItems: s.menuItems,
-      };
-      const totals = orderTotals(o, billSettings);
-      // Unlike generateKot, this must carry EVERY line the order has ever
-      // had (all KOT rounds), not just newly-added ones - see adminOrder's
-      // own comment in lib/api.ts for why.
-      const allMenuItems = o.lines.map((l) => {
-        const mi = s.menuItems.find((m) => m.id === l.itemId);
-        return {
-          id: Number(l.itemId),
-          qty: l.qty,
-          price: l.price,
-          discount: 0,
-          addons: buildAddonsPayload(l.addons),
-          comment: l.note ?? "",
-          menu_categ_id: mi ? Number(mi.categoryId) : 0,
-          // finalizeExistingOrder (billerpe-local-exe/controller/order.js)
-          // destroys and rebuilds every OrderDetails row at bill-generation
-          // time - without this, that rebuild had no way to know which real
-          // KOT round each line came from and silently collapsed every
-          // round into one, confirmed live as "3 KOTs punched, order shows
-          // as 1 KOT once billed". This line already knows its own round.
-          kotNumber: l.kotRound,
-        };
-      });
+      const { cart } = dineInBillCart(o);
 
       const run = async (): Promise<{ ok: boolean; backendId?: number }> => {
         try {
@@ -4203,18 +4300,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             table_id: Number(table.id),
             userName: o.customerName,
             mobile: o.customerPhone,
-            cart: {
-              items: [{ status: "H", menuItems: allMenuItems }],
-              gst: totals.tax,
-              totalDiscount: totals.discount,
-              grandAmount: totals.grand,
-              myAmount: totals.subtotal,
-              service_charger: totals.service,
-              delivery_charge: totals.delivery,
-              packaging_charge: totals.packaging,
-              ...discountPayload(o, totals),
-              taxes: buildCartTaxes(totals, s.taxRules),
-            },
+            gstin: o.customerGstin,
+            address: o.customerAddress,
+            cart,
           });
           const backendId = o.backendId ?? res.orderId;
           const billNo = res.bill_no;
@@ -4262,8 +4350,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
-      if (!o.backendId) {
-        toast.error("This order has no backend record to settle");
+      // Dine-in no longer needs a saved order first: saveAndSettle below
+      // saves and settles in one call. Pickup still settles through the
+      // order it was saved as.
+      if (o.type !== "Dine In" && !o.backendId) {
+        toast.error("Send a KOT first, then settle this order");
         return;
       }
       // Backend only has cash/upi/card/due - any other configured payment
@@ -4293,18 +4384,62 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const total = payments.reduce((sum, p) => sum + p.amount, 0);
 
       const run = async () => {
+        let backendId = o.backendId;
+        // A never-saved order only gets its real bill number now.
+        let orderNo = o.orderNo;
+        let billNo = o.billNo;
         try {
           if (o.type === "Dine In") {
-            await orderApi.settleBills({
-              id: o.backendId!,
-              amount: settleTotal,
-              cash: cashAmt,
-              upi: upiAmt,
-              card: cardAmt,
-              due: dueAmt,
-              ...(tip ? { tip } : {}),
-              ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
-            });
+            // Already billed and nothing changed since: settle that bill.
+            // Anything else (never saved, running without a bill, or items
+            // added since) is saved and settled in ONE call, so what gets
+            // settled is exactly what is on screen.
+            const upToDate =
+              !!o.backendId &&
+              o.status === "Bill Generated" &&
+              o.lines.every((l) => Number.isFinite(l.kotRound));
+            if (upToDate) {
+              await orderApi.settleBills({
+                id: o.backendId!,
+                amount: settleTotal,
+                cash: cashAmt,
+                upi: upiAmt,
+                card: cardAmt,
+                due: dueAmt,
+                ...(tip ? { tip } : {}),
+                ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
+              });
+            } else {
+              if (!o.tableId || !o.lines.length) {
+                toast.error("Add items to this table before settling");
+                return;
+              }
+              const { cart } = dineInBillCart(o);
+              const res = await orderApi.saveAndSettle({
+                order_type: "dinin",
+                ...(o.backendId ? { order_id: o.backendId } : {}),
+                table_id: Number(o.tableId),
+                userName: o.customerName,
+                mobile: o.customerPhone,
+                gstin: o.customerGstin,
+                address: o.customerAddress,
+                cart,
+                payment: {
+                  amount: settleTotal,
+                  cash: cashAmt,
+                  upi: upiAmt,
+                  card: cardAmt,
+                  due: dueAmt,
+                  ...(tip ? { tip } : {}),
+                  ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
+                },
+              });
+              backendId = res.orderId;
+              if (res.bill_no) {
+                billNo = res.bill_no;
+                orderNo = parseBillNoAsOrderNo(res.bill_no, res.orderId);
+              }
+            }
           } else {
             // Pickup has no settleBills equivalent - AdminOrder's pickup
             // branch both finalizes the bill and records payment in one
@@ -4343,6 +4478,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               due: dueAmt,
               userName: o.customerName,
               mobile: o.customerPhone,
+              gstin: o.customerGstin,
+              address: o.customerAddress,
               cart: {
                 items: [{ status: "H", menuItems: allMenuItems }],
                 gst: totals.tax,
@@ -4357,19 +4494,57 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               },
             });
           }
-          applySettlement();
-          log("Bill Settled", `Order #${o.orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
-          toast.success(`Order #${o.orderNo} settled`, {
+          applySettlement(backendId, orderNo, billNo);
+          log("Bill Settled", `Order #${orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
+          toast.success(`Order #${orderNo} settled`, {
             description:
               payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") +
               (tip ? ` · Tip ₹${tip}` : ""),
           });
         } catch (err) {
+          // Saved but not settled (e.g. the payment was refused): the table
+          // now holds a real generated bill - show it that way so settling
+          // again takes the normal path.
+          const saved =
+            err instanceof ApiError
+              ? (err.details as { saved?: boolean; orderId?: number; bill_no?: string } | undefined)
+              : undefined;
+          if (saved?.saved && saved.orderId) {
+            const savedId = saved.orderId;
+            patch((p) => ({
+              ...p,
+              orders: p.orders.map((x) =>
+                x.id === orderId
+                  ? {
+                      ...x,
+                      status: "Bill Generated",
+                      backendId: savedId,
+                      lines: x.lines.map((l) =>
+                        Number.isFinite(l.kotRound) ? l : { ...l, kotRound: 1 },
+                      ),
+                      ...(saved.bill_no
+                        ? {
+                            billNo: saved.bill_no,
+                            orderNo: parseBillNoAsOrderNo(saved.bill_no, savedId),
+                          }
+                        : {}),
+                    }
+                  : x,
+              ),
+              tables: p.tables.map((t) =>
+                t.id === o.tableId ? { ...t, status: "Bill Generated" } : t,
+              ),
+            }));
+          }
           toast.error(err instanceof ApiError ? err.message : "Could not settle order");
         }
       };
 
-      const applySettlement = () =>
+      const applySettlement = (
+        bid: number | undefined,
+        orderNo: Order["orderNo"],
+        billNo: Order["billNo"],
+      ) =>
         patch((p) => ({
           ...p,
           orders: p.orders.map((x) =>
@@ -4390,7 +4565,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                   // silently reopened the OLD settled bill (menu
                   // disabled, since its status was already "Settled")
                   // instead of starting a fresh order.
-                  id: `o-final-${x.backendId}`,
+                  id: `o-final-${bid}`,
+                  backendId: bid,
+                  orderNo,
+                  billNo,
                   status: "Settled",
                   payments: [...(x.payments ?? []), ...payments],
                   paymentMode: mode,
@@ -4404,7 +4582,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               ? [
                   {
                     id: uid("due"),
-                    billNo: `#${o.orderNo}`,
+                    billNo: `#${orderNo}`,
                     customerName: o.customerName ?? "Guest",
                     mobile: o.customerPhone ?? "",
                     date: todayLabel,
@@ -4414,7 +4592,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                     // Tagged immediately so this bill is settleable from
                     // the Due Bills screen right away, without waiting for
                     // the next loadDueBillsFromServer to pick it up.
-                    backendOrderId: o.backendId,
+                    backendOrderId: bid,
                   },
                   ...p.dueBills,
                 ]
@@ -4435,7 +4613,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // draft-table- id, so a later lookup like `kots.filter(k =>
           // k.orderId === order.id)` still finds them.
           kots: p.kots.map((k) =>
-            k.orderId === orderId ? { ...k, orderId: `o-final-${o.backendId}` } : k,
+            k.orderId === orderId ? { ...k, orderId: `o-final-${bid}` } : k,
           ),
           cashSessions: p.cashSessions.map((cs) =>
             cs.status === "Open" && cashPortion !== 0
@@ -4498,16 +4676,66 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return draftId;
     },
 
+    resumeEditSettledOrder: async (backendId) => {
+      if (!canSpecial("orders.reopenSettled")) return false;
+      const draftId = `edit-${backendId}`;
+      if (s.orders.some((o) => o.id === draftId)) return true;
+      try {
+        const { order: raw } = await orderHistoryApi.getDetail(backendId);
+        if (!raw || raw.payment !== "success" || (raw as { deleted?: boolean }).deleted)
+          return false;
+        const staffName = raw.hotelUserId
+          ? (s.users.find((u) => u.id === String(raw.hotelUserId))?.name ?? "Staff")
+          : "Staff";
+        const original = mapRawOrderHistoryEntry(raw, staffName);
+        patch((p) =>
+          p.orders.some((o) => o.id === draftId)
+            ? p
+            : {
+                ...p,
+                orders: [
+                  { ...original, id: draftId, status: "Running", editingSettledOrderId: backendId },
+                  ...p.orders,
+                ],
+              },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
     cancelEditSettledOrder: (localOrderId) => {
       patch((p) => ({ ...p, orders: p.orders.filter((o) => o.id !== localOrderId) }));
     },
 
-    saveSettledOrderEdits: async (localOrderId) => {
+    saveSettledOrderEdits: async (localOrderId, payments) => {
       const o = s.orders.find((x) => x.id === localOrderId);
-      if (!o || !o.editingSettledOrderId) return;
+      if (!o || !o.editingSettledOrderId) return false;
       if (!o.lines.length) {
         toast.error("An order must have at least one item");
-        return;
+        return false;
+      }
+      let payment: Parameters<typeof editSettledOrderApi.edit>[0]["payment"];
+      if (payments) {
+        const unknown = payments.find((p) => !["Cash", "UPI", "Card", "Due"].includes(p.mode));
+        if (unknown) {
+          toast.error(`"${unknown.mode}" isn't a payment mode the backend supports yet`);
+          return false;
+        }
+        const sum = (mode: string) =>
+          payments.filter((p) => p.mode === mode).reduce((t, p) => t + p.amount, 0);
+        payment = { cash: sum("Cash"), upi: sum("UPI"), card: sum("Card"), due: sum("Due") };
+        if (payment.due > 0) {
+          if (!o.customerPhone) {
+            toast.error("Attach the customer's mobile number to keep an amount as Due");
+            return false;
+          }
+          payment.mobile = o.customerPhone;
+          if (o.customerName) payment.name = o.customerName;
+          if (o.customerAddress) payment.address = o.customerAddress;
+          if (o.customerGstin) payment.gstin = o.customerGstin;
+        }
       }
       const billSettings: BillSettings = {
         serviceCharge: s.serviceCharge,
@@ -4541,6 +4769,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           totalDiscount: totals.discount,
           ...discountPayload(o, totals),
           service_charge: totals.service,
+          ...(payment ? { payment } : {}),
         });
         patch((p) => ({ ...p, orders: p.orders.filter((x) => x.id !== localOrderId) }));
         await Promise.all([value.loadOrderHistoryFromServer(), value.loadRawMaterialsFromServer()]);
@@ -4558,8 +4787,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 ? `₹${Math.abs(due)} refund owed to customer`
                 : "Fully settled, no balance",
         });
+        return true;
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not save changes to this order");
+        return false;
       }
     },
 
@@ -4995,8 +5226,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.success("Reservation created", {
           description: `${r.customerName} · ${r.party} guests`,
         });
+        return true;
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not create reservation");
+        return false;
       }
     },
 
@@ -5019,8 +5252,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.success("Reservation updated", {
           description: `${r.customerName} · ${r.party} guests`,
         });
+        return true;
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not update reservation");
+        return false;
       }
     },
 
@@ -5780,7 +6015,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           patch((p) => ({
             ...p,
             orders: p.orders.map((x) =>
-              x.backendId === backendId && x.status !== "Settled" && x.status !== "Cancelled"
+              x.backendId === backendId &&
+              x.status !== "Settled" &&
+              x.status !== "Cancelled" &&
+              !x.editingSettledOrderId
                 ? settled
                   ? {
                       ...x,
@@ -5826,7 +6064,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // pick up whatever changed in the meantime.
     refreshOrderFromServer: async (orderId) => {
       const order = s.orders.find((o) => o.id === orderId);
-      if (!order?.backendId) return;
+      // An edit of a settled bill is a local copy of an order the server
+      // rightly reports as paid - "refreshing" it used to treat it as just
+      // settled elsewhere and replace it, so the edit screen showed "Order
+      // not found - may have been settled" the moment it opened.
+      if (!order?.backendId || order.editingSettledOrderId) return;
       try {
         const { order: raw } = await orderHistoryApi.getDetail(order.backendId);
         if (!raw) return;
@@ -5857,33 +6099,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     upsertTable: (t) => {
       const isNew = !s.tables.some((x) => x.id === t.id);
-      const parsedName = Number(t.name);
-      const nameIsNumeric = t.name.trim() !== "" && Number.isFinite(parsedName);
-
-      if (isNew && !nameIsNumeric) {
-        toast.error("Backend only supports numeric table numbers for new tables", {
-          description: `"${t.name}" is not a number.`,
-        });
+      if (isNew && !t.name.trim()) {
+        toast.error("Table name is required");
         return;
       }
 
       const run = async () => {
         try {
           if (isNew) {
-            await tableApi.createTables({
-              startNo: parsedName,
-              endNo: parsedName,
+            await tableApi.createTable({
+              table_name: t.name.trim(),
               table_catag_id: Number(t.categoryId),
               type: "T",
+              capacity: t.seats,
             });
           } else {
-            // editTable accepts a free-text name (unlike bulk create, which
-            // only ever generates numeric names), so no numeric check here.
             await tableApi.editTable({
               id: Number(t.id),
               table_name: t.name,
               table_catag_id: Number(t.categoryId),
               type: "T",
+              capacity: t.seats,
             });
           }
           await value.loadTablesFromServer();
@@ -5956,9 +6192,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const run = async () => {
         try {
           if (isNew) {
+            // Always appended at the end (exe assigns max rank + 1) - the
+            // Sort order field only matters for reordering existing rows.
             await tableApi.createCategory({ table_catag_nm: c.name, type: "T" });
           } else {
-            await tableApi.editCategory({ id: Number(c.id), table_catag_nm: c.name, type: "T" });
+            await tableApi.editCategory({
+              id: Number(c.id),
+              table_catag_nm: c.name,
+              type: "T",
+              rank: c.sortOrder,
+            });
           }
           await value.loadTablesFromServer();
           toast.success("Table category saved");
@@ -7606,14 +7849,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
 
     setConnection: (state) => {
-      patch((p) => ({ ...p, connection: state }));
-      if (state === "online") {
-        patch((p) => ({ ...p, connection: "syncing" }));
-        setTimeout(() => {
-          set((p) => ({ ...p, connection: "online" }));
-          toast.success("All changes synced");
-        }, 1600);
-      }
+      patch((p) => (p.connection === state ? p : { ...p, connection: state }));
     },
     // Real status from billerpe-local-exe's GET /localServerStatus (see
     // api.ts's RawLocalServerStatus) - backs the System page. Silent on
@@ -7621,7 +7857,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // deliberate user action - a transient blip shouldn't spam toasts.
     loadServerStatusFromServer: async () => {
       const result = await localServerApi.getStatus();
-      if (result) patch((p) => ({ ...p, localServerStatus: result }));
+      if (!result) return;
+      // The header's connection chip follows the exe's real sync state
+      // (it used to be a hand-picked demo value - picking "Offline Limit
+      // Exceeded" there even blocked billing on that terminal).
+      patch((p) => ({ ...p, localServerStatus: result, connection: connectionFromStatus(result) }));
     },
     // Real POST /localServerForceSync, then reload status so the page
     // reflects the result immediately rather than waiting for the next

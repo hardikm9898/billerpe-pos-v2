@@ -1,3 +1,5 @@
+import { searchMenuItems } from "@/lib/menuSearch";
+import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import {
@@ -90,11 +92,64 @@ export const Route = createFileRoute("/_shell/table-grid/order/$orderId")({
   component: OrderCartPage,
 });
 
+// Starting point for re-entering an edited settled bill's payment: the
+// original split, with a higher total's difference added to the default
+// mode, or a lower total taken off Due first and then the other modes.
+function prefillEditSplits(
+  previous: PaymentSplit[],
+  total: number,
+  defaultMode: PaymentSplit["mode"],
+): PaymentSplit[] {
+  const round = (n: number) => Math.round(n * 100) / 100;
+  const rows = previous.filter((p) => p.amount > 0).map((p) => ({ ...p }));
+  if (!rows.length) return [{ mode: defaultMode, amount: round(total) }];
+  let diff = round(total - rows.reduce((sum, p) => sum + p.amount, 0));
+  if (diff > 0) {
+    const row = rows.find((p) => p.mode === defaultMode);
+    if (row) row.amount = round(row.amount + diff);
+    else rows.push({ mode: defaultMode, amount: diff });
+  } else if (diff < 0) {
+    const order = [
+      ...rows.filter((p) => p.mode === "Due"),
+      ...rows.filter((p) => p.mode !== "Due").reverse(),
+    ];
+    for (const row of order) {
+      if (diff >= 0) break;
+      const cut = Math.min(row.amount, -diff);
+      row.amount = round(row.amount - cut);
+      diff = round(diff + cut);
+    }
+  }
+  return rows.filter((p) => p.amount > 0);
+}
+
 function OrderCartPage() {
   const { orderId } = Route.useParams();
   const store = useStore();
   const navigate = useNavigate();
   const order = store.orderById(orderId);
+
+  // A browser refresh on the edit-settled-bill screen loses the in-memory
+  // edit copy; rebuild it from the exe instead of showing "not found".
+  const editMatch = /^edit-(\d+)$/.exec(orderId);
+  const [resumingEdit, setResumingEdit] = useState(!order && !!editMatch);
+  useEffect(() => {
+    if (order || !editMatch) {
+      setResumingEdit(false);
+      return;
+    }
+    // Permissions and the exe session load right after a refresh; wait.
+    if (!store.sessionReady) return;
+    let cancelled = false;
+    setResumingEdit(true);
+    void store.resumeEditSettledOrder(Number(editMatch[1])).finally(() => {
+      if (!cancelled) setResumingEdit(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [orderId, !!order, store.sessionReady]);
 
   // Opening a table starts it "Hold" with zero items (see startOrder's own
   // comment). removeLine/changeQty already free the table the moment the
@@ -169,6 +224,14 @@ function OrderCartPage() {
     let last = 0;
     let fast = 0;
     const onKey = (e: KeyboardEvent) => {
+      // Typing inside a dialog (customer mobile, notes...) is never a scan.
+      // A quick run of digits and Enter there used to be taken for a
+      // barcode, and the Enter was swallowed ("Barcode not recognised").
+      if (e.target instanceof Element && e.target.closest("[role=dialog]")) {
+        buffer = "";
+        fast = 0;
+        return;
+      }
       const now = performance.now();
       const gap = now - last;
       last = now;
@@ -219,13 +282,16 @@ function OrderCartPage() {
   const [discountType, setDiscountType] = useState<"percent" | "flat">("percent");
   const [discountValue, setDiscountValue] = useState(10);
   const [customerOpen, setCustomerOpen] = useState(false);
-  const [custName, setCustName] = useState("");
   const [custPhone, setCustPhone] = useState("");
   const [lastOrder, setLastOrder] = useState<RawOrderDetail | null>(null);
   const [lastOrderLoading, setLastOrderLoading] = useState(false);
   const [settleOpen, setSettleOpen] = useState(false);
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
   const [tip, setTip] = useState(0);
+  // Saving an edit of a settled bill: how the full new total was paid.
+  const [editPayOpen, setEditPayOpen] = useState(false);
+  const [editSplits, setEditSplits] = useState<PaymentSplit[]>([]);
+  const [editSaving, setEditSaving] = useState(false);
   // Checked pending (not-yet-sent) lines to KOT right now, leaving the rest
   // of the "New — not sent" group for a later round - store.generateKot's
   // lineIds option. Empty selection keeps the original "Send KOT fires
@@ -293,18 +359,18 @@ function OrderCartPage() {
   );
 
   const q = query.trim().toLowerCase();
-  const items = useMemo(
-    () =>
-      store.menuItems.filter(
-        (i) =>
-          i.active &&
-          categoriesById.get(i.categoryId)?.menuId === activeMenuId &&
-          (categoryId === "all" ||
-            (categoryId === "fav" ? i.favourite : i.categoryId === categoryId)) &&
-          (!q || i.name.toLowerCase().includes(q) || (i.sku ?? "").toLowerCase().includes(q)),
-      ),
-    [store.menuItems, categoriesById, categoryId, activeMenuId, q],
-  );
+  const items = useMemo(() => {
+    const onMenu = store.menuItems.filter(
+      (i) => i.active && categoriesById.get(i.categoryId)?.menuId === activeMenuId,
+    );
+    // A search looks across the whole menu (a SKU from another category must
+    // still be found) and ranks exact SKU matches first - lib/menuSearch.ts.
+    if (q) return searchMenuItems(onMenu, q);
+    return onMenu.filter(
+      (i) =>
+        categoryId === "all" || (categoryId === "fav" ? i.favourite : i.categoryId === categoryId),
+    );
+  }, [store.menuItems, categoriesById, categoryId, activeMenuId, q]);
 
   const kotGroups = useMemo(() => {
     const map = new Map<number, OrderLine[]>();
@@ -385,6 +451,10 @@ function OrderCartPage() {
       toast.success(`Added ${addedCount} item${addedCount === 1 ? "" : "s"} from their last order`);
     }
   };
+
+  if (!order && resumingEdit) {
+    return <div className="p-6 text-sm text-muted-foreground">Opening the bill for editing…</div>;
+  }
 
   if (!order) {
     return (
@@ -824,9 +894,15 @@ function OrderCartPage() {
               <Button
                 disabled={!order.lines.length}
                 onClick={() => {
-                  void store
-                    .saveSettledOrderEdits(order.id)
-                    .then(() => navigate({ to: "/orders" }));
+                  const defaultMode =
+                    order.type === "Dine In"
+                      ? store.resolveDefaultPaymentMode(
+                          "Dine-in",
+                          store.tables.find((t) => t.id === order.tableId)?.categoryId,
+                        )
+                      : store.resolveDefaultPaymentMode("Pickup");
+                  setEditSplits(prefillEditSplits(order.payments ?? [], totals.grand, defaultMode));
+                  setEditPayOpen(true);
                 }}
               >
                 <Save className="size-4" /> Save changes
@@ -1194,84 +1270,134 @@ function OrderCartPage() {
       </Dialog>
 
       {/* customer */}
-      <Dialog open={customerOpen} onOpenChange={setCustomerOpen}>
+      <CustomerDetailsDialog
+        open={customerOpen}
+        onOpenChange={setCustomerOpen}
+        initial={{
+          phone: order.customerPhone,
+          name: order.customerName,
+          address: order.customerAddress,
+          gstin: order.customerGstin,
+        }}
+        onPhoneChange={setCustPhone}
+        onSave={(d) =>
+          store.setCustomer(order.id, d.name, d.phone, { address: d.address, gstin: d.gstin })
+        }
+        onClear={() => store.setCustomer(order.id, "", "")}
+      >
+        {() => (
+          <>
+            {digits.length === 10 && dueForPhone.length ? (
+              <p className="mt-1.5 rounded-lg bg-warning-soft px-2.5 py-1.5 text-xs text-warning">
+                Outstanding due: <Money value={dueTotalForPhone} className="font-semibold" /> ·{" "}
+                {dueForPhone.length} bill{dueForPhone.length > 1 ? "s" : ""}
+              </p>
+            ) : null}
+            {digits.length === 10 && lastOrderLoading ? (
+              <p className="mt-1.5 text-xs text-muted-foreground">Checking their last order…</p>
+            ) : null}
+            {digits.length === 10 && !lastOrderLoading && lastOrder ? (
+              <div className="mt-1.5 space-y-1.5 rounded-lg bg-surface-muted px-2.5 py-2">
+                <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                  <History className="size-3.5" /> Last order · Bill #{lastOrder.bill_no}
+                </p>
+                <p className="text-xs">
+                  {lastOrder.hms_orderDetails
+                    .map((l) => `${l.qty}× ${l.hms_menu_mst?.item_name ?? "Item"}`)
+                    .join(", ")}
+                </p>
+                <Button size="sm" variant="outline" className="w-full" onClick={repeatLastOrder}>
+                  <History className="size-3.5" /> Repeat this order
+                </Button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </CustomerDetailsDialog>
+
+      {/* settle */}
+      {/* edit of a settled bill: the biller decides how the FULL new
+          total was paid - cash, UPI, card, due (needs a mobile) or a mix. */}
+      <Dialog open={editPayOpen} onOpenChange={(o) => !editSaving && setEditPayOpen(o)}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Attach customer</DialogTitle>
-            <DialogDescription>Used for bill delivery and repeat-visit reports.</DialogDescription>
+            <DialogTitle>Payment for the edited bill · {order.tableLabel}</DialogTitle>
+            <DialogDescription>
+              Enter how the full bill of <Money value={totals.grand} /> was paid. It started from
+              the original payment; change it to what the customer actually paid.
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <Label htmlFor="cname">Name</Label>
-              <Input
-                id="cname"
-                className="mt-1.5"
-                value={custName}
-                onChange={(e) => setCustName(e.target.value)}
-              />
+          {previouslyPaid > 0 ? (
+            <div className="space-y-1 rounded-xl bg-surface-muted p-3 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Originally paid</span>
+                <span>
+                  {(order.payments ?? [])
+                    .filter((p) => p.amount > 0)
+                    .map((p) => `${p.mode} ₹${p.amount}`)
+                    .join(" + ")}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">New bill total</span>
+                <Money value={totals.grand} className="font-medium" />
+              </div>
             </div>
-            <div>
-              <Label htmlFor="cphone">Mobile</Label>
-              <Input
-                id="cphone"
-                className="num mt-1.5"
-                value={custPhone}
-                onChange={(e) => setCustPhone(e.target.value)}
-              />
-              {digits.length === 10 && dueForPhone.length ? (
-                <p className="mt-1.5 rounded-lg bg-warning-soft px-2.5 py-1.5 text-xs text-warning">
-                  Outstanding due: <Money value={dueTotalForPhone} className="font-semibold" /> ·{" "}
-                  {dueForPhone.length} bill{dueForPhone.length > 1 ? "s" : ""}
-                </p>
-              ) : null}
-              {digits.length === 10 && lastOrderLoading ? (
-                <p className="mt-1.5 text-xs text-muted-foreground">Checking their last order…</p>
-              ) : null}
-              {digits.length === 10 && !lastOrderLoading && lastOrder ? (
-                <div className="mt-1.5 space-y-1.5 rounded-lg bg-surface-muted px-2.5 py-2">
-                  <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                    <History className="size-3.5" /> Last order · Bill #{lastOrder.bill_no}
-                  </p>
-                  <p className="text-xs">
-                    {lastOrder.hms_orderDetails
-                      .map((l) => `${l.qty}× ${l.hms_menu_mst?.item_name ?? "Item"}`)
-                      .join(", ")}
-                  </p>
-                  <Button size="sm" variant="outline" className="w-full" onClick={repeatLastOrder}>
-                    <History className="size-3.5" /> Repeat this order
-                  </Button>
-                </div>
-              ) : null}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {store.customers.slice(0, 4).map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => {
-                    setCustName(c.name);
-                    setCustPhone(c.phone);
-                  }}
-                  className="rounded-lg border border-border px-2.5 py-1 text-xs"
-                >
-                  {c.name}
-                </button>
-              ))}
-            </div>
-          </div>
+          ) : null}
+          <PaymentSplitEditor
+            splits={editSplits}
+            onChange={setEditSplits}
+            total={totals.grand}
+            orderType={order.type === "Dine In" ? "Dine-in" : "Pickup"}
+            tableCategoryId={
+              order.type === "Dine In"
+                ? store.tables.find((t) => t.id === order.tableId)?.categoryId
+                : undefined
+            }
+          />
           <DialogFooter>
             <Button
+              data-edit-pay-confirm
+              disabled={editSaving}
               onClick={() => {
-                store.setCustomer(order.id, custName, custPhone);
-                setCustomerOpen(false);
+                const paid = editSplits.reduce((sum, p) => sum + p.amount, 0);
+                const gap = Math.round((totals.grand - paid) * 100) / 100;
+                if (Math.abs(gap) > 0.009) {
+                  toast.error("Payments must add up to the bill total", {
+                    description: `${gap > 0 ? "Remaining" : "Over by"} ₹${Math.abs(gap).toLocaleString("en-IN")}`,
+                  });
+                  return;
+                }
+                const duePortion = editSplits
+                  .filter((p) => p.mode === "Due")
+                  .reduce((sum, p) => sum + p.amount, 0);
+                if (duePortion > 0 && !order.customerPhone) {
+                  setEditPayOpen(false);
+                  setCustomerOpen(true);
+                  toast.info("Add the customer's mobile number to keep part of this bill as Due");
+                  return;
+                }
+                setEditSaving(true);
+                void store
+                  .saveSettledOrderEdits(
+                    order.id,
+                    editSplits.filter((p) => p.amount > 0),
+                  )
+                  .then((ok) => {
+                    if (ok) {
+                      setEditPayOpen(false);
+                      navigate({ to: "/orders" });
+                    }
+                  })
+                  .finally(() => setEditSaving(false));
               }}
             >
-              Save customer
+              <Save className="size-4" /> {editSaving ? "Saving…" : "Save bill"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* settle */}
       <Dialog open={settleOpen} onOpenChange={setSettleOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>

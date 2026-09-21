@@ -1,3 +1,5 @@
+import { searchMenuItems } from "@/lib/menuSearch";
+import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
@@ -166,13 +168,18 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
     !!noteLine ||
     !!addonLine;
 
+  // Same search as the touch table screen (lib/menuSearch.ts), on this
+  // order's menu only.
   const matches = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     if (!q) return [];
-    return store.menuItems
-      .filter((i) => i.active && (i.name.toLowerCase().includes(q) || i.id.toLowerCase() === q))
-      .slice(0, 8);
-  }, [store.menuItems, query]);
+    const menuId = order?.menuId ?? store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id;
+    const menuOfCategory = new Map(store.menuCategories.map((c) => [c.id, c.menuId]));
+    const onMenu = store.menuItems.filter(
+      (i) => i.active && (!menuId || menuOfCategory.get(i.categoryId) === menuId),
+    );
+    return searchMenuItems(onMenu, q).slice(0, 8);
+  }, [store.menuItems, store.menuCategories, store.menus, order?.menuId, query]);
 
   useEffect(() => setHighlight(0), [query]);
 
@@ -222,6 +229,14 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
     let last = 0;
     let fast = 0;
     const onKey = (e: KeyboardEvent) => {
+      // Typing inside a dialog (customer mobile, notes...) is never a scan.
+      // A quick run of digits and Enter there used to be taken for a
+      // barcode, and the Enter was swallowed ("Barcode not recognised").
+      if (e.target instanceof Element && e.target.closest("[role=dialog]")) {
+        buffer = "";
+        fast = 0;
+        return;
+      }
       const now = performance.now();
       const gap = now - last;
       last = now;
@@ -394,7 +409,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
           <div className="leading-tight">
             <p className="text-[13px] font-semibold">Keyboard Billing</p>
             <p className="num text-[10px] uppercase tracking-[0.1em] text-muted-foreground">
-              {(store.restaurant?.name ?? store.serverHotelName ?? "")}
+              {store.restaurant?.name ?? store.serverHotelName ?? ""}
             </p>
           </div>
         </div>
@@ -680,17 +695,23 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                             )}
                           >
                             <span className="flex min-w-0 items-center gap-2">
-                              <span
-                                className={cn(
-                                  "num rounded px-1 text-[10px] font-semibold",
-                                  i === highlight
-                                    ? "bg-primary-foreground/20"
-                                    : "bg-surface-muted text-muted-foreground",
-                                )}
-                              >
-                                {m.id.toUpperCase()}
+                              {/* The item's SKU - it used to show the internal
+                                  database id here, which cashiers read as the SKU. */}
+                              {m.sku ? (
+                                <span
+                                  className={cn(
+                                    "num rounded px-1 text-[10px] font-semibold",
+                                    i === highlight
+                                      ? "bg-primary-foreground/20"
+                                      : "bg-surface-muted text-muted-foreground",
+                                  )}
+                                >
+                                  {m.sku.toUpperCase()}
+                                </span>
+                              ) : null}
+                              <span data-item-name className="truncate font-medium">
+                                {m.name}
                               </span>
-                              <span className="truncate font-medium">{m.name}</span>
                             </span>
                             <span className="num text-xs font-semibold">₹{m.price}</span>
                           </button>
@@ -838,9 +859,11 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
 
       {/* ================= action bar ================= */}
       <footer className="flex flex-wrap items-center gap-2 border-t border-border bg-surface px-3 py-2">
+        {/* Same grey as a held table on the table grid (--status-held). */}
         <Button
           variant="outline"
-          className="h-10 border-warning/40 bg-warning-soft text-warning-foreground hover:bg-warning-soft/80"
+          data-hold-button
+          className="h-10 border-status-held-foreground/25 bg-status-held text-status-held-foreground hover:bg-status-held/80"
           disabled={settled}
           onClick={doHold}
         >
@@ -1423,151 +1446,21 @@ function CustomerDialog({
   order: Order;
 }) {
   const store = useStore();
-  const [phone, setPhone] = useState(order.customerPhone ?? "");
-  const [name, setName] = useState(order.customerName ?? "");
-  const [gstin, setGstin] = useState("");
-  const [address, setAddress] = useState("");
-  const [hi, setHi] = useState(0);
-
-  useEffect(() => {
-    if (open) {
-      setPhone(order.customerPhone ?? "");
-      setName(order.customerName ?? "");
-    }
-  }, [open, order.customerPhone, order.customerName]);
-
-  const suggestions = useMemo(() => {
-    const q = phone.trim();
-    if (q.length < 2) return [];
-    return store.customers
-      .filter((c) => c.phone.includes(q) || c.name.toLowerCase().includes(q.toLowerCase()))
-      .slice(0, 5);
-  }, [store.customers, phone]);
-
-  const choose = (id: string) => {
-    const c = store.customers.find((x) => x.id === id);
-    if (!c) return;
-    setPhone(c.phone);
-    setName(c.name);
-    setGstin(c.gstin ?? "");
-    setAddress(c.address ?? "");
-  };
-
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Customer</DialogTitle>
-          <DialogDescription>
-            Search by mobile to autofill, or type a new customer.
-          </DialogDescription>
-        </DialogHeader>
-        <div className="space-y-1.5">
-          <Label>Mobile</Label>
-          <Input
-            autoFocus
-            value={phone}
-            inputMode="tel"
-            placeholder="Search mobile or name…"
-            onChange={(e) => {
-              setPhone(e.target.value);
-              setHi(0);
-            }}
-            onKeyDown={(e) => {
-              if (!suggestions.length) return;
-              if (e.key === "ArrowDown") {
-                e.preventDefault();
-                setHi((h) => (h + 1) % suggestions.length);
-              } else if (e.key === "ArrowUp") {
-                e.preventDefault();
-                setHi((h) => (h - 1 + suggestions.length) % suggestions.length);
-              } else if (e.key === "Enter") {
-                e.preventDefault();
-                const s = suggestions[hi];
-                if (s) choose(s.id);
-              }
-            }}
-            className={cn("num", focusRing)}
-          />
-          {suggestions.length ? (
-            <ul className="rounded-lg border border-border p-1">
-              {suggestions.map((c, i) => (
-                <li key={c.id}>
-                  <button
-                    onMouseEnter={() => setHi(i)}
-                    onClick={() => choose(c.id)}
-                    className={cn(
-                      "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-sm",
-                      i === hi ? "bg-primary text-primary-foreground" : "hover:bg-surface-muted",
-                    )}
-                  >
-                    <span className="truncate">{c.name}</span>
-                    <span className="num text-xs">{c.phone}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label>Name</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} className={focusRing} />
-          </div>
-          <div className="space-y-1.5">
-            <Label>GSTIN</Label>
-            <Input
-              value={gstin}
-              onChange={(e) => setGstin(e.target.value)}
-              className={cn("num", focusRing)}
-            />
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          <Label>Address</Label>
-          <Input
-            value={address}
-            onChange={(e) => setAddress(e.target.value)}
-            className={focusRing}
-          />
-        </div>
-        <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => {
-              store.setCustomer(order.id, "", "");
-              onOpenChange(false);
-            }}
-          >
-            Clear
-          </Button>
-          <Button
-            onClick={() => {
-              store.setCustomer(order.id, name.trim(), phone.trim());
-              if (
-                name.trim() &&
-                phone.trim() &&
-                !store.customers.some((c) => c.phone === phone.trim())
-              ) {
-                store.upsertCustomer({
-                  id: `c-${Date.now()}`,
-                  name: name.trim(),
-                  phone: phone.trim(),
-                  orders: 0,
-                  lastVisit: "Today",
-                  gstin,
-                  address,
-                  active: true,
-                });
-              }
-              onOpenChange(false);
-            }}
-          >
-            Attach customer
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <CustomerDetailsDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      initial={{
+        phone: order.customerPhone,
+        name: order.customerName,
+        address: order.customerAddress,
+        gstin: order.customerGstin,
+      }}
+      onSave={(d) =>
+        store.setCustomer(order.id, d.name, d.phone, { address: d.address, gstin: d.gstin })
+      }
+      onClear={() => store.setCustomer(order.id, "", "")}
+    />
   );
 }
 

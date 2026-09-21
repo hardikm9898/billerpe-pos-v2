@@ -166,6 +166,33 @@ function ReservationsPage() {
     return null;
   }, [draft]);
 
+  // A table already booked for an overlapping time, among the bookings
+  // loaded here - shown before saving. The cloud checks again on save
+  // (uat-backend-v2 controller/tableBooking.js), so this is a convenience.
+  const clash = useMemo(() => {
+    if (!draft || scheduleError) return null;
+    const toMs = (iso: string) => {
+      const d = new Date(iso.length <= 5 ? `${draft.date}T${iso}` : iso.slice(0, 19));
+      return d.getTime();
+    };
+    const start = combineDateTime(draft.date, draft.startTime).getTime();
+    const end = combineDateTime(draft.date, draft.endTime).getTime();
+    for (const r of store.reservations) {
+      if (r.id === draft.id) continue;
+      const rs = toMs(r.startTime);
+      let re = toMs(r.endTime);
+      if (Number.isNaN(rs) || Number.isNaN(re)) continue;
+      if (re <= rs) re += 24 * 60 * 60 * 1000;
+      if (!(start < re && end > rs)) continue;
+      const table = r.tables.find((t) => draft.tableIds.includes(t.id));
+      if (table) {
+        const hhmm = (iso: string) => (iso.includes("T") ? iso.split("T")[1] : iso).slice(0, 5);
+        return `${table.label} is already booked ${hhmm(r.startTime)}–${hhmm(r.endTime)} for ${r.customerName}. Choose another time or table.`;
+      }
+    }
+    return null;
+  }, [draft, scheduleError, store.reservations]);
+
   const toggleTable = (id: string) => {
     if (!draft) return;
     setDraft({
@@ -191,12 +218,12 @@ function ReservationsPage() {
       advance: draft.advance,
       gstNo: draft.gstNo,
     };
-    if (draft.id) {
-      await store.updateReservation(draft.id, payload);
-    } else {
-      await store.createReservation(payload);
-    }
-    setDraft(null);
+    // Keep the form open when the booking is refused (e.g. the table is
+    // already booked then), so nothing typed is lost.
+    const ok = draft.id
+      ? await store.updateReservation(draft.id, payload)
+      : await store.createReservation(payload);
+    if (ok) setDraft(null);
   };
 
   return (
@@ -371,6 +398,11 @@ function ReservationsPage() {
                     </label>
                   ))}
                 </div>
+                {clash ? (
+                  <p data-booking-clash className="text-xs text-destructive">
+                    {clash}
+                  </p>
+                ) : null}
               </div>
               <div className="grid gap-4 sm:grid-cols-3">
                 <div className="space-y-1.5">
@@ -408,7 +440,8 @@ function ReservationsPage() {
                 !draft?.customerName.trim() ||
                 !draft?.mobile.trim() ||
                 !draft?.tableIds.length ||
-                !!scheduleError
+                !!scheduleError ||
+                !!clash
               }
               onClick={() => void submit()}
             >

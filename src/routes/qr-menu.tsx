@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Minus, Plus, Receipt, Search, Share2, ShoppingCart, UtensilsCrossed } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -19,8 +19,9 @@ import {
   decryptQrPayload,
   encryptHotelId,
   fetchPublicMenu,
-  getQrOrderStatus,
-  getTableSessionStatus,
+  getQrSession,
+  QrRequestError,
+  startQrSession,
   submitQrOrder,
   type PublicMenuAddon,
   type PublicMenuCategory,
@@ -28,6 +29,8 @@ import {
   type PublicMenuVariant,
   type PublicRestaurantDetails,
   type QrCartItem,
+  type QrRoundStatus,
+  type QrSessionView,
   type QrTablePayload,
 } from "@/lib/publicMenu";
 
@@ -118,61 +121,76 @@ function unitPrice(entry: Pick<CartEntry, "item" | "variant" | "addons">) {
     : Number(entry.item.price);
   return base + entry.addons.reduce((sum, a) => sum + Number(a.price), 0);
 }
+function roundTotal(items: QrCartItem[]) {
+  return items.reduce((sum, i) => sum + (Number(i.unitPrice) || 0) * i.qty, 0);
+}
 
-type RoundStatus = "pending" | "accepted" | "rejected" | "expired";
-// One customer submission (one POST /qrOrder call). A single ordering
-// session at a table is potentially many of these - see the plan's own
-// "add more items on the same order" requirement: each round becomes its
-// own KOT round on the SAME backend Order (billerpe-local-exe's
-// addKotRoundToOrder), not a separate order.
-type OrderRound = {
-  id: number;
-  items: QrCartItem[];
-  total: number;
-  status: RoundStatus;
-  submittedAt: number;
+// What this phone remembers about its visit at this table. The visit itself
+// (every round and its status) lives on the server (uat-backend-v2
+// model/qrSession.js), so a refresh, a closed tab or even a different phone
+// never loses it: this key brings it straight back, and entering the same
+// mobile again finds it too. The cart is kept here so a refresh doesn't
+// empty it, and the pending submission's client_key so a retry after a lost
+// response is saved once, not twice.
+type StoredCartLine = {
+  itemId: number;
+  variantId?: number;
+  addonIds: number[];
+  qty: number;
+  comment: string;
 };
-type StoredSession = { rounds: OrderRound[]; customerName: string; customerMobile: string };
-
-function sessionStorageKey(payload: QrTablePayload) {
-  return `billerpe:qrSession:${payload.hotelId}:${payload.tableId}`;
+type StoredVisit = {
+  sessionKey?: string;
+  cart?: StoredCartLine[];
+  pendingSubmit?: { clientKey: string; sig: string };
+};
+function visitStorageKey(payload: QrTablePayload) {
+  return `billerpe:qrVisit:${payload.hotelId}:${payload.tableId}`;
 }
-function loadSession(payload: QrTablePayload): StoredSession | null {
+function loadVisit(payload: QrTablePayload): StoredVisit {
   try {
-    const raw = window.localStorage.getItem(sessionStorageKey(payload));
-    return raw ? (JSON.parse(raw) as StoredSession) : null;
+    const raw = window.localStorage.getItem(visitStorageKey(payload));
+    return raw ? (JSON.parse(raw) as StoredVisit) : {};
   } catch {
-    return null;
+    return {};
   }
 }
-function persistSession(payload: QrTablePayload, session: StoredSession) {
+function saveVisit(payload: QrTablePayload, patch: Partial<StoredVisit>) {
   try {
-    window.localStorage.setItem(sessionStorageKey(payload), JSON.stringify(session));
+    const next = { ...loadVisit(payload), ...patch };
+    window.localStorage.setItem(visitStorageKey(payload), JSON.stringify(next));
   } catch {
-    // non-fatal - session just won't survive a reload
+    // Private mode / storage blocked: the visit still lives on the server
+    // and comes back by entering the mobile number again.
   }
 }
-function clearSession(payload: QrTablePayload) {
-  try {
-    window.localStorage.removeItem(sessionStorageKey(payload));
-  } catch {
-    // ignore
-  }
+function newClientKey() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
 const MOBILE_PATTERN = /^[0-9]{10}$/;
+const POLL_MS = 5000;
+// Same cap the cloud enforces per line (uat-backend-v2 controller/qrOrder.js).
+const MAX_QTY_PER_LINE = 20;
 
-const STATUS_LABEL: Record<RoundStatus, string> = {
-  pending: "Waiting for confirmation",
-  accepted: "Accepted",
-  rejected: "Declined",
-  expired: "Expired",
+const STATUS_LABEL: Record<QrRoundStatus, string> = {
+  pending: "Waiting for the restaurant to confirm",
+  accepted: "Confirmed - being prepared",
+  rejected: "Declined by the restaurant",
+  expired: "Not confirmed - please ask staff",
 };
-const STATUS_DOT: Record<RoundStatus, string> = {
+const STATUS_DOT: Record<QrRoundStatus, string> = {
   pending: "bg-amber-500",
   accepted: "bg-emerald-600",
   rejected: "bg-red-600",
   expired: "bg-muted-foreground",
+};
+const CLOSED_MESSAGE: Record<string, string> = {
+  settled: "Your bill has been settled. Thank you for visiting!",
+  cancelled: "This table's order was cancelled by the restaurant.",
+  moved: "Staff moved your order to another table. Please scan the QR on your new table.",
+  expired: "This order session has ended.",
 };
 
 function QrMenuPage() {
@@ -183,27 +201,27 @@ function QrMenuPage() {
   const [search, setSearch] = useState("");
   const [openItem, setOpenItem] = useState<PublicMenuItem | null>(null);
 
-  // Table ordering - only present when the scanned QR is a per-table
-  // order QR (decryptQrPayload succeeded), not the restaurant-level
-  // menu-only QR. qrParam is the raw ciphertext from the URL, kept as-is
-  // to forward unchanged to submitQrOrder/getTableSessionStatus - the
-  // backend re-derives hotelId/tableId/qrVersion from it itself.
+  // Table ordering - only when the scanned QR is a per-table order QR
+  // (decryptQrPayload succeeded), not the restaurant's menu-only QR.
+  // qrParam is the raw ciphertext from the URL, forwarded unchanged.
   const [tablePayload, setTablePayload] = useState<QrTablePayload | null>(null);
   const [qrParam, setQrParam] = useState("");
   const [cart, setCart] = useState<Map<string, CartEntry>>(new Map());
+  const [cartRestored, setCartRestored] = useState(false);
   const [drawerStep, setDrawerStep] = useState<"closed" | "cart" | "details">("closed");
+  // "order": the details step places the cart right after starting the
+  // visit. "find": only looks the visit up ("Ordered already?").
+  const [detailsPurpose, setDetailsPurpose] = useState<"order" | "find">("order");
   const [customerName, setCustomerName] = useState("");
   const [customerMobile, setCustomerMobile] = useState("");
   const [mobileError, setMobileError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // The ongoing session at this table - every accepted/pending/declined
-  // round so far, visible any time via the "My Order" panel, and still
-  // open to new rounds until the table's bill is actually settled (see
-  // the table-status poll below), not just after the first accept.
-  const [rounds, setRounds] = useState<OrderRound[]>([]);
+  const [visit, setVisit] = useState<QrSessionView | null>(null);
   const [orderHistoryOpen, setOrderHistoryOpen] = useState(false);
+  const busyRef = useRef(false);
+  const lastStatuses = useRef<Map<number, QrRoundStatus>>(new Map());
 
   // Item-detail dialog's in-progress variant/addon/qty selection - reset
   // whenever a different item is opened.
@@ -217,6 +235,23 @@ function QrMenuPage() {
     setDraftQty(1);
   }, [openItem?.id]);
 
+  // Applies a fresh server view, telling the customer when a round they are
+  // waiting on is confirmed or declined.
+  const applyVisit = useCallback((view: QrSessionView, announce: boolean) => {
+    for (const r of view.rounds) {
+      const before = lastStatuses.current.get(r.id);
+      if (announce && before === "pending" && r.status !== "pending") {
+        if (r.status === "accepted")
+          toast.success("Your order was confirmed and is being prepared.");
+        else if (r.status === "rejected")
+          toast.error("The restaurant declined your last order. Please ask staff.");
+        else toast.error("Your last order was not confirmed in time. Please ask staff.");
+      }
+      lastStatuses.current.set(r.id, r.status);
+    }
+    setVisit(view);
+  }, []);
+
   useEffect(() => {
     const raw = encryptedIdFromUrl();
     if (!raw) {
@@ -228,11 +263,20 @@ function QrMenuPage() {
     if (payload) {
       setTablePayload(payload);
       setQrParam(raw);
-      const stored = loadSession(payload);
-      if (stored) {
-        setRounds(stored.rounds);
-        setCustomerName(stored.customerName || "");
-        setCustomerMobile(stored.customerMobile || "");
+      const stored = loadVisit(payload);
+      if (stored.sessionKey) {
+        getQrSession(stored.sessionKey)
+          .then((view) => {
+            applyVisit(view, false);
+            setCustomerMobile(view.session.customer_mobile || "");
+            setCustomerName(view.session.customer_name || "");
+          })
+          .catch((err) => {
+            // Only a definite answer from the server forgets the key; a
+            // network blip keeps it for the next try.
+            if (err instanceof QrRequestError && err.code !== null)
+              saveVisit(payload, { sessionKey: undefined });
+          });
       }
     }
     const hotelCiphertext = payload ? encryptHotelId(payload.hotelId) : raw;
@@ -243,104 +287,98 @@ function QrMenuPage() {
       })
       .catch(() => setNotFound(true))
       .finally(() => setLoading(false));
-  }, []);
+  }, [applyVisit]);
 
-  // Polls status for whichever rounds are still pending - re-arms only
-  // when the SET of pending round ids actually changes (a round newly
-  // submitted, or one leaving pending), not on every tick, so this isn't
-  // tearing down/recreating its interval every 5s for no reason.
-  const pendingIdsKey = rounds
-    .filter((r) => r.status === "pending")
-    .map((r) => r.id)
-    .join(",");
+  // Rebuilds the saved cart once the menu is here, dropping anything no
+  // longer on it.
   useEffect(() => {
-    const ids = pendingIdsKey ? pendingIdsKey.split(",").map(Number) : [];
-    if (ids.length === 0) return;
-    let cancelled = false;
-    const check = async () => {
-      const updates = await Promise.all(
-        ids.map(async (id) => {
-          try {
-            const res = await getQrOrderStatus(id);
-            return { id, status: res.status };
-          } catch {
-            return null;
-          }
-        }),
-      );
-      if (cancelled) return;
-      setRounds((prev) => {
-        const next = prev.map((r) => {
-          const u = updates.find((x) => x && x.id === r.id);
-          return u && u.status !== r.status ? { ...r, status: u.status } : r;
-        });
-        if (tablePayload)
-          persistSession(tablePayload, { rounds: next, customerName, customerMobile });
-        return next;
+    if (!tablePayload || cartRestored || categories.length === 0) return;
+    const byId = new Map<number, PublicMenuItem>();
+    for (const c of categories) for (const item of c.hms_menu_msts) byId.set(item.id, item);
+    const next = new Map<string, CartEntry>();
+    for (const line of loadVisit(tablePayload).cart ?? []) {
+      const item = byId.get(line.itemId);
+      if (!item || !(line.qty > 0)) continue;
+      const variant = line.variantId
+        ? item.variantData?.find((v) => v.id === line.variantId)
+        : undefined;
+      if (line.variantId && !variant) continue;
+      const allAddons = (item.addonDepartmentData ?? []).flatMap((g) => g.hms_addon_msts ?? []);
+      const addons = line.addonIds
+        .map((id) => allAddons.find((a) => a.id === id))
+        .filter(Boolean) as PublicMenuAddon[];
+      if (addons.length !== line.addonIds.length) continue;
+      next.set(cartKey(item.id, variant?.id, line.addonIds), {
+        item,
+        qty: line.qty,
+        comment: line.comment,
+        variant,
+        addons,
       });
-    };
-    void check();
-    const t = setInterval(check, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingIdsKey, tablePayload]);
+    }
+    setCart(next);
+    setCartRestored(true);
+  }, [tablePayload, categories, cartRestored]);
 
-  // The session only truly ends when the table's bill is settled (or the
-  // table is otherwise cleared) - not after any single round is accepted.
-  // Detected via the table's own status flipping back to Free/Reserved;
-  // only polls while there's an actual session to watch.
   useEffect(() => {
-    if (!tablePayload || !qrParam || rounds.length === 0) return;
+    if (!tablePayload || !cartRestored) return;
+    saveVisit(tablePayload, {
+      cart: Array.from(cart.values()).map((c) => ({
+        itemId: c.item.id,
+        variantId: c.variant?.id,
+        addonIds: c.addons.map((a) => a.id),
+        qty: c.qty,
+        comment: c.comment,
+      })),
+    });
+  }, [cart, tablePayload, cartRestored]);
+
+  const sessionKey = visit?.session.key ?? null;
+  const visitOpen = visit?.session.status === "open";
+
+  // Live status of the visit: every round's confirmation, "bill ready" and
+  // "settled". Polls only while the visit is open and the page is on
+  // screen, and checks at once when the customer comes back to the tab.
+  useEffect(() => {
+    if (!sessionKey || !visitOpen) return;
     let cancelled = false;
     const check = async () => {
+      if (document.visibilityState !== "visible") return;
       try {
-        const res = await getTableSessionStatus(qrParam);
-        if (cancelled) return;
-        if (res.table_status === "F" || res.table_status === "B") {
-          setRounds([]);
-          setCustomerName("");
-          setCustomerMobile("");
-          clearSession(tablePayload);
-        }
+        const view = await getQrSession(sessionKey);
+        if (!cancelled) applyVisit(view, true);
       } catch {
-        // transient - try again next tick
+        // transient - next tick
       }
     };
-    const t = setInterval(check, 10000);
+    const t = setInterval(check, POLL_MS);
+    const onVisible = () => void check();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       cancelled = true;
       clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [tablePayload, qrParam, rounds.length]);
+  }, [sessionKey, visitOpen, applyVisit]);
 
-  // Cross-tab sync: two tabs/windows against the same table (e.g. a
-  // customer switches phones mid-visit, or reopens the QR link in a new
-  // tab) each hold their own in-memory `rounds` copy - if both submit a
-  // round independently, whichever writes localStorage LAST would
-  // otherwise silently overwrite the other's round in every OTHER tab
-  // (only visible again after that tab reloads - the exact "2 orders
-  // separated, then merge on reload" report). The native `storage` event
-  // fires in every OTHER same-origin tab whenever one tab writes, so this
-  // pulls those writes in live instead of waiting for a reload to notice.
+  // A second tab of the same table (the customer opened the link twice)
+  // follows this one's visit instead of starting its own.
   useEffect(() => {
     if (!tablePayload) return;
     const payload = tablePayload;
-    const key = sessionStorageKey(payload);
+    const key = visitStorageKey(payload);
     function onStorage(e: StorageEvent) {
       if (e.key !== key) return;
-      const stored = loadSession(payload);
-      if (stored) {
-        setRounds(stored.rounds);
-        if (stored.customerName) setCustomerName(stored.customerName);
-        if (stored.customerMobile) setCustomerMobile(stored.customerMobile);
+      const storedKey = loadVisit(payload).sessionKey;
+      if (storedKey && storedKey !== sessionKey) {
+        getQrSession(storedKey)
+          .then((view) => applyVisit(view, false))
+          .catch(() => {});
       }
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [tablePayload]);
+  }, [tablePayload, sessionKey, applyVisit]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -359,10 +397,21 @@ function QrMenuPage() {
   const cartList = useMemo(() => Array.from(cart.entries()), [cart]);
   const cartCount = cartList.reduce((sum, [, c]) => sum + c.qty, 0);
   const cartTotal = cartList.reduce((sum, [, c]) => sum + unitPrice(c) * c.qty, 0);
-  const hasContact = MOBILE_PATTERN.test(customerMobile.trim());
+  const rounds = visit?.rounds ?? [];
   const roundsTotal = rounds
     .filter((r) => r.status !== "rejected" && r.status !== "expired")
-    .reduce((sum, r) => sum + r.total, 0);
+    .reduce((sum, r) => sum + roundTotal(r.items), 0);
+  const billReady = !!(visitOpen && visit?.session.bill_ready);
+  const visitClosed = visit?.session.status === "closed";
+  const pendingRound = visitOpen ? rounds.find((r) => r.status === "pending") : undefined;
+  // Items can be picked unless the bill is already printed.
+  const canAdd = !!tablePayload && !billReady;
+  // Why "Place order" is unavailable right now, if it is.
+  const blockReason = billReady
+    ? "Your bill is ready. Please ask a staff member to add anything more."
+    : pendingRound
+      ? "Your previous order is waiting for the restaurant to confirm it. You can send this one right after."
+      : null;
 
   function addSimpleToCart(item: PublicMenuItem) {
     const key = cartKey(item.id);
@@ -371,7 +420,7 @@ function QrMenuPage() {
       const existing = next.get(key);
       next.set(key, {
         item,
-        qty: (existing?.qty ?? 0) + 1,
+        qty: Math.min(MAX_QTY_PER_LINE, (existing?.qty ?? 0) + 1),
         comment: existing?.comment ?? "",
         addons: [],
       });
@@ -379,15 +428,7 @@ function QrMenuPage() {
     });
   }
   function decSimpleFromCart(item: PublicMenuItem) {
-    const key = cartKey(item.id);
-    setCart((prev) => {
-      const existing = prev.get(key);
-      if (!existing) return prev;
-      const next = new Map(prev);
-      if (existing.qty <= 1) next.delete(key);
-      else next.set(key, { ...existing, qty: existing.qty - 1 });
-      return next;
-    });
+    decByKey(cartKey(item.id));
   }
   function qtyInCart(item: PublicMenuItem) {
     return cart.get(cartKey(item.id))?.qty ?? 0;
@@ -397,7 +438,7 @@ function QrMenuPage() {
       const existing = prev.get(key);
       if (!existing) return prev;
       const next = new Map(prev);
-      next.set(key, { ...existing, qty: existing.qty + 1 });
+      next.set(key, { ...existing, qty: Math.min(MAX_QTY_PER_LINE, existing.qty + 1) });
       return next;
     });
   }
@@ -450,7 +491,7 @@ function QrMenuPage() {
       const existing = next.get(key);
       next.set(key, {
         item: openItem,
-        qty: (existing?.qty ?? 0) + draftQty,
+        qty: Math.min(MAX_QTY_PER_LINE, (existing?.qty ?? 0) + draftQty),
         comment: existing?.comment ?? "",
         variant: draftVariant,
         addons: draftAddons,
@@ -460,59 +501,133 @@ function QrMenuPage() {
     setOpenItem(null);
   }
 
-  async function handleSubmitRound() {
-    if (!tablePayload || !qrParam) return;
-    if (!hasContact) {
+  // Finds this mobile's open visit at the table (history and all) or
+  // starts one. Returns null when the number is invalid.
+  async function beginVisit(): Promise<QrSessionView | null> {
+    if (!tablePayload || !qrParam) return null;
+    const mobile = customerMobile.trim();
+    if (!MOBILE_PATTERN.test(mobile)) {
       setMobileError("Enter a valid 10-digit mobile number.");
-      setDrawerStep("details");
-      return;
+      return null;
     }
     setMobileError(null);
+    const view = await startQrSession({
+      qr: qrParam,
+      customer_mobile: mobile,
+      customer_name: customerName.trim(),
+    });
+    saveVisit(tablePayload, { sessionKey: view.session.key });
+    applyVisit(view, false);
+    return view;
+  }
+
+  async function sendCart(view: QrSessionView) {
+    if (!tablePayload) return;
+    const items: QrCartItem[] = cartList.map(([, c]) => ({
+      menuId: c.item.id,
+      qty: c.qty,
+      itemName: c.item.item_name,
+      comment: c.comment || undefined,
+      variantId: c.variant?.id,
+      variantName: c.variant?.variants_name,
+      addonIds: c.addons.length ? c.addons.map((a) => a.id) : undefined,
+      addonNames: c.addons.length ? c.addons.map((a) => a.addon_name) : undefined,
+      unitPrice: unitPrice(c),
+    }));
+    // Same cart + same visit = same client_key, so pressing again after a
+    // lost response can never place it twice.
+    const sig = JSON.stringify([view.session.key, items]);
+    const stored = loadVisit(tablePayload).pendingSubmit;
+    const clientKey = stored?.sig === sig ? stored.clientKey : newClientKey();
+    saveVisit(tablePayload, { pendingSubmit: { clientKey, sig } });
+
+    const res = await submitQrOrder({
+      session_key: view.session.key,
+      client_key: clientKey,
+      items,
+    });
+    saveVisit(tablePayload, { pendingSubmit: undefined });
+    applyVisit(res, false);
+    setCart(new Map());
+    setDrawerStep("closed");
+    toast.success(
+      res.duplicate
+        ? "Your order was already received."
+        : "Order sent! The restaurant will confirm it shortly.",
+    );
+  }
+
+  async function run(task: () => Promise<void>) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     setSubmitError(null);
-    setSubmitting(true);
     try {
-      const items: QrCartItem[] = cartList.map(([, c]) => ({
-        menuId: c.item.id,
-        qty: c.qty,
-        itemName: c.item.item_name,
-        comment: c.comment || undefined,
-        variantId: c.variant?.id,
-        variantName: c.variant?.variants_name,
-        addonIds: c.addons.length ? c.addons.map((a) => a.id) : undefined,
-        addonNames: c.addons.length ? c.addons.map((a) => a.addon_name) : undefined,
-      }));
-      const total = cartList.reduce((sum, [, c]) => sum + unitPrice(c) * c.qty, 0);
-      const res = await submitQrOrder({
-        qr: qrParam,
-        customer_name: customerName.trim(),
-        customer_mobile: customerMobile.trim(),
-        items,
-      });
-      const round: OrderRound = {
-        id: res.id,
-        items,
-        total,
-        status: "pending",
-        submittedAt: Date.now(),
-      };
-      setRounds((prev) => {
-        const next = [...prev, round];
-        persistSession(tablePayload, {
-          rounds: next,
-          customerName: customerName.trim(),
-          customerMobile: customerMobile.trim(),
-        });
-        return next;
-      });
-      setCart(new Map());
-      setDrawerStep("closed");
-      toast.success("Order sent to the kitchen for confirmation");
+      await task();
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Could not place your order.");
-      setDrawerStep("details");
+      setSubmitError(
+        err instanceof Error ? err.message : "Something went wrong - please try again.",
+      );
+      // The server's view is the truth: refresh it so a block reason (bill
+      // printed, previous order pending, visit closed) shows at once.
+      const key = tablePayload ? loadVisit(tablePayload).sessionKey : null;
+      if (key)
+        getQrSession(key)
+          .then((v) => applyVisit(v, false))
+          .catch(() => {});
     } finally {
-      setSubmitting(false);
+      busyRef.current = false;
+      setBusy(false);
     }
+  }
+
+  // "Place order" from the cart. The first time (or after a visit ended)
+  // it asks for the mobile number first.
+  function handlePlaceOrder() {
+    if (visit && visitOpen) {
+      void run(() => sendCart(visit));
+      return;
+    }
+    setDetailsPurpose("order");
+    setDrawerStep("details");
+  }
+
+  function openFindVisit() {
+    setSubmitError(null);
+    setDetailsPurpose("find");
+    setDrawerStep("details");
+  }
+
+  function handleDetailsSubmit() {
+    void run(async () => {
+      const view = await beginVisit();
+      if (!view) return;
+      if (detailsPurpose === "find" || cartList.length === 0) {
+        setDrawerStep("closed");
+        if (view.rounds.length) {
+          toast.success("Welcome back! Here is your order so far.");
+          setOrderHistoryOpen(true);
+        } else {
+          toast.success("You're all set - add items and place your order.");
+        }
+        return;
+      }
+      if (view.session.bill_ready || view.rounds.some((r) => r.status === "pending")) {
+        // Their earlier visit came back with a round still waiting (or the
+        // bill printed): show where things stand; the cart is kept.
+        setDrawerStep("closed");
+        setOrderHistoryOpen(true);
+        return;
+      }
+      await sendCart(view);
+    });
+  }
+
+  function startNewVisit() {
+    if (tablePayload) saveVisit(tablePayload, { sessionKey: undefined, pendingSubmit: undefined });
+    setVisit(null);
+    lastStatuses.current = new Map();
+    setOrderHistoryOpen(false);
   }
 
   if (loading) {
@@ -555,6 +670,11 @@ function QrMenuPage() {
             )}
             <div className="min-w-0 flex-1">
               <h1 className="truncate text-lg font-semibold">{restaurant?.restaurantName}</h1>
+              {visit?.session.table_name ? (
+                <p className="truncate text-xs font-medium text-primary">
+                  Table {visit.session.table_name}
+                </p>
+              ) : null}
               {restaurant?.address ? (
                 <p className="truncate text-xs text-muted-foreground">{restaurant.address}</p>
               ) : null}
@@ -564,6 +684,7 @@ function QrMenuPage() {
                 onClick={() => setOrderHistoryOpen(true)}
                 className="relative grid size-9 shrink-0 place-items-center rounded-full border border-border text-muted-foreground"
                 title="My order"
+                aria-label="My order"
               >
                 <Receipt className="size-4" />
                 <span className="absolute -right-1 -top-1 grid size-4 place-items-center rounded-full bg-primary text-[10px] font-semibold text-primary-foreground">
@@ -593,6 +714,55 @@ function QrMenuPage() {
           </div>
         </div>
 
+        {tablePayload ? (
+          <div className="space-y-2 px-4 pt-4">
+            {visitClosed ? (
+              <div
+                data-qr-banner="closed"
+                className="rounded-xl border border-border bg-surface p-3 text-sm"
+              >
+                <p className="font-medium">
+                  {CLOSED_MESSAGE[visit?.session.closed_reason ?? ""] ?? CLOSED_MESSAGE["expired"]}
+                </p>
+                <Button size="sm" variant="outline" className="mt-2" onClick={startNewVisit}>
+                  Start a new order
+                </Button>
+              </div>
+            ) : billReady ? (
+              <div
+                data-qr-banner="bill-ready"
+                className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+              >
+                <p className="font-medium">Your bill is ready</p>
+                <p className="text-xs">
+                  Staff will bring it to your table. To add anything more, please ask a staff
+                  member.
+                </p>
+              </div>
+            ) : pendingRound ? (
+              <button
+                data-qr-banner="pending"
+                onClick={() => setOrderHistoryOpen(true)}
+                className="flex w-full items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 p-3 text-left text-sm text-amber-900"
+              >
+                <span className="size-2 shrink-0 animate-pulse rounded-full bg-amber-500" />
+                <span className="flex-1">
+                  Your order is waiting for the restaurant to confirm it.
+                </span>
+                <span className="text-xs font-medium underline">View</span>
+              </button>
+            ) : !visit ? (
+              <button
+                data-qr-find
+                onClick={openFindVisit}
+                className="w-full text-left text-xs text-muted-foreground underline"
+              >
+                Already ordered at this table? Find my order
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="space-y-6 px-4 py-5">
           {filtered.length === 0 ? (
             <p className="py-10 text-center text-sm text-muted-foreground">
@@ -615,7 +785,7 @@ function QrMenuPage() {
                       >
                         <button
                           onClick={() => setOpenItem(item)}
-                          className="flex min-w-0 flex-1 items-center gap-3"
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
                         >
                           {resolveImageUrl(item.foodImage) ? (
                             <img
@@ -652,7 +822,7 @@ function QrMenuPage() {
                           </div>
                         </button>
 
-                        {tablePayload ? (
+                        {canAdd ? (
                           hasOptions ? (
                             <Button
                               size="sm"
@@ -705,20 +875,6 @@ function QrMenuPage() {
         </div>
       </div>
 
-      {tablePayload && cartCount > 0 ? (
-        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface p-3">
-          <div className="mx-auto max-w-lg">
-            <Button className="w-full justify-between" onClick={() => setDrawerStep("cart")}>
-              <span className="flex items-center gap-2">
-                <ShoppingCart className="size-4" />
-                {cartCount} item{cartCount === 1 ? "" : "s"}
-              </span>
-              <span className="num">{formatPrice(restaurant?.currency, cartTotal)}</span>
-            </Button>
-          </div>
-        </div>
-      ) : null}
-
       <Dialog open={!!openItem} onOpenChange={(o) => !o && setOpenItem(null)}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           {openItem ? (
@@ -738,10 +894,7 @@ function QrMenuPage() {
                   className={`size-2.5 shrink-0 rounded-full ${dietDotClass(openItem.sub_categories)}`}
                 />
                 <p className="num text-sm font-semibold">
-                  {formatPrice(
-                    restaurant?.currency,
-                    tablePayload ? draftUnitPrice : openItem.price,
-                  )}
+                  {formatPrice(restaurant?.currency, canAdd ? draftUnitPrice : openItem.price)}
                 </p>
               </div>
               {openItem.description ? (
@@ -753,7 +906,7 @@ function QrMenuPage() {
                   <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Choose one
                   </p>
-                  {tablePayload ? (
+                  {canAdd ? (
                     <div className="space-y-1">
                       <label className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-2 text-sm">
                         <span className="flex items-center gap-2">
@@ -814,7 +967,7 @@ function QrMenuPage() {
                     {group.department_name}
                   </p>
                   {group.hms_addon_msts?.map((addon) =>
-                    tablePayload ? (
+                    canAdd ? (
                       <label
                         key={addon.id}
                         className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-2 text-sm"
@@ -843,7 +996,7 @@ function QrMenuPage() {
                 </div>
               ))}
 
-              {tablePayload ? (
+              {canAdd ? (
                 <div className="flex items-center justify-center gap-3 pt-2">
                   <Button
                     size="icon"
@@ -854,7 +1007,12 @@ function QrMenuPage() {
                     <Minus className="size-4" />
                   </Button>
                   <span className="num text-base font-semibold">{draftQty}</span>
-                  <Button size="icon" variant="outline" onClick={() => setDraftQty((q) => q + 1)}>
+                  <Button
+                    size="icon"
+                    variant="outline"
+                    disabled={draftQty >= MAX_QTY_PER_LINE}
+                    onClick={() => setDraftQty((q) => Math.min(MAX_QTY_PER_LINE, q + 1))}
+                  >
                     <Plus className="size-4" />
                   </Button>
                   <Button className="ml-2 flex-1" onClick={addDraftToCart}>
@@ -867,18 +1025,38 @@ function QrMenuPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Cart / checkout - a single Drawer, stepping between the cart
-          review and the required-mobile-number details form rather than
-          two separate drawers, since only one is ever open at a time. The
-          details step is skipped once a mobile number is already known
-          from an earlier round this session - a returning "add more
-          items" submit shouldn't have to re-enter contact info. */}
-      <Drawer open={drawerStep !== "closed"} onOpenChange={(o) => !o && setDrawerStep("closed")}>
+      {canAdd && cartCount > 0 ? (
+        <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface p-3">
+          <div className="mx-auto max-w-lg">
+            <Button
+              data-qr-cart
+              className="w-full justify-between"
+              onClick={() => {
+                setSubmitError(null);
+                setDrawerStep("cart");
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <ShoppingCart className="size-4" />
+                {cartCount} item{cartCount === 1 ? "" : "s"}
+              </span>
+              <span className="num">{formatPrice(restaurant?.currency, cartTotal)}</span>
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      <Drawer
+        open={drawerStep !== "closed"}
+        onOpenChange={(o) => !o && !busy && setDrawerStep("closed")}
+      >
         <DrawerContent className="mx-auto max-w-lg">
           {drawerStep === "cart" ? (
             <>
               <DrawerHeader>
-                <DrawerTitle>{rounds.length > 0 ? "Add more items" : "Your order"}</DrawerTitle>
+                <DrawerTitle>
+                  {rounds.length > 0 && visitOpen ? "Add more items" : "Your order"}
+                </DrawerTitle>
               </DrawerHeader>
               <div className="max-h-[50vh] space-y-3 overflow-y-auto px-4">
                 {cartList.length === 0 ? (
@@ -918,6 +1096,7 @@ function QrMenuPage() {
                           size="icon"
                           variant="outline"
                           className="size-7"
+                          disabled={c.qty >= MAX_QTY_PER_LINE}
                           onClick={() => incByKey(key)}
                         >
                           <Plus className="size-3.5" />
@@ -938,34 +1117,40 @@ function QrMenuPage() {
                   <span>Total</span>
                   <span className="num">{formatPrice(restaurant?.currency, cartTotal)}</span>
                 </div>
+                {blockReason ? (
+                  <p data-qr-block className="px-1 text-xs text-amber-700">
+                    {blockReason}
+                  </p>
+                ) : null}
+                {submitError ? (
+                  <p data-qr-error className="px-1 text-sm text-destructive">
+                    {submitError}
+                  </p>
+                ) : null}
                 <Button
-                  disabled={cartList.length === 0 || submitting}
-                  onClick={() => (hasContact ? void handleSubmitRound() : setDrawerStep("details"))}
+                  data-qr-place
+                  disabled={cartList.length === 0 || busy || !!blockReason}
+                  onClick={handlePlaceOrder}
                 >
-                  {hasContact ? (submitting ? "Placing order…" : "Place order") : "Continue"}
+                  {busy ? "Placing order…" : visit && visitOpen ? "Place order" : "Continue"}
                 </Button>
               </DrawerFooter>
             </>
           ) : (
             <>
               <DrawerHeader>
-                <DrawerTitle>Your details</DrawerTitle>
+                <DrawerTitle>
+                  {detailsPurpose === "find" ? "Find my order" : "Your details"}
+                </DrawerTitle>
               </DrawerHeader>
               <div className="space-y-3 px-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="qr-name">Name (optional)</Label>
-                  <Input
-                    id="qr-name"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    placeholder="Your name"
-                  />
-                </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="qr-mobile">Mobile number</Label>
                   <Input
                     id="qr-mobile"
                     inputMode="numeric"
+                    autoComplete="tel"
+                    autoFocus
                     value={customerMobile}
                     onChange={(e) => {
                       setCustomerMobile(e.target.value.replace(/\D/g, "").slice(0, 10));
@@ -974,19 +1159,43 @@ function QrMenuPage() {
                     placeholder="10-digit mobile number"
                   />
                   <p className="text-xs text-muted-foreground">
-                    Required so staff can reach you about your order.
+                    {detailsPurpose === "find"
+                      ? "Enter the number you ordered with to see your order."
+                      : "Your order stays linked to this number until the bill is settled - use it to see your order on any phone."}
                   </p>
                   {mobileError ? <p className="text-xs text-destructive">{mobileError}</p> : null}
                 </div>
-                {submitError ? <p className="text-sm text-destructive">{submitError}</p> : null}
+                {detailsPurpose === "order" ? (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="qr-name">Name (optional)</Label>
+                    <Input
+                      id="qr-name"
+                      autoComplete="name"
+                      value={customerName}
+                      onChange={(e) => setCustomerName(e.target.value)}
+                      placeholder="Your name"
+                    />
+                  </div>
+                ) : null}
+                {submitError ? (
+                  <p data-qr-error className="text-sm text-destructive">
+                    {submitError}
+                  </p>
+                ) : null}
               </div>
               <DrawerFooter>
-                <div className="flex items-center justify-between px-1 text-sm font-semibold">
-                  <span>Total</span>
-                  <span className="num">{formatPrice(restaurant?.currency, cartTotal)}</span>
-                </div>
-                <Button disabled={submitting} onClick={() => void handleSubmitRound()}>
-                  {submitting ? "Placing order…" : "Place order"}
+                {detailsPurpose === "order" ? (
+                  <div className="flex items-center justify-between px-1 text-sm font-semibold">
+                    <span>Total</span>
+                    <span className="num">{formatPrice(restaurant?.currency, cartTotal)}</span>
+                  </div>
+                ) : null}
+                <Button data-qr-details-submit disabled={busy} onClick={handleDetailsSubmit}>
+                  {busy
+                    ? "Please wait…"
+                    : detailsPurpose === "find"
+                      ? "Find my order"
+                      : "Place order"}
                 </Button>
               </DrawerFooter>
             </>
@@ -994,11 +1203,9 @@ function QrMenuPage() {
         </DrawerContent>
       </Drawer>
 
-      {/* "My Order" - a running receipt across every round this session,
-          visible any time (not just right after submitting) and never a
-          full-page takeover - the customer can keep browsing/ordering
-          while this stays open in the background. Only clears when the
-          table-status poll above detects the bill was actually settled. */}
+      {/* "My order" - every round of this visit with its live status. The
+          history lives on the server, so it survives a refresh and comes
+          back on any phone with the same mobile number. */}
       <Drawer open={orderHistoryOpen} onOpenChange={setOrderHistoryOpen}>
         <DrawerContent className="mx-auto max-w-lg">
           <DrawerHeader>
@@ -1009,7 +1216,11 @@ function QrMenuPage() {
               <p className="py-6 text-center text-sm text-muted-foreground">Nothing ordered yet.</p>
             ) : (
               [...rounds].reverse().map((r) => (
-                <div key={r.id} className="space-y-1.5 rounded-lg border border-border p-2.5">
+                <div
+                  key={r.id}
+                  data-qr-round={r.status}
+                  className="space-y-1.5 rounded-lg border border-border p-2.5"
+                >
                   <div className="flex items-center justify-between gap-2">
                     <span className="flex items-center gap-1.5 text-xs font-medium">
                       <span className={`size-2 shrink-0 rounded-full ${STATUS_DOT[r.status]}`} />
@@ -1032,33 +1243,43 @@ function QrMenuPage() {
                       </li>
                     ))}
                   </ul>
-                  <p className="num text-right text-sm font-semibold">
-                    {formatPrice(restaurant?.currency, r.total)}
-                  </p>
+                  {roundTotal(r.items) > 0 ? (
+                    <p className="num text-right text-sm font-semibold">
+                      {formatPrice(restaurant?.currency, roundTotal(r.items))}
+                    </p>
+                  ) : null}
                 </div>
               ))
             )}
           </div>
-          {rounds.length > 0 ? (
-            <DrawerFooter>
+          <DrawerFooter>
+            {roundsTotal > 0 ? (
               <div className="flex items-center justify-between px-1 text-sm font-semibold">
                 <span>Total so far</span>
                 <span className="num">{formatPrice(restaurant?.currency, roundsTotal)}</span>
               </div>
-              <p className="px-1 text-xs text-muted-foreground">
-                Your final bill will be settled by staff at the restaurant.
-              </p>
+            ) : null}
+            <p className="px-1 text-xs text-muted-foreground">
+              {billReady
+                ? "Your bill is ready - staff will bring it to your table."
+                : "Final amount including taxes is on your bill, settled by staff at the restaurant."}
+            </p>
+            {visitClosed ? (
+              <Button variant="outline" onClick={startNewVisit}>
+                Start a new order
+              </Button>
+            ) : canAdd ? (
               <Button
                 variant="outline"
                 onClick={() => {
                   setOrderHistoryOpen(false);
-                  setDrawerStep("cart");
+                  if (cartCount > 0) setDrawerStep("cart");
                 }}
               >
-                Add more items
+                {cartCount > 0 ? "Go to cart" : "Add more items"}
               </Button>
-            </DrawerFooter>
-          ) : null}
+            ) : null}
+          </DrawerFooter>
         </DrawerContent>
       </Drawer>
     </div>

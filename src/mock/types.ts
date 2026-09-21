@@ -253,6 +253,8 @@ export interface Order {
   menuId?: string;
   customerName?: string;
   customerPhone?: string;
+  customerAddress?: string;
+  customerGstin?: string;
   // `type`/`value` are only ever set by applyDiscount, within THIS session -
   // an order reloaded from the backend (mapRawLiveOrder/
   // mapRawOrderHistoryEntry) only ever gets `amount` back (the backend has

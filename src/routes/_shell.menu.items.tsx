@@ -144,6 +144,14 @@ function MenuItemsPage() {
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
+  // The menus may still be loading when this page opens (a refresh, a
+  // direct link): pick the default one as soon as they arrive, instead of
+  // staying on "no menu" with every action disabled.
+  useEffect(() => {
+    if (defaultMenuId && !store.menus.some((m) => m.id === viewMenuId)) {
+      setViewMenuId(defaultMenuId);
+    }
+  }, [store.menus, defaultMenuId, viewMenuId]);
   const viewMenu = store.menus.find((m) => m.id === viewMenuId);
 
   const categoriesById = useMemo(
@@ -477,7 +485,9 @@ function MenuItemsPage() {
                   placeholder="e.g. Paneer Tikka"
                 />
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+              {/* Kitchen routing follows the category (Operations -> Kitchen
+                  Settings), so there is no Kitchen field on the item. */}
+              <div className="grid gap-4">
                 <div className="space-y-1.5">
                   <Label>Category</Label>
                   <Select
@@ -495,15 +505,6 @@ function MenuItemsPage() {
                       ))}
                     </SelectContent>
                   </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Kitchen</Label>
-                  <p className="flex h-9 items-center rounded-lg border border-border bg-surface-muted px-3 text-sm text-muted-foreground">
-                    {store.resolveKitchenForCategory(draft.categoryId)?.name ?? "—"}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Set by the item's category in Operations → Kitchen Settings.
-                  </p>
                 </div>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
@@ -829,14 +830,12 @@ function MenuItemsPage() {
             <div className="space-y-1.5">
               <Progress
                 value={
-                  importProgress.total
-                    ? (importProgress.done / importProgress.total) * 100
-                    : 0
+                  importProgress.total ? (importProgress.done / importProgress.total) * 100 : 0
                 }
               />
               <p className="text-xs text-muted-foreground">
-                Importing {importProgress.done} of {importProgress.total} item(s)… keep this
-                dialog open until it finishes.
+                Importing {importProgress.done} of {importProgress.total} item(s)… keep this dialog
+                open until it finishes.
               </p>
             </div>
           ) : importRows.length ? (

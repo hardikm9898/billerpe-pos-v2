@@ -43,6 +43,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { startQrInbox } from "@/lib/qrInbox";
 import { cn } from "@/lib/utils";
 import { connectionStateLabels } from "@/mock/data";
 import { realToday } from "@/mock/format";
@@ -192,7 +193,10 @@ const LANDING: { to: string; module: PermissionModule | PermissionModule[] }[] =
   { to: "/dashboard", module: "dashboard" },
   { to: "/orders", module: "orders" },
   { to: "/keyboard-billing", module: "keyboard-billing" },
-  { to: "/stock", module: ["stock-masters", "stock-transactions", "stock-recipes", "stock-reports"] },
+  {
+    to: "/stock",
+    module: ["stock-masters", "stock-transactions", "stock-recipes", "stock-reports"],
+  },
   { to: "/reports", module: "reports" },
   { to: "/expense/entries", module: "expense" },
   { to: "/cash-session", module: "cash-session" },
@@ -203,6 +207,52 @@ const LANDING: { to: string; module: PermissionModule | PermissionModule[] }[] =
   { to: "/users", module: "users" },
   { to: "/operations", module: ["ops-billing", "ops-hardware", "ops-experience", "ops-ledger"] },
 ];
+
+// What the connection chip opens: the real state of this outlet's local
+// server and its cloud sync (GET /localServerStatus), no controls.
+function ConnectionDetails() {
+  const store = useStore();
+  const status = store.localServerStatus;
+  const ago = (iso: string | null | undefined) => {
+    if (!iso) return "never";
+    const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+  };
+  const row = (label: string, value: string) => (
+    <div className="flex items-center justify-between gap-3 px-2 py-1 text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="text-right font-medium">{value}</span>
+    </div>
+  );
+  return (
+    <div data-connection-details>
+      <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {connectionStateLabels[store.connection]}
+      </p>
+      {row("Local server", "Connected")}
+      {status && status.registered ? (
+        <>
+          {row(
+            "Last cloud sync",
+            ago(status.sync.lastHeartbeatAt ?? status.sync.lastSuccessfulSyncAt),
+          )}
+          {row("Waiting to upload", `${status.sync.pendingOrderCount} order(s)`)}
+          {status.sync.stuckOrders?.length
+            ? row("Refused by cloud", `${status.sync.stuckOrders.length} order(s)`)
+            : null}
+          {store.connection === "offline" ? (
+            <p className="px-2 py-1 text-xs text-muted-foreground">
+              Billing continues on this local server; everything uploads when the internet is back.
+            </p>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
 
 export function landingRoute(
   can: (m: PermissionModule, a: "view" | "create" | "edit" | "delete") => boolean,
@@ -302,6 +352,23 @@ export function AppShell({ children }: { children: ReactNode }) {
       void store.loadDueBillsFromServer();
       void store.loadRefundDueOrdersFromServer();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.sessionReady]);
+
+  // QR orders ring and toast on every screen, not just the table grid, for
+  // anyone who takes orders (lib/qrInbox.ts).
+  useEffect(() => {
+    if (!store.sessionReady || !store.can("biller", "view")) return;
+    return startQrInbox({ onOpen: () => navigate({ to: "/table-grid" }) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.sessionReady]);
+
+  // The connection chip's real state (store.loadServerStatusFromServer).
+  useEffect(() => {
+    if (!store.sessionReady) return;
+    void store.loadServerStatusFromServer();
+    const id = setInterval(() => void store.loadServerStatusFromServer(), 60_000);
+    return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.sessionReady]);
 
@@ -540,25 +607,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                         exit={{ opacity: 0, y: -4 }}
                         className="absolute right-0 top-11 z-50 w-72 rounded-xl border border-border bg-popover p-2 shadow-overlay"
                       >
-                        <p className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                          Demo state switcher
-                        </p>
-                        {(Object.keys(connectionStateLabels) as ConnectionState[]).map((state) => (
-                          <button
-                            key={state}
-                            type="button"
-                            onClick={() => {
-                              store.setConnection(state);
-                              setOpen("none");
-                            }}
-                            className={cn(
-                              "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm hover:bg-surface-muted",
-                              store.connection === state && "bg-surface-muted font-medium",
-                            )}
-                          >
-                            {connectionStateLabels[state]}
-                          </button>
-                        ))}
+                        <ConnectionDetails />
                         <div className="mt-1 border-t border-border pt-1">
                           <Link
                             to="/system"
@@ -735,7 +784,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             ))}
           </nav>
         </div>
-
 
         {open !== "none" ? (
           <button

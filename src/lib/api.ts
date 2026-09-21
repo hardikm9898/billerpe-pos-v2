@@ -196,6 +196,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // actually driving the browser, not by reading the route list.
     { method: "GET", test: (p) => p === "/pickupOrder" },
     { method: "POST", test: (p) => p === "/settleBills" },
+    { method: "POST", test: (p) => p === "/saveAndSettle" },
     { method: "POST", test: (p) => p === "/kotOrder" },
     // Real local implementation (billerpe-local-exe/controller/holdOrder.js),
     // same create/update split as kotOrder - NOT a cloud relay, since hold
@@ -471,9 +472,14 @@ export async function getLocalServerIdentity(): Promise<{
   hotelName?: string;
   lanUrls: string[];
 } | null> {
-  if (!(await checkLocalServerHealth())) return null;
   try {
-    const res = await fetch(`${EXE_BASE_URL}/health`);
+    // One request, with a timeout long enough for a busy PC. (It used to
+    // ping /health and then fetch it again with no timeout at all.)
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`${EXE_BASE_URL}/health`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) return null;
     const body = (await res.json()) as {
       registered?: unknown;
       deviceId?: unknown;
@@ -688,9 +694,39 @@ export type ServerState =
 let serverState: ServerState = { status: "checking" };
 const serverStateListeners = new Set<() => void>();
 
+// When the current outage began. ServerGate reloads the page afterwards
+// only after a very long one: reads caught in an outage retry by themselves
+// once the server is back (guardedFetch), so nothing is left half-loaded and
+// the cart on screen survives.
+let outageStartedAt: number | null = null;
+const LONG_OUTAGE_MS = 5 * 60_000;
+
 function setServerState(next: ServerState) {
+  if (next.status === "unreachable" && serverState.status !== "unreachable") {
+    outageStartedAt = Date.now();
+  }
   serverState = next;
   serverStateListeners.forEach((l) => l());
+}
+
+/** After the server is back: should the page start clean? Resets the record. */
+export function consumeOutageNeedsReload(): boolean {
+  const long = outageStartedAt !== null && Date.now() - outageStartedAt > LONG_OUTAGE_MS;
+  outageStartedAt = null;
+  return long;
+}
+
+// Resolves once the server answers again.
+function whenServerReachable(): Promise<void> {
+  if (serverState.status === "reachable") return Promise.resolve();
+  return new Promise((resolve) => {
+    const unsubscribe = subscribeServerState(() => {
+      if (serverState.status === "reachable") {
+        unsubscribe();
+        resolve();
+      }
+    });
+  });
 }
 
 export function getServerState(): ServerState {
@@ -702,8 +738,27 @@ export function subscribeServerState(listener: () => void): () => void {
   return () => serverStateListeners.delete(listener);
 }
 
-export async function refreshServerState(): Promise<ServerState> {
-  const identity = await getLocalServerIdentity();
+let refreshInFlight: Promise<ServerState> | null = null;
+
+export function refreshServerState(): Promise<ServerState> {
+  refreshInFlight ??= refreshServerStateNow().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function refreshServerStateNow(): Promise<ServerState> {
+  let identity = await getLocalServerIdentity();
+  // One missed answer (a Wi-Fi blip, the PC busy for a moment) is not an
+  // outage: ask twice more before the whole screen is blocked. Once it is
+  // blocked, a single answer is enough to lift it.
+  if (!identity && serverState.status !== "unreachable") {
+    for (const wait of [1500, 3000]) {
+      await new Promise((r) => setTimeout(r, wait));
+      identity = await getLocalServerIdentity();
+      if (identity) break;
+    }
+  }
   setServerState(
     identity
       ? {
@@ -729,11 +784,41 @@ async function guardedFetch(base: string, url: string, init: RequestInit): Promi
   try {
     return await fetch(url, init);
   } catch (err) {
-    if (base !== API_BASE_URL) {
-      markServerUnreachable();
-      return new Promise<Response>(() => {});
+    if (base === API_BASE_URL) throw err;
+    // A failed request alone doesn't mean the server is down - confirm first.
+    const state = await refreshServerState();
+    if (state.status === "reachable") {
+      const method = (init.method ?? "GET").toUpperCase();
+      if (method === "GET") {
+        try {
+          return await fetch(url, init);
+        } catch {
+          // fall through to the message below
+        }
+      }
+      // A write is never re-sent blindly: it may have reached the server.
+      throw new ApiError(
+        "The connection to the BillerPe server was interrupted. Check and try again.",
+      );
     }
-    throw err;
+    // A real outage: ServerGate is showing the blocking screen. A read waits
+    // and runs again once the server is back; a write is not re-sent (it
+    // may or may not have arrived) and fails with a clear message instead
+    // of hanging forever.
+    const method = (init.method ?? "GET").toUpperCase();
+    for (;;) {
+      await whenServerReachable();
+      if (method !== "GET") {
+        throw new ApiError(
+          "The BillerPe server was unreachable, so this was not confirmed. Check and try again.",
+        );
+      }
+      try {
+        return await fetch(url, init);
+      } catch {
+        await refreshServerState();
+      }
+    }
   }
 }
 
@@ -1231,6 +1316,7 @@ export type RawTableCategory = {
   table_catag_nm: string;
   type: "T" | "R";
   active: boolean;
+  rank?: number;
 };
 
 export type RawTable = {
@@ -1266,6 +1352,7 @@ export const tableApi = {
   // (createTableSchema) requires startNo/endNo/table_catag_id as numeric
   // strings, not numbers - unlike every other table endpoint here, which
   // isn't schema-validated and accepts plain numbers fine.
+  // Bulk range: T1..T5 with a shared prefix.
   createTables: (params: {
     startNo: number;
     endNo: number;
@@ -1283,11 +1370,28 @@ export const tableApi = {
       ...(params.capacity ? { capacity: params.capacity } : {}),
     }),
 
+  // Single table with any free-text name ("G-1", "VIP", "Rooftop 2") - the
+  // "New table" dialog. Same endpoint as createTables (POST /table); sending
+  // table_name instead of startNo/endNo switches the exe to this mode.
+  createTable: (params: {
+    table_name: string;
+    table_catag_id: number;
+    type: "T" | "R";
+    capacity?: number;
+  }) =>
+    apiPost<{ message?: string }>("/table", {
+      table_name: params.table_name,
+      table_catag_id: String(params.table_catag_id),
+      type: params.type,
+      ...(params.capacity ? { capacity: params.capacity } : {}),
+    }),
+
   editTable: (params: {
     id: number;
     table_name: string;
     table_catag_id: number;
     type: "T" | "R";
+    capacity?: number;
   }) => apiPost<{ message?: string }>("/editTable", params),
 
   // Accepts either a single id or a bulk allId array - mirrors the backend
@@ -1297,7 +1401,7 @@ export const tableApi = {
   createCategory: (params: { table_catag_nm: string; type: "T" | "R" }) =>
     apiPost<{ message?: string }>("/addTableCatagories", params),
 
-  editCategory: (params: { id: number; table_catag_nm: string; type: "T" | "R" }) =>
+  editCategory: (params: { id: number; table_catag_nm: string; type: "T" | "R"; rank?: number }) =>
     apiPost<{ message?: string }>("/editTableCatagories", params),
 
   removeCategories: (allId: number[]) =>
@@ -1676,6 +1780,8 @@ type KotPayload = {
    * that DID send it (generateBill) happened to run. */
   userName?: string;
   mobile?: string;
+  gstin?: string;
+  address?: string;
   cart: {
     gst: number;
     totalDiscount: number;
@@ -1698,6 +1804,22 @@ type KotPayload = {
     // confirmed live for both the create and add-round paths.
     items: [{ status: "H"; menuItems: KotCartItem[] }];
   };
+};
+
+// The full-cart body adminOrder and saveAndSettle rebuild an order from.
+export type AdminOrderCart = {
+  items: [{ status: "H"; menuItems: KotCartItem[] }];
+  gst: number;
+  totalDiscount: number;
+  grandAmount: number;
+  myAmount: number;
+  service_charger: number;
+  delivery_charge: number;
+  packaging_charge: number;
+  discount_reason: string;
+  discount_type: "fix" | "pr";
+  discount_value: number;
+  taxes: RawCartTax[];
 };
 
 export const orderApi = {
@@ -1788,21 +1910,36 @@ export const orderApi = {
      * findAndUpdateUser attach/upgrade mechanism, AdminOrder's own call. */
     userName?: string;
     mobile?: string;
-    cart: {
-      items: [{ status: "H"; menuItems: KotCartItem[] }];
-      gst: number;
-      totalDiscount: number;
-      grandAmount: number;
-      myAmount: number;
-      service_charger: number;
-      delivery_charge: number;
-      packaging_charge: number;
-      discount_reason: string;
-      discount_type: "fix" | "pr";
-      discount_value: number;
-      taxes: RawCartTax[];
-    };
+    gstin?: string;
+    address?: string;
+    cart: AdminOrderCart;
   }) => apiPost<{ message?: string; orderId?: number; bill_no?: string }>("/adminOrder", payload),
+
+  // Dine-in "Settle" straight from an open table, in one call (billerpe-
+  // local-exe controller/order.js#saveAndSettle): saves the full cart -
+  // creating the order when it was never saved - and settles it. Same body
+  // as adminOrder's dine-in branch plus the payment. When the save worked
+  // but the settle did not, the error's details carry { orderId, bill_no,
+  // saved: true } so the table can be shown as billed.
+  saveAndSettle: (payload: {
+    order_type: "dinin";
+    order_id?: number;
+    table_id: number;
+    userName?: string;
+    mobile?: string;
+    gstin?: string;
+    address?: string;
+    cart: AdminOrderCart;
+    payment: {
+      amount: number;
+      cash: number;
+      upi: number;
+      card: number;
+      due: number;
+      tip?: number;
+      mobile?: string;
+    };
+  }) => apiPost<{ message?: string; orderId: number; bill_no?: string }>("/saveAndSettle", payload),
 
   // POST /settleBills only ever looks up orders with order_type "dinin"
   // (its own WHERE clause) - pickup has no settlement step at all here,
@@ -2046,7 +2183,7 @@ export type RawOrderHeader = {
   hotelUserId: number | null;
   TableId: number | null;
   hms_table_mst?: { table_name: string } | null;
-  hms_user_master?: { name?: string; number?: string } | null;
+  hms_user_master?: { name?: string; number?: string; address?: string; gstin?: string } | null;
   /** Discount INPUT the exe recomputes from ("pr" = percent of subtotal). */
   discount_type?: "fix" | "pr" | null;
   discount_value?: number | null;
@@ -2394,6 +2531,18 @@ export const editSettledOrderApi = {
     discount_type?: "fix" | "pr";
     discount_value?: number;
     service_charge?: number;
+    /** How the full edited bill was paid, chosen by the biller when saving
+     * the edit. `due` needs the customer's mobile. */
+    payment?: {
+      cash: number;
+      upi: number;
+      card: number;
+      due: number;
+      mobile?: string;
+      name?: string;
+      address?: string;
+      gstin?: string;
+    };
   }) => apiPost<{ message?: string; due: number }>("/editSettledOrder", params),
 };
 
@@ -2431,6 +2580,13 @@ export const customerApi = {
   // first N customers" once and the existing local name/phone search runs
   // against that set, same pattern as loadDueBillsFromServer.
   getAll: () => apiGet<{ numbers: RawCustomer[]; total: number }>("/customer/getAll?limit=500"),
+
+  // Customers whose mobile contains `digits` - the customer form's
+  // suggestions reach past the first 500 held in memory.
+  searchByMobile: (digits: string) =>
+    apiGet<{ numbers: RawCustomer[]; total: number }>(
+      `/customer/getAll?limit=8&search=${encodeURIComponent(digits)}`,
+    ),
 
   // Rejects a duplicate number outright (its own findOne check) - not
   // silently deduped or merged.
