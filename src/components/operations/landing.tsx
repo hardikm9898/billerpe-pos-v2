@@ -28,7 +28,11 @@ export function OperationsLanding() {
           label="GST calculation"
           value={gstOn ? "On" : "Off"}
           tone={gstOn ? "primary" : "warning"}
-          hint={gstOn ? `${store.taxRules.filter((t) => t.active).length} active tax rules` : "Tax rules are not calculating"}
+          hint={
+            gstOn
+              ? `${store.taxRules.filter((t) => t.active).length} active tax rules`
+              : "Tax rules are not calculating"
+          }
         />
         <StatCard
           label="Service charge"
@@ -55,7 +59,7 @@ export function OperationsLanding() {
         </Notice>
       ) : null}
 
-      {OPS_GROUPS.map((g) => (
+      {OPS_GROUPS.filter((g) => store.can(g.module, "view")).map((g) => (
         <SectionCard
           key={g.key}
           title={g.label}

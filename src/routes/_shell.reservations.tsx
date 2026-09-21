@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { CalendarDays, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -114,6 +115,7 @@ function formatTime(iso: string) {
 }
 
 function ReservationsPage() {
+  const access = useAccess("reservations");
   const store = useStore();
   const [draft, setDraft] = useState<Draft | null>(null);
 
@@ -232,7 +234,11 @@ function ReservationsPage() {
         icon={CalendarDays}
         title="Reservations"
         description="Book one or more tables ahead of time for a guest."
-        actions={<Button onClick={() => setDraft(newDraft())}>New reservation</Button>}
+        actions={
+          <Button hidden={!access.create} onClick={() => setDraft(newDraft())}>
+            New reservation
+          </Button>
+        }
       />
 
       <div className="grid gap-3 sm:grid-cols-2">
@@ -290,6 +296,7 @@ function ReservationsPage() {
               header: "",
               cell: (r) => (
                 <IconButton
+                  hidden={!access.delete}
                   label="Cancel reservation"
                   className="text-primary"
                   onClick={(e) => {
@@ -436,7 +443,9 @@ function ReservationsPage() {
               Cancel
             </Button>
             <Button
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
               disabled={
+                !(draft?.id ? access.edit : access.create) ||
                 !draft?.customerName.trim() ||
                 !draft?.mobile.trim() ||
                 !draft?.tableIds.length ||

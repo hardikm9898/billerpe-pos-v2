@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { ChefHat, CookingPot, Factory, Plus, Trash2, Utensils } from "lucide-react";
 import { useMemo, useState } from "react";
 
@@ -42,6 +43,7 @@ const emptyGroup = (kind: RecipeGroup["kind"], label: string): RecipeGroup => ({
 /* ==================== Recipes / Menu BOM ==================== */
 
 export function RecipesScreen() {
+  const access = useAccess("stock-recipes");
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Recipe | null>(null);
@@ -119,7 +121,7 @@ export function RecipesScreen() {
       <SectionCard
         title="Recipes"
         actions={
-          <Button size="sm" onClick={() => setDraft(newRecipe())}>
+          <Button hidden={!access.create} size="sm" onClick={() => setDraft(newRecipe())}>
             <Plus className="size-4" /> New recipe
           </Button>
         }
@@ -218,6 +220,7 @@ function RecipeEditor({
   draft: Recipe;
   setDraft: (r: Recipe | null) => void;
 }) {
+  const access = useAccess("stock-recipes");
   const store = useStore();
   const groups = draft.groups ?? [];
 
@@ -452,6 +455,7 @@ function RecipeEditor({
         <div className="sticky bottom-0 flex gap-2 border-t border-border bg-surface p-3">
           {draft.id ? (
             <Button
+              hidden={!access.delete}
               variant="ghost"
               onClick={() => {
                 store.removeRecipe(draft.id);
@@ -465,6 +469,8 @@ function RecipeEditor({
             Cancel
           </Button>
           <Button
+            disabled={!(draft?.id ? access.edit : access.create)}
+            title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
             className="flex-1"
             onClick={() => {
               const base = (draft.groups ?? []).find((g) => g.kind === "base");
@@ -488,6 +494,7 @@ function RecipeEditor({
 /* ==================== Production ==================== */
 
 export function ProductionScreen() {
+  const access = useAccess("stock-transactions");
   const store = useStore();
   const [runFor, setRunFor] = useState<string | null>(null);
   const [qty, setQty] = useState(0);
@@ -570,6 +577,7 @@ export function ProductionScreen() {
                   })}
                 </ul>
                 <Button
+                  hidden={!access.create}
                   size="sm"
                   className="mt-3 w-full"
                   onClick={() => {
@@ -677,6 +685,7 @@ export function ProductionScreen() {
               Cancel
             </Button>
             <Button
+              hidden={!access.create}
               onClick={() => {
                 if (sf && qty > 0) store.recordProduction(sf.id, qty, notes);
                 setRunFor(null);

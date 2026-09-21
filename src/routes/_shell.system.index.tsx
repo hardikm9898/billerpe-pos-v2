@@ -287,7 +287,13 @@ function SystemPage() {
               through <span className="num font-medium text-foreground">#{highestOrderNo}</span> ·{" "}
               {store.orders.length} order(s)
             </p>
-            <Button variant="outline" onClick={() => setSequenceOpen(true)}>
+            <Button
+              hidden={
+                !store.can("system", "edit") || !store.canSpecial("system.remakeOrderSequence")
+              }
+              variant="outline"
+              onClick={() => setSequenceOpen(true)}
+            >
               <ListOrdered className="size-4" /> Renumber sequence
             </Button>
           </div>

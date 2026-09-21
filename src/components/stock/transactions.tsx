@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import {
   ArrowRight,
   ClipboardCheck,
@@ -44,13 +45,14 @@ import {
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { todayLabel } from "@/mock/format";
+import { dmyToIso, isoToDMY, realToday } from "@/mock/format";
 import { useStore } from "@/mock/store";
 import type { PurchaseOrder, PurchaseLine } from "@/mock/types";
 
 /* ==================== Purchase Orders ==================== */
 
 export function PurchaseOrdersScreen() {
+  const access = useAccess("stock-transactions");
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<PurchaseOrder | null>(null);
@@ -91,7 +93,7 @@ export function PurchaseOrdersScreen() {
     id: "",
     poNo: nextPoNo(),
     supplierId: store.suppliers[0]?.id ?? "",
-    date: todayLabel,
+    date: realToday(),
     status: "Ordered",
     invoiceNo: "",
     gstin: store.suppliers[0]?.gstin ?? "",
@@ -131,7 +133,7 @@ export function PurchaseOrdersScreen() {
       <SectionCard
         title="Purchase orders"
         actions={
-          <Button size="sm" onClick={() => setDraft(newDraft())}>
+          <Button hidden={!access.create} size="sm" onClick={() => setDraft(newDraft())}>
             <Plus className="size-4" /> Create order
           </Button>
         }
@@ -342,6 +344,7 @@ export function PurchaseOrdersScreen() {
               Cancel
             </Button>
             <Button
+              hidden={!access.create}
               onClick={() => {
                 if (payFor && payAmount > 0) store.payPurchaseOrder(payFor.id, payAmount);
                 setPayFor(null);
@@ -397,6 +400,7 @@ function PurchaseEditor({
   draft: PurchaseOrder | null;
   setDraft: (v: PurchaseOrder | null) => void;
 }) {
+  const access = useAccess("stock-transactions");
   const store = useStore();
   if (!draft) return null;
 
@@ -433,7 +437,7 @@ function PurchaseEditor({
         </SheetHeader>
         <div className="space-y-4 px-4 pb-24">
           <div className="grid gap-3 sm:grid-cols-2">
-            <FieldRow label="Supplier">
+            <FieldRow label="Supplier" required hint="Who you bought from">
               <Select
                 value={draft.supplierId}
                 onValueChange={(v) =>
@@ -456,20 +460,27 @@ function PurchaseEditor({
                 </SelectContent>
               </Select>
             </FieldRow>
-            <FieldRow label="Invoice number">
+            <FieldRow label="Invoice number" hint="As printed on the supplier's bill">
               <Input
+                placeholder="e.g. INV-2045"
                 value={draft.invoiceNo ?? ""}
                 onChange={(e) => setDraft({ ...draft, invoiceNo: e.target.value })}
               />
             </FieldRow>
-            <FieldRow label="Invoice date">
+            <FieldRow label="Invoice date" required>
+              {/* A real date picker - this was a plain text box. The draft
+                  keeps DD/MM/YYYY like every other date in the app. */}
               <Input
-                value={draft.date}
-                onChange={(e) => setDraft({ ...draft, date: e.target.value })}
+                type="date"
+                value={/^\d{2}\/\d{2}\/\d{4}$/.test(draft.date) ? dmyToIso(draft.date) : ""}
+                onChange={(e) =>
+                  setDraft({ ...draft, date: e.target.value ? isoToDMY(e.target.value) : "" })
+                }
               />
             </FieldRow>
-            <FieldRow label="Supplier GSTIN">
+            <FieldRow label="Supplier GSTIN" hint="Filled from the supplier; optional">
               <Input
+                placeholder="15-character GSTIN"
                 value={draft.gstin ?? ""}
                 onChange={(e) => setDraft({ ...draft, gstin: e.target.value })}
               />
@@ -488,61 +499,76 @@ function PurchaseEditor({
                 const m = store.rawMaterials.find((x) => x.id === l.materialId);
                 return (
                   <div key={i} className="rounded-xl border border-border bg-surface-muted/40 p-2">
-                    <div className="grid gap-2 sm:grid-cols-[minmax(0,1.4fr)_90px_100px_80px_auto]">
-                      <Select
-                        value={l.materialId}
-                        onValueChange={(v) => {
-                          const nm = store.rawMaterials.find((x) => x.id === v);
-                          setLine(i, {
-                            materialId: v,
-                            rate: nm ? Math.round(nm.rate * nm.conversion * 100) / 100 : l.rate,
-                          });
-                        }}
+                    <div className="grid items-end gap-2 sm:grid-cols-[minmax(0,1.4fr)_110px_120px_100px_auto]">
+                      <FieldRow label="Material" required>
+                        <Select
+                          value={l.materialId}
+                          onValueChange={(v) => {
+                            const nm = store.rawMaterials.find((x) => x.id === v);
+                            setLine(i, {
+                              materialId: v,
+                              rate: nm ? Math.round(nm.rate * nm.conversion * 100) / 100 : l.rate,
+                            });
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {store.rawMaterials.map((x) => (
+                              <SelectItem key={x.id} value={x.id}>
+                                {x.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FieldRow>
+                      <FieldRow
+                        label={`Quantity${m?.purchaseUnit ? ` (${m.purchaseUnit})` : ""}`}
+                        required
                       >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {store.rawMaterials.map((x) => (
-                            <SelectItem key={x.id} value={x.id}>
-                              {x.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <div className="flex items-center gap-1">
                         <Input
                           type="number"
+                          min={0}
+                          aria-label="Quantity"
                           value={l.qty}
                           onChange={(e) => setLine(i, { qty: Number(e.target.value || 0) })}
                         />
-                        <span className="w-8 text-[11px] text-muted-foreground">
-                          {m?.purchaseUnit}
-                        </span>
-                      </div>
-                      <Input
-                        type="number"
-                        value={l.rate}
-                        onChange={(e) => setLine(i, { rate: Number(e.target.value || 0) })}
-                      />
-                      <Select
-                        value={String(l.taxPct ?? 0)}
-                        onValueChange={(v) => setLine(i, { taxPct: Number(v) })}
+                      </FieldRow>
+                      <FieldRow
+                        label={`Rate ₹${m?.purchaseUnit ? ` / ${m.purchaseUnit}` : ""}`}
+                        required
                       >
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {[0, 5, 12, 18].map((t) => (
-                            <SelectItem key={t} value={String(t)}>
-                              {t}% GST
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                        <Input
+                          type="number"
+                          min={0}
+                          aria-label="Rate"
+                          value={l.rate}
+                          onChange={(e) => setLine(i, { rate: Number(e.target.value || 0) })}
+                        />
+                      </FieldRow>
+                      <FieldRow label="GST">
+                        <Select
+                          value={String(l.taxPct ?? 0)}
+                          onValueChange={(v) => setLine(i, { taxPct: Number(v) })}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[0, 5, 12, 18].map((t) => (
+                              <SelectItem key={t} value={String(t)}>
+                                {t}% GST
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FieldRow>
                       <Button
                         size="sm"
                         variant="ghost"
+                        aria-label="Remove this line"
+                        title="Remove this line"
                         onClick={() =>
                           setDraft({ ...draft, lines: draft.lines.filter((_, j) => j !== i) })
                         }
@@ -571,7 +597,7 @@ function PurchaseEditor({
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <FieldRow label="Discount">
+            <FieldRow label="Discount on the bill" hint="Flat ₹ or a percent of the subtotal">
               <div className="flex gap-2">
                 <Select
                   value={draft.discountType ?? "flat"}
@@ -589,6 +615,9 @@ function PurchaseEditor({
                 </Select>
                 <Input
                   type="number"
+                  min={0}
+                  aria-label="Discount value"
+                  placeholder="0"
                   value={draft.discountValue ?? 0}
                   onChange={(e) =>
                     setDraft({ ...draft, discountValue: Number(e.target.value || 0) })
@@ -596,7 +625,10 @@ function PurchaseEditor({
                 />
               </div>
             </FieldRow>
-            <FieldRow label="Amount paid now">
+            <FieldRow
+              label="Amount paid now (₹)"
+              hint="Leave 0 if the bill is unpaid; the rest is owed to the supplier"
+            >
               <Input
                 type="number"
                 value={draft.paidAmount ?? 0}
@@ -616,11 +648,13 @@ function PurchaseEditor({
           <TotalsPanel po={draft} />
         </div>
 
-        <div className="sticky bottom-0 flex gap-2 border-t border-border bg-surface p-3">
+        <div className="sticky bottom-0 flex flex-wrap gap-2 border-t border-border bg-surface p-3 [&>button]:min-w-[7.5rem]">
           <Button variant="outline" className="flex-1" onClick={() => setDraft(null)}>
             Cancel
           </Button>
           <Button
+            disabled={!(draft?.id ? access.edit : access.create)}
+            title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
             variant="outline"
             className="flex-1"
             onClick={() => {
@@ -632,6 +666,8 @@ function PurchaseEditor({
           </Button>
           <Button
             className="flex-1"
+            disabled={!(draft?.id ? access.edit : access.create)}
+            title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
             onClick={() => {
               store.savePurchase(draft, { receive: true });
               setDraft(null);
@@ -648,6 +684,7 @@ function PurchaseEditor({
 /* ==================== Stock In-Hand ==================== */
 
 export function StockInHandScreen() {
+  const access = useAccess("stock-transactions");
   const store = useStore();
   const [tab, setTab] = useState("count");
   const [q, setQ] = useState("");
@@ -846,6 +883,7 @@ export function StockInHandScreen() {
               Discard
             </Button>
             <Button
+              hidden={!access.edit}
               onClick={() => {
                 store.saveStockCount(
                   changed.map(([id, v]) => ({ materialId: id, countedQty: Number(v) })),
@@ -874,6 +912,7 @@ interface WastageRow {
 }
 
 export function WastageScreen() {
+  const access = useAccess("stock-transactions");
   const store = useStore();
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState<WastageRow[]>([]);
@@ -920,6 +959,7 @@ export function WastageScreen() {
         description="Batch stock-out — every row deducts stock and captures its cost"
         actions={
           <Button
+            hidden={!access.create}
             size="sm"
             onClick={() => {
               setRows([
@@ -1088,6 +1128,7 @@ export function WastageScreen() {
 /* ==================== Franchise Requisitions ==================== */
 
 export function RequisitionsScreen() {
+  const access = useAccess("stock-transactions");
   const store = useStore();
   const [open, setOpen] = useState(false);
   const [cart, setCart] = useState<Record<string, number>>({});
@@ -1147,6 +1188,7 @@ export function RequisitionsScreen() {
         title="Franchise requisitions"
         actions={
           <Button
+            hidden={!access.create}
             size="sm"
             onClick={() => {
               setCart({});
@@ -1197,13 +1239,19 @@ export function RequisitionsScreen() {
                 {r.status === "Pending" ? (
                   <>
                     <Button
+                      hidden={!access.edit}
                       size="sm"
                       variant="outline"
                       onClick={() => store.setRequisitionStatus(r.id, "Accepted")}
                     >
                       Mark accepted
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => store.removeRequisition(r.id)}>
+                    <Button
+                      hidden={!access.delete}
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => store.removeRequisition(r.id)}
+                    >
                       <Trash2 className="size-4" /> Delete
                     </Button>
                   </>

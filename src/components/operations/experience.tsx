@@ -339,8 +339,7 @@ export function QrSection() {
   // the UI below shows how to configure one instead of rendering a QR that
   // would resolve to the scanner's own phone.
   const qrBase = qrBaseUrl();
-  const url =
-    hotelId != null && qrBase ? `${qrBase}/qr-menu?${encryptHotelId(hotelId)}` : null;
+  const url = hotelId != null && qrBase ? `${qrBase}/qr-menu?${encryptHotelId(hotelId)}` : null;
 
   useEffect(() => {
     if (!url) {
@@ -460,13 +459,16 @@ export function QrSection() {
             )}
           </div>
           <p className="mt-3 text-center text-xs text-muted-foreground">
-            {qrBase ? `Scan for ${(store.restaurant?.name ?? store.serverHotelName ?? "")}` : "QR codes unavailable"}
+            {qrBase
+              ? `Scan for ${store.restaurant?.name ?? store.serverHotelName ?? ""}`
+              : "QR codes unavailable"}
           </p>
           {!qrBase ? (
             <p className="mt-2 text-center text-xs text-status-held-foreground">
-              This POS is open on a local address ({typeof window !== "undefined" ? window.location.origin : ""}),
-              which a customer&apos;s phone cannot reach. Set VITE_PUBLIC_QR_BASE_URL to your public
-              site before printing QR codes.
+              This POS is open on a local address (
+              {typeof window !== "undefined" ? window.location.origin : ""}), which a
+              customer&apos;s phone cannot reach. Set VITE_PUBLIC_QR_BASE_URL to your public site
+              before printing QR codes.
             </p>
           ) : null}
         </SectionCard>

@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   Download,
@@ -129,6 +130,7 @@ const newRowId = () =>
     : `v-${Date.now()}-${Math.random()}`;
 
 function MenuItemsPage() {
+  const access = useAccess("menu");
   const store = useStore();
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("all");
@@ -245,6 +247,7 @@ function MenuItemsPage() {
               <Download className="size-4" /> Export CSV
             </Button>
             <Button
+              hidden={!access.create}
               variant="outline"
               onClick={() => {
                 setImportRows([]);
@@ -254,6 +257,7 @@ function MenuItemsPage() {
               <FileUp className="size-4" /> Import CSV
             </Button>
             <Button
+              hidden={!access.create}
               disabled={!menuCategories.length}
               title={
                 menuCategories.length
@@ -342,6 +346,7 @@ function MenuItemsPage() {
               Deactivate
             </Button>
             <Button
+              hidden={!access.delete}
               size="sm"
               variant="outline"
               className="text-primary"
@@ -735,6 +740,7 @@ function MenuItemsPage() {
           <DialogFooter className="gap-2 sm:justify-between">
             {draft?.id ? (
               <Button
+                hidden={!access.delete}
                 variant="ghost"
                 className="text-primary"
                 onClick={() => {
@@ -752,7 +758,12 @@ function MenuItemsPage() {
                 Cancel
               </Button>
               <Button
-                disabled={!draft?.name.trim() || !draft?.categoryId}
+                title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+                disabled={
+                  !(draft?.id ? access.edit : access.create) ||
+                  !draft?.name.trim() ||
+                  !draft?.categoryId
+                }
                 onClick={() => {
                   if (!draft) return;
                   store.upsertMenuItem({

@@ -149,7 +149,10 @@ function AuditLogPage() {
                 key: "device",
                 header: "Device",
                 cell: (a) => (
-                  <span className="max-w-[16rem] truncate text-xs num text-muted-foreground" title={a.device ?? ""}>
+                  <span
+                    className="max-w-[16rem] truncate text-xs num text-muted-foreground"
+                    title={a.device ?? ""}
+                  >
                     {a.device ?? "—"} · {a.ip ?? "—"}
                   </span>
                 ),

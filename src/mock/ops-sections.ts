@@ -16,9 +16,12 @@ export const OPS_GROUPS: {
   hint: string;
   blurb: string;
   accent: string;
+  /** The permission that opens (view) and changes (edit) this group. */
+  module: PermissionModule;
 }[] = [
   {
     key: "billing",
+    module: "ops-billing",
     label: "Billing Engine",
     hint: "Computes the numbers on the bill",
     blurb: "Control charges, taxes, invoice behaviour and promotions.",
@@ -26,6 +29,7 @@ export const OPS_GROUPS: {
   },
   {
     key: "hardware",
+    module: "ops-hardware",
     label: "Hardware Routing",
     hint: "Where a ticket physically lands",
     blurb: "Define kitchens and printers; matching is resolved by the server.",
@@ -33,6 +37,7 @@ export const OPS_GROUPS: {
   },
   {
     key: "experience",
+    module: "ops-experience",
     label: "POS & Customer Experience",
     hint: "What staff and guests see",
     blurb: "Cashier layout, menu presentation, digital menu and customer recognition.",
@@ -40,6 +45,7 @@ export const OPS_GROUPS: {
   },
   {
     key: "ledger",
+    module: "ops-ledger",
     label: "Operational Ledger",
     hint: "Live money, not configuration",
     blurb: "Settle unpaid bills against cash, card or UPI.",
@@ -189,4 +195,5 @@ export const OPS_UNCONFIRMED = [
     title: "Bill rounding is hardcoded",
     note: "Every bill is rounded to the nearest rupee outside this module. It is surfaced here as read-only information, not as an editable rule.",
   },
-];
+];import type { PermissionModule } from "@/mock/types";
+

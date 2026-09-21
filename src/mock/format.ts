@@ -11,14 +11,12 @@ export const compactInr = (value: number) =>
       ? `₹${(value / 1000).toFixed(1)}K`
       : `₹${value}`;
 
-export const todayLabel = "18/08/2026";
-
 export function nowStamp() {
   const d = new Date();
   const hh = d.getHours() % 12 || 12;
   const mm = `${d.getMinutes()}`.padStart(2, "0");
   const ap = d.getHours() >= 12 ? "pm" : "am";
-  return `${todayLabel} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
+  return `${realToday()} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
 }
 
 // Real current time-of-day, in minutes since midnight - was hardcoded to
@@ -68,9 +66,9 @@ export function addDays(dateLabel: string, n: number): string {
   return `${dd}/${mm}/${d.getFullYear()}`;
 }
 
-/** Returns a "DD/MM/YYYY" label `n` days before the frozen `todayLabel`. */
+/** Returns a "DD/MM/YYYY" label `n` days before today. */
 export function daysAgo(n: number): string {
-  return addDays(todayLabel, -n);
+  return addDays(realToday(), -n);
 }
 
 /** Inclusive check for whether a "DD/MM/YYYY" label falls within [from, to]. */

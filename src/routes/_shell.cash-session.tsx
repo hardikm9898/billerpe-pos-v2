@@ -1,3 +1,4 @@
+import { useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { ArrowDownCircle, ArrowUpCircle, Lock, Wallet } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -45,6 +46,7 @@ export const Route = createFileRoute("/_shell/cash-session")({
 type Mode = "open" | "add" | "withdraw" | "close" | null;
 
 function CashSessionPage() {
+  const access = useAccess("cash-session");
   const store = useStore();
   const session = store.openSessionRecord();
   const balance = store.sessionBalance();
@@ -95,18 +97,20 @@ function CashSessionPage() {
         actions={
           session ? (
             <div className="flex gap-2">
-              <Button variant="outline" onClick={() => setMode("add")}>
+              <Button hidden={!access.edit} variant="outline" onClick={() => setMode("add")}>
                 <ArrowDownCircle className="size-4" /> Add cash
               </Button>
-              <Button variant="outline" onClick={() => setMode("withdraw")}>
+              <Button hidden={!access.edit} variant="outline" onClick={() => setMode("withdraw")}>
                 <ArrowUpCircle className="size-4" /> Withdraw
               </Button>
-              <Button onClick={() => setMode("close")}>
+              <Button hidden={!access.edit} onClick={() => setMode("close")}>
                 <Lock className="size-4" /> Close session
               </Button>
             </div>
           ) : (
-            <Button onClick={() => setMode("open")}>Open session</Button>
+            <Button hidden={!access.create} onClick={() => setMode("open")}>
+              Open session
+            </Button>
           )
         }
       />
@@ -176,7 +180,11 @@ function CashSessionPage() {
           icon={Wallet}
           title="No open cash session"
           description="Open today's session with a starting float before billing in cash."
-          action={<Button onClick={() => setMode("open")}>Open session</Button>}
+          action={
+            <Button hidden={!access.create} onClick={() => setMode("open")}>
+              Open session
+            </Button>
+          }
         />
       )}
 

@@ -1,4 +1,7 @@
-import { createFileRoute, redirect } from "@tanstack/react-router";
+import { useStore } from "@/mock/store";
+import { READ_ONLY_NOTE } from "@/lib/access";
+import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { Settings2 } from "lucide-react";
 
 import { Page, PageHeader } from "@/components/kit";
@@ -51,8 +54,18 @@ export const Route = createFileRoute("/_shell/operations/$section")({
 
 function OperationsSectionPage() {
   const { section } = Route.useParams();
+  const store = useStore();
+  const navigate = useNavigate();
   const meta = OPS_SECTIONS.find((s) => s.slug === section);
   const group = OPS_GROUPS.find((g) => g.key === meta?.group);
+  const canView = !!group && store.can(group.module, "view");
+  const canEdit = !!group && store.can(group.module, "edit");
+
+  // Each group has its own permission; the sidebar only knows "any of them".
+  useEffect(() => {
+    if (store.sessionReady && group && !canView) navigate({ to: "/operations", replace: true });
+  }, [store.sessionReady, group, canView, navigate]);
+  if (!canView) return null;
 
   return (
     <Page>
@@ -62,7 +75,19 @@ function OperationsSectionPage() {
         description={`${group?.label ?? "Operations"} · ${meta?.affects ?? ""}`}
       />
       <OpsNav active={section} />
-      {renderSection(section)}
+      {canEdit ? (
+        renderSection(section)
+      ) : (
+        <>
+          <p className="mb-3 rounded-lg border border-border bg-surface-muted px-3 py-2 text-sm text-muted-foreground">
+            {READ_ONLY_NOTE}
+          </p>
+          {/* A disabled fieldset disables every control inside the section. */}
+          <fieldset disabled className="contents">
+            {renderSection(section)}
+          </fieldset>
+        </>
+      )}
     </Page>
   );
 }

@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { BookOpen, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -37,6 +38,7 @@ const ORDER_TYPES: OpsOrderType[] = ["Dine-in", "Pickup"];
 const emptyMenu = (): Menu => ({ id: "", name: "", tableCategoryIds: [], orderTypes: [] });
 
 function MenusPage() {
+  const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<Menu | null>(null);
 
@@ -65,7 +67,7 @@ function MenusPage() {
         title="Menus"
         description="Each menu owns its own categories, items, addons and variants — nothing is shared between menus."
         actions={
-          <Button onClick={() => setDraft(emptyMenu())}>
+          <Button hidden={!access.create} onClick={() => setDraft(emptyMenu())}>
             <Plus className="size-4" /> Add menu
           </Button>
         }
@@ -118,7 +120,12 @@ function MenusPage() {
                     <Button size="sm" variant="outline" onClick={() => setDraft(m)}>
                       Edit
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => store.removeMenu(m.id)}>
+                    <Button
+                      hidden={!access.delete}
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => store.removeMenu(m.id)}
+                    >
                       <Trash2 className="size-4" />
                     </Button>
                   </div>
@@ -198,7 +205,8 @@ function MenusPage() {
               Cancel
             </Button>
             <Button
-              disabled={!draft?.name.trim()}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+              disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
               onClick={() => {
                 if (!draft) return;
                 store.upsertMenu(draft);

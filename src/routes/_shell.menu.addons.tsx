@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Pencil, Plus, PlusCircle, Trash2 } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
@@ -54,6 +55,7 @@ const newOptionId = () =>
     : `opt-${Date.now()}-${Math.random()}`;
 
 function MenuAddonsPage() {
+  const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<AddonGroup | null>(null);
 
@@ -80,7 +82,7 @@ function MenuAddonsPage() {
         title="Addons"
         description="Addon groups attach to items and add their price on top of the line total."
         actions={
-          <Button onClick={() => setDraft(blankGroup(viewMenuId))}>
+          <Button hidden={!access.create} onClick={() => setDraft(blankGroup(viewMenuId))}>
             <Plus className="size-4" /> New addon group
           </Button>
         }
@@ -122,6 +124,7 @@ function MenuAddonsPage() {
                     <Pencil className="size-4" />
                   </Button>
                   <Button
+                    hidden={!access.delete}
                     size="sm"
                     variant="ghost"
                     disabled={items.length > 0}
@@ -287,7 +290,12 @@ function MenuAddonsPage() {
               Cancel
             </Button>
             <Button
-              disabled={!draft?.name.trim() || !draft.options.length}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+              disabled={
+                !(draft?.id ? access.edit : access.create) ||
+                !draft?.name.trim() ||
+                !draft.options.length
+              }
               onClick={() => {
                 if (!draft) return;
                 store.upsertAddonGroup(draft);

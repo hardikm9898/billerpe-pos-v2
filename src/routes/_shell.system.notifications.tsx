@@ -13,7 +13,10 @@ export const Route = createFileRoute("/_shell/system/notifications")({
   head: () => ({
     meta: [
       { title: "Notification Settings · BillerPe" },
-      { name: "description", content: "Choose which triggers notify staff over WhatsApp, SMS and in-app." },
+      {
+        name: "description",
+        content: "Choose which triggers notify staff over WhatsApp, SMS and in-app.",
+      },
       { property: "og:title", content: "Notification Settings · BillerPe" },
       { property: "og:description", content: "WhatsApp, SMS and in-app notification triggers." },
     ],
@@ -65,7 +68,10 @@ function NotificationSettingsPage() {
               <p className="text-sm font-medium">{s.trigger}</p>
               <div className="grid grid-cols-3 gap-3 md:contents">
                 {channels.map((c) => (
-                  <div key={c.key} className="flex flex-col items-center gap-1 md:block md:text-center">
+                  <div
+                    key={c.key}
+                    className="flex flex-col items-center gap-1 md:block md:text-center"
+                  >
                     <span className="text-[11px] text-muted-foreground md:hidden">{c.label}</span>
                     <Switch
                       checked={s[c.key]}

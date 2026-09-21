@@ -559,7 +559,7 @@ export function InvoiceFormatSection() {
       setQrDataUrl(null);
       return;
     }
-    const merchantName = encodeURIComponent((store.restaurant?.name ?? store.serverHotelName ?? ""));
+    const merchantName = encodeURIComponent(store.restaurant?.name ?? store.serverHotelName ?? "");
     const transactionNote = encodeURIComponent(`Bill Payment - ${totals.grand}`);
     const upiUrl = `upi://pay?pa=${fmt.upiId}&pn=${merchantName}&tn=${transactionNote}&am=${totals.grand}&cu=INR`;
     let cancelled = false;
@@ -604,7 +604,7 @@ export function InvoiceFormatSection() {
   const lineText = (l: InvoiceLine) => {
     switch (l.content) {
       case "outlet-name":
-        return (store.restaurant?.name ?? store.serverHotelName ?? "");
+        return store.restaurant?.name ?? store.serverHotelName ?? "";
       case "address":
         return store.restaurant?.address ?? "";
       case "gstin":
@@ -1017,7 +1017,7 @@ export function KotFormatSection() {
   const lineText = (l: KotLine) => {
     switch (l.content) {
       case "outlet-name":
-        return (store.restaurant?.name ?? store.serverHotelName ?? "");
+        return store.restaurant?.name ?? store.serverHotelName ?? "";
       case "address":
         return store.restaurant?.address ?? "";
       case "order-type":

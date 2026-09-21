@@ -19,6 +19,10 @@ import { useStore } from "@/mock/store";
 
 export function OpsNav({ active }: { active?: string }) {
   const navigate = useNavigate();
+  const store = useStore();
+  // Only the groups this user may open (ops-billing, ops-hardware...).
+  const groups = OPS_GROUPS.filter((g) => store.can(g.module, "view"));
+  const sections = OPS_SECTIONS.filter((s) => groups.some((g) => g.key === s.group));
   return (
     <div className="mb-5 space-y-3">
       <div className="lg:hidden">
@@ -35,7 +39,7 @@ export function OpsNav({ active }: { active?: string }) {
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="overview">Operations overview</SelectItem>
-            {OPS_SECTIONS.map((s) => (
+            {sections.map((s) => (
               <SelectItem key={s.slug} value={s.slug}>
                 {s.name}
               </SelectItem>
@@ -51,7 +55,7 @@ export function OpsNav({ active }: { active?: string }) {
         >
           Overview
         </Link>
-        {OPS_GROUPS.map((g) => (
+        {groups.map((g) => (
           <div key={g.key} className="flex items-center gap-1.5">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
               {g.label}
@@ -148,7 +152,9 @@ export function GstDependencyNotice({ compact = false }: { compact?: boolean }) 
       {compact ? null : on ? (
         <>Tax rules are active because GST is enabled in Invoice Format.</>
       ) : (
-        <>Configured tax rules will not calculate on bills until GST is enabled in Invoice Format.</>
+        <>
+          Configured tax rules will not calculate on bills until GST is enabled in Invoice Format.
+        </>
       )}
     </Notice>
   );
@@ -258,9 +264,7 @@ export function FlowStrip({ steps, active }: { steps: string[]; active?: string 
           >
             {s}
           </span>
-          {i < steps.length - 1 ? (
-            <ArrowRight className="size-3 text-muted-foreground/60" />
-          ) : null}
+          {i < steps.length - 1 ? <ArrowRight className="size-3 text-muted-foreground/60" /> : null}
         </span>
       ))}
     </div>

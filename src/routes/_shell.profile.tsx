@@ -13,7 +13,10 @@ export const Route = createFileRoute("/_shell/profile")({
   head: () => ({
     meta: [
       { title: "Profile · BillerPe" },
-      { name: "description", content: "Your account, role, login PIN and current terminal session." },
+      {
+        name: "description",
+        content: "Your account, role, login PIN and current terminal session.",
+      },
       { property: "og:title", content: "Profile · BillerPe" },
       { property: "og:description", content: "Your BillerPe account and terminal session." },
     ],
@@ -31,7 +34,7 @@ function ProfilePage() {
       <PageHeader
         icon={UserCog}
         title="Profile"
-        description={`${u.role} at ${(store.restaurant?.name ?? store.serverHotelName ?? "")}`}
+        description={`${u.role} at ${store.restaurant?.name ?? store.serverHotelName ?? ""}`}
         actions={
           <Button
             variant="outline"
@@ -48,22 +51,35 @@ function ProfilePage() {
       <div className="grid gap-3 sm:grid-cols-3">
         <StatCard label="Role" value={u.role} tone="primary" />
         <StatCard label="Account status" value={<StatusBadge status={u.status} />} />
-        <StatCard label="Connection" value={String(connectionStateLabels[store.connection])} tone="info" />
+        <StatCard
+          label="Connection"
+          value={String(connectionStateLabels[store.connection])}
+          tone="info"
+        />
       </div>
 
       <SectionCard title="Account details" bodyClassName="p-3 sm:p-4">
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <Label>Name</Label>
-            <Input defaultValue={u.name} onBlur={(e) => store.upsertUser({ ...u, name: e.target.value })} />
+            <Input
+              defaultValue={u.name}
+              onBlur={(e) => store.upsertUser({ ...u, name: e.target.value })}
+            />
           </div>
           <div className="space-y-1.5">
             <Label>Mobile</Label>
-            <Input defaultValue={u.mobile} onBlur={(e) => store.upsertUser({ ...u, mobile: e.target.value })} />
+            <Input
+              defaultValue={u.mobile}
+              onBlur={(e) => store.upsertUser({ ...u, mobile: e.target.value })}
+            />
           </div>
           <div className="space-y-1.5">
             <Label>Email</Label>
-            <Input defaultValue={u.email} onBlur={(e) => store.upsertUser({ ...u, email: e.target.value })} />
+            <Input
+              defaultValue={u.email}
+              onBlur={(e) => store.upsertUser({ ...u, email: e.target.value })}
+            />
           </div>
           <div className="space-y-1.5">
             <Label>Login PIN</Label>
@@ -83,7 +99,7 @@ function ProfilePage() {
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div className="flex justify-between rounded-lg bg-surface-muted px-3 py-2">
             <dt className="text-muted-foreground">Outlet</dt>
-            <dd className="font-medium">{(store.restaurant?.name ?? store.serverHotelName ?? "")}</dd>
+            <dd className="font-medium">{store.restaurant?.name ?? store.serverHotelName ?? ""}</dd>
           </div>
           <div className="flex justify-between rounded-lg bg-surface-muted px-3 py-2">
             <dt className="text-muted-foreground">GSTIN</dt>

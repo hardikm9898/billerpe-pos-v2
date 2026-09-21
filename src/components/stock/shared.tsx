@@ -222,11 +222,34 @@ export function ConversionChip({ m }: { m: RawMaterial }) {
   );
 }
 
-export function FieldRow({ label, children }: { label: string; children: ReactNode }) {
+export function FieldRow({
+  label,
+  children,
+  required,
+  hint,
+  error,
+}: {
+  label: string;
+  children: ReactNode;
+  /** Shows a red * after the label. */
+  required?: boolean;
+  /** One line under the field saying what to enter. */
+  hint?: string;
+  /** Shown in red instead of the hint when the field is wrong. */
+  error?: string | null;
+}) {
   return (
     <div className="grid gap-1.5">
-      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <span className="text-xs font-medium text-muted-foreground">
+        {label}
+        {required ? <span className="ml-0.5 text-destructive">*</span> : null}
+      </span>
       {children}
+      {error ? (
+        <span className="text-[11px] text-destructive">{error}</span>
+      ) : hint ? (
+        <span className="text-[11px] text-muted-foreground">{hint}</span>
+      ) : null}
     </div>
   );
 }

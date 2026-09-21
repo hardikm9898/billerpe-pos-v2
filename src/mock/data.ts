@@ -1,4 +1,5 @@
 import type {
+  StandardAction,
   AddonGroup,
   AppNotification,
   AuditLog,
@@ -419,6 +420,37 @@ export const PERMISSION_MODULE_LABELS: Record<PermissionModule, string> = {
   "ops-ledger": "Operations · Operational Ledger",
   system: "System (Local Server & Sync)",
   "audit-log": "Audit Log",
+};
+
+/** The actions each module really has - what the exe checks
+ * (billerpe-local-exe/constant/routePermissions.js) and what the screens
+ * offer. The permission matrix only shows a switch for these: a Dashboard
+ * "delete" switch did nothing, which read as permissions not working. */
+export const MODULE_ACTIONS: Record<PermissionModule, readonly StandardAction[]> = {
+  dashboard: ["view"],
+  biller: ["view", "create", "edit"],
+  "keyboard-billing": ["view", "create", "edit"],
+  kds: ["view", "edit"],
+  orders: ["view", "edit", "delete"],
+  menu: ["view", "create", "edit", "delete"],
+  tables: ["view", "create", "edit", "delete"],
+  reservations: ["view", "create", "edit", "delete"],
+  queue: ["view", "create", "edit", "delete"],
+  users: ["view", "create", "edit"],
+  permissions: ["view", "edit"],
+  reports: ["view"],
+  expense: ["view", "create", "edit", "delete"],
+  "stock-masters": ["view", "create", "edit"],
+  "stock-transactions": ["view", "create", "edit", "delete"],
+  "stock-recipes": ["view", "create", "edit", "delete"],
+  "stock-reports": ["view"],
+  "cash-session": ["view", "create", "edit"],
+  "ops-billing": ["view", "create", "edit", "delete"],
+  "ops-hardware": ["view", "create", "edit", "delete"],
+  "ops-experience": ["view", "edit"],
+  "ops-ledger": ["view", "edit"],
+  system: ["view", "edit"],
+  "audit-log": ["view"],
 };
 
 /** Human labels for the special/contextual permissions, used by the Role Defaults matrix UI. */

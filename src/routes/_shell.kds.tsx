@@ -1,3 +1,4 @@
+import { useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { Ban, ChefHat, Clock, Timer } from "lucide-react";
@@ -202,6 +203,7 @@ function KotCard({
   onAdvance: () => void;
   onReject: () => void;
 }) {
+  const access = useAccess("kds");
   const mins = elapsedMinutes(kot.createdAt);
   const urgency = mins > 20 ? "border-primary" : mins > 10 ? "border-warning" : "border-border";
 
@@ -249,10 +251,16 @@ function KotCard({
           <Timer className="size-3.5" /> {elapsedFrom(kot.createdAt)}
         </span>
         <div className="flex items-center gap-1.5">
-          <Button size="sm" variant="outline" className="text-primary" onClick={onReject}>
+          <Button
+            hidden={!access.edit}
+            size="sm"
+            variant="outline"
+            className="text-primary"
+            onClick={onReject}
+          >
             <Ban className="size-3.5" /> Reject
           </Button>
-          <Button size="sm" onClick={onAdvance}>
+          <Button hidden={!access.edit} size="sm" onClick={onAdvance}>
             Mark {flow[kot.status]}
           </Button>
         </div>

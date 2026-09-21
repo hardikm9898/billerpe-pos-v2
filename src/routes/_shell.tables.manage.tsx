@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Grid2x2, ListPlus, Plus, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -52,6 +53,7 @@ export const Route = createFileRoute("/_shell/tables/manage")({
 });
 
 function ManageTablesPage() {
+  const access = useAccess("tables");
   const store = useStore();
   const [draft, setDraft] = useState<RestaurantTable | null>(null);
   const [cat, setCat] = useState("all");
@@ -107,6 +109,7 @@ function ManageTablesPage() {
               <ListPlus className="size-4" /> Bulk add
             </Button>
             <Button
+              hidden={!access.create}
               onClick={() =>
                 setDraft({
                   id: "",
@@ -141,6 +144,7 @@ function ManageTablesPage() {
         <div className="mt-3">
           <BulkActionsBar count={selected.length} onClear={() => setSelected([])}>
             <Button
+              hidden={!access.delete}
               size="sm"
               variant="outline"
               className="text-primary"
@@ -253,6 +257,7 @@ function ManageTablesPage() {
           <DialogFooter className="gap-2 sm:justify-between">
             {draft?.id ? (
               <Button
+                hidden={!access.delete}
                 variant="ghost"
                 className="text-primary"
                 disabled={draft.status !== "Free"}
@@ -271,7 +276,8 @@ function ManageTablesPage() {
                 Cancel
               </Button>
               <Button
-                disabled={!draft?.name.trim()}
+                title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+                disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
                 onClick={() => {
                   if (!draft) return;
                   store.upsertTable(draft);

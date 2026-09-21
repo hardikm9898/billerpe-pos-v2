@@ -16,7 +16,10 @@ export const Route = createFileRoute("/_shell/support/help")({
   head: () => ({
     meta: [
       { title: "Help & Support · BillerPe" },
-      { name: "description", content: "Answers to the questions billers ask most, plus support contacts." },
+      {
+        name: "description",
+        content: "Answers to the questions billers ask most, plus support contacts.",
+      },
       { property: "og:title", content: "Help & Support · BillerPe" },
       { property: "og:description", content: "Common BillerPe questions and support contacts." },
     ],
@@ -31,7 +34,7 @@ function HelpPage() {
       <PageHeader
         icon={CircleHelp}
         title="Help & Support"
-        description={`Support for ${(store.restaurant?.name ?? store.serverHotelName ?? "")} — available during service hours, every day.`}
+        description={`Support for ${store.restaurant?.name ?? store.serverHotelName ?? ""} — available during service hours, every day.`}
         actions={
           <Button asChild>
             <Link to="/support/raise-ticket">

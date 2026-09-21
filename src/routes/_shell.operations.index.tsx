@@ -1,3 +1,5 @@
+import type { PermissionModule } from "@/mock/types";
+import { useStore } from "@/mock/store";
 import { Link, createFileRoute } from "@tanstack/react-router";
 import { Bell, ChevronRight, ScrollText, ServerCog, Settings2 } from "lucide-react";
 
@@ -26,28 +28,39 @@ export const Route = createFileRoute("/_shell/operations/")({
   component: OperationsPage,
 });
 
-const related = [
+const related: {
+  to: string;
+  name: string;
+  desc: string;
+  icon: typeof ServerCog;
+  module: PermissionModule;
+}[] = [
   {
+    module: "system",
     to: "/system",
     name: "Local Server & Sync",
     desc: "Devices, sync queue and connection state",
     icon: ServerCog,
   },
   {
+    module: "audit-log",
     to: "/system/audit-log",
     name: "Audit Log",
     desc: "Who changed what, when and from where",
     icon: ScrollText,
   },
   {
+    module: "system",
     to: "/system/notifications",
     name: "Notification Settings",
     desc: "WhatsApp, SMS and in-app triggers",
     icon: Bell,
   },
-] as const;
+];
 
 function OperationsPage() {
+  const store = useStore();
+  const links = related.filter((t) => store.can(t.module, "view"));
   return (
     <Page>
       <PageHeader
@@ -58,10 +71,10 @@ function OperationsPage() {
       <OpsNav />
       <OperationsLanding />
 
-      <div className="mt-5">
+      <div className="mt-5" hidden={!links.length}>
         <SectionCard title="Related outlet tools" bodyClassName="p-3 sm:p-4">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {related.map((t) => (
+            {links.map((t) => (
               <Link
                 key={t.to}
                 to={t.to}

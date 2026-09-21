@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Layers, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
@@ -39,6 +40,7 @@ export const Route = createFileRoute("/_shell/menu/variants")({
 });
 
 function MenuVariantsPage() {
+  const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<VariantOption | null>(null);
 
@@ -82,7 +84,10 @@ function MenuVariantsPage() {
         title="Variants"
         description="Variants change the base price of an item at the point of billing."
         actions={
-          <Button onClick={() => setDraft({ id: "", name: "", price: 0, menuId: viewMenuId })}>
+          <Button
+            hidden={!access.create}
+            onClick={() => setDraft({ id: "", name: "", price: 0, menuId: viewMenuId })}
+          >
             <Plus className="size-4" /> New variant
           </Button>
         }
@@ -127,6 +132,7 @@ function MenuVariantsPage() {
               className: "text-right",
               cell: (v) => (
                 <Button
+                  hidden={!access.delete}
                   size="sm"
                   variant="ghost"
                   disabled={v.items.length > 0}
@@ -204,7 +210,8 @@ function MenuVariantsPage() {
               Cancel
             </Button>
             <Button
-              disabled={!draft?.name.trim()}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+              disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
               onClick={() => {
                 if (!draft) return;
                 store.upsertVariant(draft);

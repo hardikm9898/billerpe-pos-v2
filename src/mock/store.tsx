@@ -13,7 +13,7 @@ import { computeBill, type EngineChargeRule, type EngineTax } from "@/lib/billEn
 import QRCode from "qrcode";
 
 import { OFFLINE_SETTINGS, ROLE_PERMISSION_DEFAULTS, ROLE_SPECIAL_DEFAULTS } from "./data";
-import { nowStamp, todayLabel, isoToDMY } from "./format";
+import { nowStamp, realToday, isoToDMY } from "./format";
 import {
   ApiError,
   API_BASE_URL,
@@ -99,6 +99,7 @@ import {
   type RawAddonGroup,
   type RawHotelUser,
   setStoredAuthToken,
+  setPermissionChecker,
 } from "@/lib/api";
 import type { KdsTicketPayload } from "@/lib/kdsSocket";
 import type {
@@ -2217,7 +2218,7 @@ function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): Pur
     id: previous?.id ?? `po-${o.id}`,
     poNo: `PO-2026-${String(o.Po_no).padStart(3, "0")}`,
     supplierId: o.hms_supplier ? String(o.hms_supplier.id) : (previous?.supplierId ?? ""),
-    date: previous?.date ?? todayLabel,
+    date: previous?.date ?? realToday(),
     // No status column at all server-side (confirmed by reading the
     // model - the list endpoint's own response literally references
     // order.status/order.paymentStatus, which come back undefined since
@@ -2244,7 +2245,7 @@ function mapRawRequisition(r: RawRequisition): FranchiseRequisition {
   return {
     id: `req-${r.id}`,
     reqNo: `REQ-2026-${String(r.req_no).padStart(3, "0")}`,
-    date: r.createdAt ? isoToDMY(r.createdAt.slice(0, 10)) : todayLabel,
+    date: r.createdAt ? isoToDMY(r.createdAt.slice(0, 10)) : realToday(),
     status: r.status,
     items: r.items.map((i) => ({
       materialId: String(i.raw_material_id),
@@ -2565,6 +2566,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     [s.sessionUser, currentUser, resolvedPermissions],
   );
+
+  // Every write the API layer sends is checked against these first
+  // (lib/api.ts#assertPermitted) - the same rules the exe enforces.
+  useEffect(() => {
+    setPermissionChecker(s.sessionUser ? { can, canSpecial } : null);
+  }, [s.sessionUser, can, canSpecial]);
 
   const guardForbidden = useCallback(
     (moduleName: PermissionModule, action: StandardAction, label?: string) => {
@@ -3148,7 +3155,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         kotRounds: 0,
         lines: [],
         menuId: resolveMenu(s.menus, table, "Dine In")?.id,
-        businessDate: todayLabel,
+        businessDate: realToday(),
         createdAt: nowStamp(),
         createdBy: currentUser.name,
         itemised: true,
@@ -3172,7 +3179,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         kotRounds: 0,
         lines: [],
         menuId: resolveMenu(s.menus, undefined, "Pickup")?.id,
-        businessDate: todayLabel,
+        businessDate: realToday(),
         createdAt: nowStamp(),
         createdBy: currentUser.name,
         itemised: true,
@@ -4225,7 +4232,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                   name,
                   phone,
                   orders: 1,
-                  lastVisit: todayLabel,
+                  lastVisit: realToday(),
                   address: extra?.address,
                   gstin: extra?.gstin,
                 },
@@ -4585,7 +4592,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                     billNo: `#${orderNo}`,
                     customerName: o.customerName ?? "Guest",
                     mobile: o.customerPhone ?? "",
-                    date: todayLabel,
+                    date: realToday(),
                     daysAgo: 0,
                     amount: duePortion,
                     status: "Due" as const,
@@ -7407,7 +7414,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             countedQty: r.countedQty,
             variance,
             value: Math.round(variance * m.rate * 100) / 100,
-            date: todayLabel,
+            date: realToday(),
             by: who,
             ...(note ? { note } : {}),
           });
@@ -7497,7 +7504,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               materialId: m.id,
               qty: r.qty,
               reason: r.reason || "Not specified",
-              date: todayLabel,
+              date: realToday(),
               recordedBy: who,
               cost: Math.round(r.qty * m.rate * 100) / 100,
               ...(r.notes ? { notes: r.notes } : {}),

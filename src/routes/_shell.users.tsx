@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { ChevronDown, KeySquare, Plus, RotateCcw, Users } from "lucide-react";
 import { useState } from "react";
@@ -24,7 +25,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
-import { PERMISSION_MODULE_LABELS, SPECIAL_PERMISSION_LABELS } from "@/mock/data";
+import { MODULE_ACTIONS, PERMISSION_MODULE_LABELS, SPECIAL_PERMISSION_LABELS } from "@/mock/data";
 import { useStore } from "@/mock/store";
 import type {
   ModuleGrant,
@@ -91,6 +92,23 @@ const SPECIAL_PERMS: SpecialPermission[] = [
   "users.editPermissions",
 ];
 
+/** One switch flipped, with the rules that keep a grant meaningful: any
+ * action needs view (a screen you can't open can't be used), switching view
+ * off switches the rest off, and actions a module doesn't have stay off. */
+function toggledGrant(
+  m: PermissionModule,
+  current: ModuleGrant,
+  action: StandardAction,
+  value: boolean,
+): ModuleGrant {
+  const allowed = MODULE_ACTIONS[m];
+  const next: ModuleGrant = { ...current, [action]: value };
+  if (action !== "view" && value) next.view = true;
+  if (action === "view" && !value) for (const a of allowed) next[a] = false;
+  for (const a of ACTIONS) if (!allowed.includes(a)) next[a] = false;
+  return next;
+}
+
 /** Grouped Module × Action matrix — reused for both the role-defaults editor and the per-user override editor. */
 function ModuleGroupsTable({
   grants,
@@ -102,7 +120,8 @@ function ModuleGroupsTable({
   /** When set, cells present here render with an "overridden" ring — used only in the per-user editor. */
   overriddenModules?: Partial<Record<PermissionModule, Partial<ModuleGrant>>>;
   disabled: boolean;
-  onToggle: (m: PermissionModule, a: StandardAction, value: boolean) => void;
+  /** The module's whole new grant (see toggledGrant). */
+  onToggle: (m: PermissionModule, grant: ModuleGrant) => void;
 }) {
   return (
     <div className="space-y-5">
@@ -129,6 +148,17 @@ function ModuleGroupsTable({
                     <td className="px-3 py-2 font-medium">{PERMISSION_MODULE_LABELS[m]}</td>
                     {ACTIONS.map((a) => {
                       const isOverridden = overriddenModules?.[m]?.[a] !== undefined;
+                      if (!MODULE_ACTIONS[m].includes(a)) {
+                        return (
+                          <td
+                            key={a}
+                            className="px-3 py-2 text-center text-muted-foreground"
+                            title={`${PERMISSION_MODULE_LABELS[m]} has no ${a} action`}
+                          >
+                            —
+                          </td>
+                        );
+                      }
                       return (
                         <td key={a} className="px-3 py-2 text-center">
                           <span
@@ -140,7 +170,7 @@ function ModuleGroupsTable({
                             <Switch
                               checked={grants[m][a]}
                               disabled={disabled}
-                              onCheckedChange={(v) => onToggle(m, a, v)}
+                              onCheckedChange={(v) => onToggle(m, toggledGrant(m, grants[m], a, v))}
                             />
                           </span>
                         </td>
@@ -191,6 +221,7 @@ function SpecialPermissionsList({
 }
 
 function UsersPage() {
+  const access = useAccess("users");
   const store = useStore();
   const [draft, setDraft] = useState<User | null>(null);
   const [resetPassword, setResetPassword] = useState("");
@@ -235,17 +266,19 @@ function UsersPage() {
     ...(overrides?.special ?? {}),
   });
 
-  const setOverrideModule = (m: PermissionModule, a: StandardAction, value: boolean) => {
+  const setOverrideModule = (m: PermissionModule, grant: ModuleGrant) => {
     if (!draft) return;
+    // Only what differs from the role default is an override - the rest
+    // keeps following the role when the role is changed later.
+    const roleGrant = store.rolePermissions[draft.role][m];
+    const diff: Partial<ModuleGrant> = {};
+    for (const a of ACTIONS) if (grant[a] !== roleGrant[a]) diff[a] = grant[a];
+    const modules = { ...draft.permissionOverrides?.modules };
+    if (Object.keys(diff).length) modules[m] = diff;
+    else delete modules[m];
     setDraft({
       ...draft,
-      permissionOverrides: {
-        ...draft.permissionOverrides,
-        modules: {
-          ...draft.permissionOverrides?.modules,
-          [m]: { ...draft.permissionOverrides?.modules?.[m], [a]: value },
-        },
-      },
+      permissionOverrides: { ...draft.permissionOverrides, modules },
     });
   };
 
@@ -268,6 +301,7 @@ function UsersPage() {
         description="Every staff account maps to exactly one role. Permissions follow the role, with optional per-user overrides."
         actions={
           <Button
+            hidden={!access.create}
             onClick={() => {
               setDraft(newUser());
               setResetPassword("");
@@ -368,11 +402,8 @@ function UsersPage() {
           <ModuleGroupsTable
             grants={isOwnerRow ? effectiveGrants("Owner", undefined) : roleGrants}
             disabled={isOwnerRow || !canEditPermissions}
-            onToggle={(m, a, v) =>
-              store.updateRoleDefaults(viewRole, {
-                ...roleGrants,
-                [m]: { ...roleGrants[m], [a]: v },
-              })
+            onToggle={(m, grant) =>
+              store.updateRoleDefaults(viewRole, { ...roleGrants, [m]: grant })
             }
           />
         </div>
@@ -594,7 +625,9 @@ function UsersPage() {
               Cancel
             </Button>
             <Button
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
               disabled={
+                !(draft?.id ? access.edit : access.create) ||
                 !draft?.name.trim() ||
                 (!draft.id && resetPassword.trim().length < 6) ||
                 (!!resetPassword && resetPassword.trim().length < 6) ||

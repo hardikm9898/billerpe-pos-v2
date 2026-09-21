@@ -211,7 +211,10 @@ function OrderDetailPage() {
         <div className="space-y-4">
           <SectionCard
             title="Bill summary"
-            description={[(store.restaurant?.name ?? store.serverHotelName ?? ""), store.restaurant?.gstin ? `GSTIN ${store.restaurant.gstin}` : ""]
+            description={[
+              store.restaurant?.name ?? store.serverHotelName ?? "",
+              store.restaurant?.gstin ? `GSTIN ${store.restaurant.gstin}` : "",
+            ]
               .filter(Boolean)
               .join(" · ")}
           >

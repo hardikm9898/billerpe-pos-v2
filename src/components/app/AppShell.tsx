@@ -1,3 +1,4 @@
+import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
 // image.png is white-on-transparent (for the dark sidebar); the mobile nav
@@ -321,8 +322,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (pathname !== "/profile" && !hasViewAccess(store.can, module)) {
       navigate({ to: landingRoute(store.can), replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.authed, store.sessionReady, pathname, navigate]);
+    // store.can changes when this user's permissions do (see the listener
+    // below), so a page that was just taken away is left at once.
+  }, [store.authed, store.sessionReady, pathname, navigate, store.can]);
 
   // Loaded once the session is ready, and only what this user may see. The
   // exe refuses the rest (billerpe-local-exe/constant/routePermissions.js),
@@ -363,6 +365,25 @@ export function AppShell({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.sessionReady]);
 
+  // Permissions changed on another device (the owner edited a role or this
+  // user): take the new access at once, not at the next login. The access
+  // guard above then moves this user off a page they can no longer open.
+  useEffect(() => {
+    if (!store.sessionReady) return;
+    return connectChangeFeed({
+      onChange: () => {},
+      onConfigChange: (entities) => {
+        if (!entities.includes("permissions")) return;
+        void Promise.all([
+          store.syncCurrentUser(),
+          store.loadRolePermissionsFromServer(),
+          store.loadUsersFromServer(),
+        ]);
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.sessionReady]);
+
   // The connection chip's real state (store.loadServerStatusFromServer).
   useEffect(() => {
     if (!store.sessionReady) return;
@@ -380,6 +401,17 @@ export function AppShell({ children }: { children: ReactNode }) {
   const unread = store.notifications.filter((n) => !n.read).length;
   const conn = connectionMeta[store.connection];
   const ConnIcon = conn.icon;
+
+  const home = landingRoute(store.can);
+  const mobileTabs = [
+    { to: home, label: "Home", icon: LayoutDashboard, module: undefined },
+    { to: "/table-grid", label: "Biller", icon: UtensilsCrossed, module: "biller" as const },
+    { to: "/kds", label: "KDS", icon: ChefHat, module: "kds" as const },
+    { to: "/orders", label: "Orders", icon: Receipt, module: "orders" as const },
+  ].filter(
+    (t, i, all) =>
+      (!t.module || store.can(t.module, "view")) && all.findIndex((x) => x.to === t.to) === i,
+  );
 
   const navItems = (store.keyboardOnly ? NAV.filter((i) => i.code !== "BIL") : NAV).filter((i) =>
     hasViewAccess(store.can, i.module),
@@ -411,7 +443,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           )}
         >
           <Link
-            to="/dashboard"
+            to={landingRoute(store.can)}
             className={cn(
               "mb-2 flex h-11 items-center overflow-hidden rounded-xl px-2 transition-all",
               railExpanded ? "w-[196px] justify-start" : "w-[60px] justify-center",
@@ -764,14 +796,13 @@ export function AppShell({ children }: { children: ReactNode }) {
           <main className="min-w-0 flex-1 pb-16 lg:pb-0">{children}</main>
 
           {/* mobile bottom nav */}
-          <nav className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t border-border bg-surface lg:hidden">
-            {[
-              { to: "/dashboard", label: "Home", icon: LayoutDashboard },
-              { to: "/table-grid", label: "Biller", icon: UtensilsCrossed },
-              { to: "/kds", label: "KDS", icon: ChefHat },
-              { to: "/orders", label: "Orders", icon: Receipt },
-              { to: "/operations", label: "More", icon: Settings2 },
-            ].map((i) => (
+          {/* mobile bottom nav - only what this user may open; Home is their
+              own landing screen and More opens the full (filtered) menu. */}
+          <nav
+            className="fixed inset-x-0 bottom-0 z-40 grid border-t border-border bg-surface lg:hidden"
+            style={{ gridTemplateColumns: `repeat(${mobileTabs.length + 1}, minmax(0, 1fr))` }}
+          >
+            {mobileTabs.map((i) => (
               <Link
                 key={i.to}
                 to={i.to}
@@ -782,6 +813,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {i.label}
               </Link>
             ))}
+            <button
+              type="button"
+              onClick={() => setMobileNav(true)}
+              className="flex flex-col items-center gap-0.5 py-2 text-[11px] text-muted-foreground"
+            >
+              <Settings2 className="size-4" />
+              More
+            </button>
           </nav>
         </div>
 

@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { AlarmClock, Phone, Trash2, UserCheck, UserX, Users } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -77,6 +78,7 @@ function hhmm(iso: string): string {
 type AddDraft = { name: string; mobile: string; partySize: number };
 
 function QueuePage() {
+  const access = useAccess("queue");
   const store = useStore();
   const [addDraft, setAddDraft] = useState<AddDraft | null>(null);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
@@ -127,13 +129,17 @@ function QueuePage() {
         actions={
           <>
             <Button
+              hidden={!access.delete}
               variant="outline"
               disabled={!waiting.length}
               onClick={() => setClearConfirmOpen(true)}
             >
               <Trash2 className="size-4" /> Clear queue
             </Button>
-            <Button onClick={() => setAddDraft({ name: "", mobile: "", partySize: 2 })}>
+            <Button
+              hidden={!access.create}
+              onClick={() => setAddDraft({ name: "", mobile: "", partySize: 2 })}
+            >
               <Users className="size-4" /> Add to queue
             </Button>
           </>
@@ -254,7 +260,7 @@ function QueuePage() {
               className: "text-right",
               cell: (q) => (
                 <div className="flex items-center justify-end gap-1">
-                  {q.status === "Waiting" ? (
+                  {q.status === "Waiting" && access.edit ? (
                     <>
                       <IconButton
                         label={q.calledAt ? "Call again" : "Call customer"}

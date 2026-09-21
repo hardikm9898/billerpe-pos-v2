@@ -421,7 +421,10 @@ function DashboardPage() {
         title="Dashboard"
         description={`Business date ${REAL_TODAY} · ${store.currentUser.name} (${store.currentUser.role})`}
         actions={
-          <Button onClick={() => navigate({ to: "/table-grid" })}>
+          <Button
+            hidden={!store.can("biller", "view")}
+            onClick={() => navigate({ to: "/table-grid" })}
+          >
             Go to floor <ArrowRight className="size-4" />
           </Button>
         }
@@ -675,6 +678,7 @@ function DashboardPage() {
               })}
           </ul>
           <Button
+            hidden={!store.can("kds", "view")}
             variant="outline"
             className="mt-4 w-full"
             onClick={() => navigate({ to: "/kds" })}
@@ -705,6 +709,7 @@ function DashboardPage() {
             />
           </div>
           <Button
+            hidden={!store.can("reports", "view")}
             variant="outline"
             className="mt-4 w-full"
             onClick={() =>
@@ -751,7 +756,16 @@ function DashboardPage() {
           title="Low stock alerts"
           description={`${lowStock.length} items at or below reorder level`}
           actions={
-            <Button size="sm" variant="ghost" onClick={() => navigate({ to: "/stock" })}>
+            <Button
+              hidden={
+                !["stock-masters", "stock-transactions", "stock-recipes", "stock-reports"].some(
+                  (m) => store.can(m as "stock-masters", "view"),
+                )
+              }
+              size="sm"
+              variant="ghost"
+              onClick={() => navigate({ to: "/stock" })}
+            >
               View
             </Button>
           }

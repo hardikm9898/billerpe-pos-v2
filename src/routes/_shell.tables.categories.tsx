@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { LayoutGrid, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -29,6 +30,7 @@ export const Route = createFileRoute("/_shell/tables/categories")({
 });
 
 function TableCategoriesPage() {
+  const access = useAccess("tables");
   const store = useStore();
   const [draft, setDraft] = useState<TableCategory | null>(null);
   const tableCount = (id: string) => store.tables.filter((t) => t.categoryId === id).length;
@@ -41,6 +43,7 @@ function TableCategoriesPage() {
         description="Categories become the section tabs on the table grid."
         actions={
           <Button
+            hidden={!access.create}
             onClick={() =>
               setDraft({ id: "", name: "", sortOrder: store.tableCategories.length + 1 })
             }
@@ -114,6 +117,7 @@ function TableCategoriesPage() {
           <DialogFooter className="gap-2 sm:justify-between">
             {draft?.id ? (
               <Button
+                hidden={!access.delete}
                 variant="ghost"
                 className="text-primary"
                 disabled={tableCount(draft.id) > 0}
@@ -137,7 +141,8 @@ function TableCategoriesPage() {
                 Cancel
               </Button>
               <Button
-                disabled={!draft?.name.trim()}
+                title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+                disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
                 onClick={() => {
                   if (!draft) return;
                   store.upsertTableCategory(draft);

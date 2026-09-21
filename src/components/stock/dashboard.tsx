@@ -22,7 +22,10 @@ export function StockDashboard() {
 
   const kpi = useMemo(() => {
     const rawValue = store.rawMaterials.reduce((s, m) => s + m.stock * m.rate, 0);
-    const semiValue = store.semiFinished.reduce((s, x) => s + x.stock * store.semiUnitCost(x.id), 0);
+    const semiValue = store.semiFinished.reduce(
+      (s, x) => s + x.stock * store.semiUnitCost(x.id),
+      0,
+    );
     const alerts = store.rawMaterials
       .map((m) => ({ m, health: healthOf(m.stock, m.reorderLevel) }))
       .filter((r) => r.health !== "Healthy")
@@ -103,11 +106,7 @@ export function StockDashboard() {
               ))}
             </ul>
           ) : (
-            <EmptyState
-              icon={ClipboardCheck}
-              title="Every material is above its minimum"
-              compact
-            />
+            <EmptyState icon={ClipboardCheck} title="Every material is above its minimum" compact />
           )}
         </SectionCard>
 
@@ -125,7 +124,9 @@ export function StockDashboard() {
                     <span
                       className={cn(
                         "mt-0.5 grid size-7 shrink-0 place-items-center rounded-full text-[11px] font-semibold",
-                        positive ? "bg-success-soft text-success" : "bg-primary-soft text-primary-soft-foreground",
+                        positive
+                          ? "bg-success-soft text-success"
+                          : "bg-primary-soft text-primary-soft-foreground",
                       )}
                     >
                       {positive ? "+" : "−"}

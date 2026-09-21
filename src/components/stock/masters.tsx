@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { ChevronDown, Package, Pencil, Plus, Ruler, Truck } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useMemo, useState } from "react";
@@ -48,6 +49,7 @@ const blankMaterial = (): RawMaterial => ({
 });
 
 export function RawMaterialsScreen() {
+  const access = useAccess("stock-masters");
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<RawMaterial | null>(null);
@@ -91,7 +93,7 @@ export function RawMaterialsScreen() {
         title="Raw material master"
         description="Purchase unit, consumption unit and conversion drive every downstream screen"
         actions={
-          <Button size="sm" onClick={() => setDraft(blankMaterial())}>
+          <Button hidden={!access.create} size="sm" onClick={() => setDraft(blankMaterial())}>
             <Plus className="size-4" /> Add material
           </Button>
         }
@@ -296,7 +298,11 @@ export function RawMaterialsScreen() {
                   <Switch
                     checked={draft.minStockEnabled ?? draft.reorderLevel > 0}
                     onCheckedChange={(v) =>
-                      setDraft({ ...draft, minStockEnabled: v, reorderLevel: v ? draft.reorderLevel : 0 })
+                      setDraft({
+                        ...draft,
+                        minStockEnabled: v,
+                        reorderLevel: v ? draft.reorderLevel : 0,
+                      })
                     }
                   />
                 </div>
@@ -320,6 +326,8 @@ export function RawMaterialsScreen() {
               Cancel
             </Button>
             <Button
+              disabled={!(draft?.id ? access.edit : access.create)}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
               onClick={() => {
                 if (!draft?.name.trim()) return;
                 store.upsertRawMaterial(draft);
@@ -336,6 +344,7 @@ export function RawMaterialsScreen() {
 }
 
 export function UnitsScreen() {
+  const access = useAccess("stock-masters");
   const store = useStore();
   const [draft, setDraft] = useState<StockUnit | null>(null);
   const usage = (short: string) =>
@@ -347,7 +356,11 @@ export function UnitsScreen() {
         title="Unit master"
         description="Units of measure referenced by materials, purchases, recipes and wastage"
         actions={
-          <Button size="sm" onClick={() => setDraft({ id: "", unitName: "", shortName: "" })}>
+          <Button
+            hidden={!access.create}
+            size="sm"
+            onClick={() => setDraft({ id: "", unitName: "", shortName: "" })}
+          >
             <Plus className="size-4" /> Add unit
           </Button>
         }
@@ -421,6 +434,8 @@ export function UnitsScreen() {
               Cancel
             </Button>
             <Button
+              disabled={!(draft?.id ? access.edit : access.create)}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
               onClick={() => {
                 if (!draft?.unitName.trim() || !draft.shortName.trim()) return;
                 store.upsertUnit(draft);
@@ -437,6 +452,7 @@ export function UnitsScreen() {
 }
 
 export function SuppliersScreen() {
+  const access = useAccess("stock-masters");
   const store = useStore();
   const [q, setQ] = useState("");
   const [draft, setDraft] = useState<Supplier | null>(null);
@@ -462,7 +478,9 @@ export function SuppliersScreen() {
         />
         <StatCard
           label="Purchases recorded"
-          value={<Money value={Math.round(store.suppliers.reduce((s, x) => s + purchased(x.id), 0))} />}
+          value={
+            <Money value={Math.round(store.suppliers.reduce((s, x) => s + purchased(x.id), 0))} />
+          }
         />
       </div>
 
@@ -470,6 +488,7 @@ export function SuppliersScreen() {
         title="Supplier master"
         actions={
           <Button
+            hidden={!access.create}
             size="sm"
             onClick={() =>
               setDraft({ id: "", name: "", contact: "", phone: "", gstin: "", outstanding: 0 })
@@ -505,7 +524,11 @@ export function SuppliersScreen() {
                 </div>
               ),
             },
-            { key: "pos", header: "Orders", cell: (s) => <span className="num">{poCount(s.id)}</span> },
+            {
+              key: "pos",
+              header: "Orders",
+              cell: (s) => <span className="num">{poCount(s.id)}</span>,
+            },
             {
               key: "purchased",
               header: "Purchased",
@@ -574,6 +597,8 @@ export function SuppliersScreen() {
               Cancel
             </Button>
             <Button
+              disabled={!(draft?.id ? access.edit : access.create)}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
               onClick={() => {
                 if (!draft?.name.trim()) return;
                 store.upsertSupplier(draft);
@@ -600,6 +625,7 @@ const blankSemi = (): SemiFinished => ({
 });
 
 export function SemiFinishedScreen() {
+  const access = useAccess("stock-recipes");
   const store = useStore();
   const [draft, setDraft] = useState<SemiFinished | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -610,7 +636,7 @@ export function SemiFinishedScreen() {
         title="Semi-finished items"
         description="Each item has its own BOM in raw materials and its own tracked stock"
         actions={
-          <Button size="sm" onClick={() => setDraft(blankSemi())}>
+          <Button hidden={!access.create} size="sm" onClick={() => setDraft(blankSemi())}>
             <Plus className="size-4" /> Add item
           </Button>
         }
@@ -703,12 +729,15 @@ export function SemiEditor({
   draft: SemiFinished | null;
   setDraft: (v: SemiFinished | null) => void;
 }) {
+  const access = useAccess("stock-recipes");
   const store = useStore();
   return (
     <Dialog open={!!draft} onOpenChange={(o) => !o && setDraft(null)}>
       <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{draft?.id ? "Edit semi-finished item" : "Add semi-finished item"}</DialogTitle>
+          <DialogTitle>
+            {draft?.id ? "Edit semi-finished item" : "Add semi-finished item"}
+          </DialogTitle>
         </DialogHeader>
         {draft ? (
           <div className="grid gap-3">
@@ -777,7 +806,10 @@ export function SemiEditor({
                 {draft.components.map((c, i) => {
                   const m = store.rawMaterials.find((x) => x.id === c.materialId);
                   return (
-                    <div key={i} className="grid grid-cols-[1fr_auto] gap-2 sm:grid-cols-[1fr_130px_auto]">
+                    <div
+                      key={i}
+                      className="grid grid-cols-[1fr_auto] gap-2 sm:grid-cols-[1fr_130px_auto]"
+                    >
                       <Select
                         value={c.materialId}
                         onValueChange={(v) =>
@@ -855,6 +887,8 @@ export function SemiEditor({
             Cancel
           </Button>
           <Button
+            disabled={!(draft?.id ? access.edit : access.create)}
+            title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
             onClick={() => {
               if (!draft?.name.trim()) return;
               store.upsertSemiFinished(draft);

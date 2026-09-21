@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { LayoutList, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -51,6 +52,7 @@ export const Route = createFileRoute("/_shell/menu/categories")({
 });
 
 function MenuCategoriesPage() {
+  const access = useAccess("menu");
   const store = useStore();
   const [draft, setDraft] = useState<MenuCategory | null>(null);
 
@@ -97,6 +99,7 @@ function MenuCategoriesPage() {
         description="Categories drive the biller item grid, KOT routing and category-wise reports."
         actions={
           <Button
+            hidden={!access.create}
             onClick={() =>
               setDraft({
                 id: "",
@@ -137,6 +140,7 @@ function MenuCategoriesPage() {
         <div className="p-2 sm:p-3">
           <BulkActionsBar count={selected.length} onClear={() => setSelected([])}>
             <Button
+              hidden={!access.delete}
               size="sm"
               variant="outline"
               className="text-primary"
@@ -257,6 +261,7 @@ function MenuCategoriesPage() {
           <DialogFooter className="gap-2 sm:justify-between">
             {draft?.id ? (
               <Button
+                hidden={!access.delete}
                 variant="ghost"
                 className="text-primary"
                 disabled={activeItemCount(draft.id) > 0}
@@ -280,7 +285,8 @@ function MenuCategoriesPage() {
                 Cancel
               </Button>
               <Button
-                disabled={!draft?.name.trim()}
+                title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+                disabled={!(draft?.id ? access.edit : access.create) || !draft?.name.trim()}
                 onClick={() => {
                   if (!draft) return;
                   store.upsertMenuCategory(draft);

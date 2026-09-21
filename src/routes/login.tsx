@@ -154,9 +154,7 @@ function LoginPage() {
             ))}
           </div>
         </div>
-        <p className="text-xs opacity-60">
-          {store.serverHotelName ?? "BillerPe"}
-        </p>
+        <p className="text-xs opacity-60">{store.serverHotelName ?? "BillerPe"}</p>
       </div>
 
       <div className="flex items-center justify-center bg-background px-4 py-10">

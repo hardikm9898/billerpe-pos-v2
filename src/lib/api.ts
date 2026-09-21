@@ -1,3 +1,7 @@
+import { ROUTE_PERMISSIONS } from "@/lib/routePermissions";
+import { PERMISSION_MODULE_LABELS, SPECIAL_PERMISSION_LABELS } from "@/mock/data";
+import type { PermissionModule, SpecialPermission, StandardAction } from "@/mock/types";
+
 // Minimal real-backend client, seeded here for the auth wiring work.
 // Talks to uat-backend (POS/uat-backend) - the only backend this design
 // currently has anything real to call. Session is a cookie the backend
@@ -850,7 +854,65 @@ async function apiGet<T>(path: string): Promise<T> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Permission check before a write leaves this device. The same table the
+// exe enforces (src/lib/routePermissions.ts, generated from
+// billerpe-local-exe/constant/routePermissions.js), so a user is told
+// exactly which permission they are missing - and nothing is sent - instead
+// of getting the server's refusal after the fact.
+// ---------------------------------------------------------------------------
+type PermissionChecker = {
+  can: (module: PermissionModule, action: StandardAction) => boolean;
+  canSpecial: (perm: SpecialPermission) => boolean;
+};
+let permissionChecker: PermissionChecker | null = null;
+/** The store registers the signed-in user's checks (null when signed out). */
+export function setPermissionChecker(checker: PermissionChecker | null) {
+  permissionChecker = checker;
+}
+
+const compiledRules = Object.entries(ROUTE_PERMISSIONS).map(([key, rule]) => {
+  const [method, pattern] = key.split(" ") as [string, string];
+  const regex = new RegExp(
+    `^${pattern
+      .replace(/[.*+^$()|[\]\\]/g, "\\$&")
+      .replace(/\/:[A-Za-z_]+\?/g, "(?:/[^/]+)?")
+      .replace(/:[A-Za-z_]+/g, "[^/]+")}$`,
+  );
+  return { method, regex, rule };
+});
+
+// Billing actions may come from either billing screen (same rule as the exe).
+const EQUIVALENT_MODULES: Partial<Record<PermissionModule, PermissionModule[]>> = {
+  biller: ["biller", "keyboard-billing"],
+};
+
+function assertPermitted(method: string, path: string) {
+  if (!permissionChecker) return;
+  const bare = path.split("?")[0] ?? path;
+  const match = compiledRules.find((r) => r.method === method && r.regex.test(bare));
+  if (!match) return;
+  const [module, action, special] = match.rule;
+  const modules = EQUIVALENT_MODULES[module] ?? [module];
+  const label = PERMISSION_MODULE_LABELS[module] ?? module;
+  if (!modules.some((m) => permissionChecker!.can(m, action))) {
+    throw new ApiError(
+      `You don't have permission to ${action} in ${label}. Ask the owner to allow it in Manage Users.`,
+      undefined,
+      403,
+    );
+  }
+  if (special && !permissionChecker.canSpecial(special)) {
+    throw new ApiError(
+      `You don't have permission to ${SPECIAL_PERMISSION_LABELS[special]?.toLowerCase() ?? special}. Ask the owner to allow it in Manage Users.`,
+      undefined,
+      403,
+    );
+  }
+}
+
 async function apiPost<T>(path: string, body: unknown): Promise<T> {
+  assertPermitted("POST", path);
   return trackPending(async () => {
     const base = resolveBaseUrl("POST", path);
     const res = await guardedFetch(base, `${base}${path}`, {
@@ -876,6 +938,7 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
 // itself only when left to set the header, doing it manually breaks the
 // boundary parsing on the receiving end.
 async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
+  assertPermitted("POST", path);
   return trackPending(async () => {
     const base = resolveBaseUrl("POST", path);
     const res = await guardedFetch(base, `${base}${path}`, {
@@ -937,6 +1000,7 @@ async function apiPostRaw<T>(path: string, body: unknown): Promise<T | null> {
 }
 
 async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  assertPermitted("PUT", path);
   return trackPending(async () => {
     const base = resolveBaseUrl("PUT", path);
     const res = await guardedFetch(base, `${base}${path}`, {
@@ -957,6 +1021,7 @@ async function apiPut<T>(path: string, body: unknown): Promise<T> {
 }
 
 async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
+  assertPermitted("DELETE", path);
   return trackPending(async () => {
     const base = resolveBaseUrl("DELETE", path);
     const res = await guardedFetch(base, `${base}${path}`, {
@@ -3286,8 +3351,21 @@ export type RawSFIDetail = RawSFI & { recipes: RawSFIRecipeLine[] };
 // acceptable since a hotel only has a handful of semi-finished items,
 // not the N+1 concern it'd be for a larger list.
 export const semiFinishedApi = {
-  getAll: () => apiGet<RawSFI[]>("/semiFinished/all"),
-  getSingle: (id: number) => apiGet<RawSFIDetail>(`/semiFinished/single?id=${id}`),
+  // The exe answers { items: [...] } and { item: {...} } (billerpe-local-exe
+  // controller/semiFinishedItems.js). This read them as a bare list and a
+  // bare item, so the Semi-finished and Production screens failed with
+  // "Could not load semi-finished items". Either shape is accepted.
+  getAll: async () => {
+    const r = await apiGet<RawSFI[] | { items: RawSFI[] }>("/semiFinished/all");
+    return Array.isArray(r) ? r : (r?.items ?? []);
+  },
+  getSingle: async (id: number) => {
+    const r = await apiGet<RawSFIDetail | { item: RawSFIDetail }>(
+      `/semiFinished/single?id=${id}`,
+    );
+    const item = r && "item" in r ? r.item : (r as RawSFIDetail);
+    return { ...item, recipes: item?.recipes ?? [] };
+  },
 
   create: (params: {
     name: string;

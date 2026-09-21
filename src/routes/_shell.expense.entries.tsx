@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Download, Plus, Trash2, Wallet2 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -89,6 +90,7 @@ function parseExpenseDateTime(dateDMY: string, timeLabel: string): Date {
 }
 
 function ExpenseEntriesPage() {
+  const access = useAccess("expense");
   const store = useStore();
   const [draft, setDraft] = useState<Expense | null>(null);
   const [draftDateTime, setDraftDateTime] = useState(() => toDatetimeLocalValue(new Date()));
@@ -217,7 +219,7 @@ function ExpenseEntriesPage() {
             <Button variant="outline" onClick={() => void exportCsv()} disabled={exporting}>
               <Download className="size-4" /> Export CSV
             </Button>
-            <Button onClick={openAddDialog}>
+            <Button hidden={!access.create} onClick={openAddDialog}>
               <Plus className="size-4" /> Add expense
             </Button>
           </div>
@@ -445,6 +447,7 @@ function ExpenseEntriesPage() {
           <DialogFooter>
             {draft?.id ? (
               <Button
+                hidden={!access.delete}
                 variant="outline"
                 className="text-destructive hover:text-destructive sm:mr-auto"
                 onClick={() => setDeleteConfirmOpen(true)}
@@ -456,7 +459,14 @@ function ExpenseEntriesPage() {
               Cancel
             </Button>
             <Button
-              disabled={!draft || draft.amount <= 0 || !draft.note.trim() || saving}
+              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+              disabled={
+                !(draft?.id ? access.edit : access.create) ||
+                !draft ||
+                draft.amount <= 0 ||
+                !draft.note.trim() ||
+                saving
+              }
               onClick={() => {
                 if (!draft) return;
                 // Backend rejects a blank reason with one combined "these 5

@@ -1,3 +1,4 @@
+import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { Plus, Search, Tags, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -49,6 +50,7 @@ export const Route = createFileRoute("/_shell/expense/heads")({
 });
 
 function ExpenseHeadsPage() {
+  const access = useAccess("expense");
   const store = useStore();
   const [draft, setDraft] = useState<ExpenseHead | null>(null);
   const [saving, setSaving] = useState(false);
@@ -95,7 +97,10 @@ function ExpenseHeadsPage() {
         title="Expense Head"
         description="Heads group expenses for the expense report and cash session deductions."
         actions={
-          <Button onClick={() => setDraft({ id: "", name: "", type: "Variable", active: true })}>
+          <Button
+            hidden={!access.create}
+            onClick={() => setDraft({ id: "", name: "", type: "Variable", active: true })}
+          >
             <Plus className="size-4" /> New head
           </Button>
         }
@@ -115,6 +120,7 @@ function ExpenseHeadsPage() {
         <div className="mt-3">
           <BulkActionsBar count={selected.length} onClear={() => setSelected([])}>
             <Button
+              hidden={!access.delete}
               size="sm"
               variant="outline"
               className="text-primary"
@@ -225,6 +231,7 @@ function ExpenseHeadsPage() {
           <DialogFooter className="gap-2 sm:justify-between">
             {draft?.id ? (
               <Button
+                hidden={!access.delete}
                 variant="ghost"
                 className="text-primary sm:mr-auto"
                 disabled={saving || deleting}
@@ -246,7 +253,10 @@ function ExpenseHeadsPage() {
                 Cancel
               </Button>
               <Button
-                disabled={!draft?.name.trim() || saving}
+                title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
+                disabled={
+                  !(draft?.id ? access.edit : access.create) || !draft?.name.trim() || saving
+                }
                 onClick={() => {
                   if (!draft) return;
                   setSaving(true);
