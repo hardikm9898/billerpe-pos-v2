@@ -363,12 +363,23 @@ export function QrSection() {
   // QR above. Encodes {hotelId, tableId, qrVersion} (encryptQrPayload)
   // rather than just the hotel id, so src/routes/qr-menu.tsx can tell the
   // two apart and only show cart/checkout when a real table is known.
+  //
+  // tableId is the table's CLOUD id (RestaurantTable.cloudId), never the
+  // local one this app addresses tables by everywhere else: the scan is
+  // resolved by the cloud (uat-backend-v2's startQrSession), which has its
+  // own id space. Encoding the local id printed stickers that failed at
+  // "enter name + mobile" with "This Table Number Is Not Available" on
+  // every outlet whose ids had diverged - reproduced live against the real
+  // backend. A table with no cloud id yet gets NO QR at all, for the same
+  // reason qrBaseUrl() refuses to guess a public origin: a missing code
+  // staff can report is recoverable, a printed dead one is not.
   const selectedTable = selectedTableId ? store.tableById(selectedTableId) : undefined;
+  const selectedTableCloudId = selectedTable?.cloudId;
   const tableUrl =
-    hotelId != null && selectedTable && qrBase
+    hotelId != null && selectedTable && selectedTableCloudId != null && qrBase
       ? `${qrBase}/qr-menu?${encryptQrPayload({
           hotelId,
-          tableId: Number(selectedTable.id),
+          tableId: selectedTableCloudId,
           qrVersion: selectedTable.qrVersion ?? 1,
         })}`
       : null;
@@ -491,7 +502,9 @@ export function QrSection() {
               >
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{t.name}</p>
-                  <p className="text-xs text-muted-foreground">v{t.qrVersion ?? 1}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {t.cloudId == null ? "Not synced yet" : `v${t.qrVersion ?? 1}`}
+                  </p>
                 </div>
                 <div className="flex shrink-0 gap-1.5">
                   <Button size="sm" variant="outline" onClick={() => setSelectedTableId(t.id)}>
@@ -500,7 +513,7 @@ export function QrSection() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={regenBusyId === t.id}
+                    disabled={regenBusyId === t.id || t.cloudId == null}
                     onClick={() => void regenerateTableQr(t.id)}
                   >
                     Regenerate
@@ -530,12 +543,23 @@ export function QrSection() {
                   <QrCode className="size-32 text-muted-foreground" />
                 )}
               </div>
-              <div className="space-y-1.5">
-                <Label>Order URL</Label>
-                <Input readOnly value={tableUrl ?? "Loading…"} className="font-mono text-xs" />
-              </div>
+              {selectedTableCloudId == null ? (
+                <p className="text-center text-xs text-status-held-foreground">
+                  This table has not reached the BillerPe server yet, so it has no ordering QR. It
+                  appears here automatically once this outlet syncs.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  <Label>Order URL</Label>
+                  <Input readOnly value={tableUrl ?? "Loading…"} className="font-mono text-xs" />
+                </div>
+              )}
               <DialogFooter>
-                <Button variant="outline" onClick={() => void regenerateTableQr(selectedTable.id)}>
+                <Button
+                  variant="outline"
+                  disabled={selectedTableCloudId == null}
+                  onClick={() => void regenerateTableQr(selectedTable.id)}
+                >
                   Regenerate
                 </Button>
                 <Button onClick={downloadTableQr} disabled={!tableQrDataUrl}>

@@ -112,12 +112,8 @@ export const invoiceFormat: InvoiceFormat = {
     { id: "f2", content: "marketing", text: "Thank you for dining with us!", fontSize: 12 },
     { id: "f3", content: "text", text: "Food once served cannot be returned.", fontSize: 10 },
   ],
-  unconfirmed: {
-    isTokenOn: false,
-    billWithKot: false,
-    billWithToken: false,
-    saveBehaviour: false,
-  },
+  tokens: { tokenFor: "off", billWithKot: "off", billWithToken: "off" },
+  saveBehave: "save",
 };
 
 export const kotFormat: KotFormat = {

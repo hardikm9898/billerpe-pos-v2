@@ -224,7 +224,20 @@ export function DuePaymentSection() {
                 </span>
               ),
             },
-            { key: "amt", header: "Amount", cell: (b) => <Money value={b.amount} /> },
+            {
+              key: "amt",
+              header: "Due",
+              cell: (b) => (
+                <span>
+                  <Money value={b.amount} />
+                  {b.billTotal && b.billTotal - b.amount > 0.009 && b.status === "Due" ? (
+                    <span className="block text-xs text-muted-foreground">
+                      of <Money value={b.billTotal} /> bill
+                    </span>
+                  ) : null}
+                </span>
+              ),
+            },
             {
               key: "status",
               header: "Status",
@@ -258,6 +271,12 @@ export function DuePaymentSection() {
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {b.date} · <Money value={b.amount} />
+                  {b.billTotal && b.billTotal - b.amount > 0.009 && b.status === "Due" ? (
+                    <>
+                      {" "}
+                      due of <Money value={b.billTotal} />
+                    </>
+                  ) : null}
                 </p>
               </div>
               <StatusBadge status={b.status} />
@@ -277,7 +296,9 @@ export function DuePaymentSection() {
                 : "bill"}
             </DialogTitle>
             <DialogDescription>
-              Single or split payment. Amounts must add up to the total due.
+              {settleTarget && settleTarget.ids.length === 1
+                ? "Enter what the customer is paying now. Paying less keeps the rest as due."
+                : "Several bills are settled in full. To take a part-payment, settle one bill at a time."}
             </DialogDescription>
           </DialogHeader>
           {settleTarget ? (
@@ -294,7 +315,10 @@ export function DuePaymentSection() {
                 if (!settleTarget) return;
                 const balance =
                   Math.round((settleTarget.amount - splitPaid(settleSplits)) * 100) / 100;
-                if (Math.abs(balance) > 0.5) {
+                // One bill may be part-paid: the balance stays due
+                // (store.settleDueBills checks it is more than 0 and not
+                // more than what is due). Several bills must be paid in full.
+                if (settleTarget.ids.length > 1 && Math.abs(balance) > 0.5) {
                   toast.error("Split does not match the amount due", {
                     description: `Balance of ₹${balance.toLocaleString("en-IN")} remaining.`,
                   });

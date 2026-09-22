@@ -372,7 +372,25 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (!store.sessionReady) return;
     return connectChangeFeed({
       onChange: () => {},
+      // The exe prints every KOT itself (billerpe-local-exe/services/
+      // kotAutoPrint.js), including rounds fired from a captain's phone or
+      // an accepted QR order - so a failed print is announced on every
+      // screen, not just the one that fired it, or nobody would notice a
+      // ticket that never reached the kitchen.
+      onKotPrintStatus: (event) => {
+        const failed = event.results.filter((r) => !r.ok);
+        if (!failed.length) return;
+        const table = event.tableId != null ? store.tableById(String(event.tableId)) : undefined;
+        toast.error(`KOT #${event.kotNumber}${table ? ` for ${table.name}` : ""} did not print`, {
+          description: `Printer: ${failed.map((f) => f.printer).join(", ")}. Check the printer, then reprint the KOT from the order.`,
+          duration: 15000,
+        });
+      },
       onConfigChange: (entities) => {
+        // A tax switched on/off or edited on another screen (or pulled from
+        // the cloud) must change this screen's bill previews at once - the
+        // exe already bills with it.
+        if (entities.includes("taxTypes")) void store.loadTaxRulesFromServer();
         if (!entities.includes("permissions")) return;
         void Promise.all([
           store.syncCurrentUser(),

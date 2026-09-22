@@ -217,6 +217,10 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // that one browser tab (setKotStatus, mock/store.tsx); this is the real
     // write + cross-device broadcast the Captain App's notifications need.
     { method: "POST", test: (p) => p === "/kotReady" },
+    // Token display + manual reset (billerpe-local-exe/controller/tokenBoard.js).
+    { method: "GET", test: (p) => p === "/tokenBoard" },
+    { method: "POST", test: (p) => p === "/tokenBoard/status" },
+    { method: "POST", test: (p) => p === "/token/reset" },
     // Waitlist queue - real local implementation (billerpe-local-exe/
     // controller/queue.js), no cloud counterpart at all - see model/
     // queueEntry.js's own comment on why.
@@ -1050,7 +1054,8 @@ async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
 export type RawBillViewItem = {
   item_name: string;
   variantData?: { variants_name?: string } | null;
-  addons?: unknown;
+  /** Flat list (uat-backend-v2 kto.js#billViewAddons); already included in totalAmount. */
+  addons?: { addon_name: string; price: number; qty: number }[] | unknown;
   price: number;
   qty: number;
   sub_categories?: string;
@@ -1059,7 +1064,11 @@ export type RawBillViewItem = {
 
 export type RawBillViewTax = {
   hms_tax_type_mst?: { tax_name?: string; percentage?: number };
+  /** The RATE (e.g. 2.5), not money - see tax_value. */
   amount?: number;
+  tax_type?: "pr" | "fix" | string;
+  /** Rupees actually charged for this tax. */
+  tax_value?: number;
 };
 
 export type RawBillViewData = {
@@ -1234,6 +1243,12 @@ export const hotelApi = {
       invoiceFormateIncGst: boolean;
       hms_serviceCharge_mst: RawServiceCharge | null;
       hms_res_setting: { qr_code_open_on_settle: boolean } | null;
+      // Token settings: "0" pickup, "1" dine-in, "2" both, "3" off
+      // (InvoiceFormat.tokens), and what "Save" does.
+      is_token_on?: string | null;
+      bill_with_kot?: string | null;
+      bill_with_token?: string | null;
+      saveBehave?: string | null;
     }>("/singleHotel"),
   // Same endpoint, now also carries the two "marketing" header/footer
   // line's actual text - those live on Hotel itself
@@ -1247,7 +1262,15 @@ export const hotelApi = {
     invoiceFormateHeaderText?: string;
     invoiceFormateBottomText?: string;
     invoiceFormateIncGst?: boolean;
-  }) => apiPost<{ message?: string }>("/updateInvoiceFormate", { hotel: params }),
+    is_token_on?: "0" | "1" | "2" | "3";
+    bill_with_kot?: "0" | "1" | "2" | "3";
+    bill_with_token?: "0" | "1" | "2" | "3";
+    saveBehave?: "save" | "pdf";
+  }) =>
+    apiPost<{ message?: string; /** false = saved on this PC, but the cloud (which renders the e-bill) could not be reached */ cloudUpdated?: boolean }>(
+      "/updateInvoiceFormate",
+      { hotel: params },
+    ),
 
   // POST /hotelLogo (controller/hotel.js#uploadHotelLogo) - deliberately
   // separate from the real editHotelDetails/hoteledit endpoint, which also
@@ -1408,6 +1431,14 @@ export type RawTable = {
   // never edits this directly; only "regenerate this table's QR"
   // (qrOrderApi.regenerateTableQr) bumps it, cloud-side.
   qr_version?: number;
+  // Derived server-side (billerpe-local-exe/controller/table.js#getTable),
+  // not a column: this table's id on the CLOUD. The two id spaces stop
+  // matching as soon as an outlet creates a table of its own, and the
+  // customer's phone resolves a scanned QR against the cloud, never
+  // against the exe - so this, not `id`, is what a per-table ordering QR
+  // must carry. Null/absent = the cloud does not have this table yet and
+  // no QR may be rendered for it (see operations/experience.tsx).
+  cloud_table_id?: number | null;
 };
 
 export const tableApi = {
@@ -1840,6 +1871,9 @@ type KotPayload = {
   order_id?: number;
   table_id?: number;
   tableNumber?: string;
+  /** "Only KOT": record the round as fired without printing it or sending
+   * it to any KDS (billerpe-local-exe/controller/kot.js#kotOrder). */
+  only_kot?: boolean;
   /** Attaches/upgrades the order's customer (controller/kto.js#kotOrder's
    * own findAndUpdateUser call, billerpe-local-exe/helpers/
    * customerAttach.js's ported twin) - previously never sent at all here,
@@ -1864,6 +1898,9 @@ type KotPayload = {
     /** Explicit packaging override (Web POS "Charges" sheet); omitted =
      * the exe applies the hotel's packaging rule itself. */
     packaging_override?: number;
+    /** The cashier's manual service charge (used when the service charge is
+     * not automatic for this order type); omitted = keep the stored one. */
+    service_charge_override?: number;
     taxes: RawCartTax[];
     // Only one entry is ever sent: kotOrder's server-side code looks for
     // `cart.items.find(el => el.status === 'H')` (creating a new order) or
@@ -1902,7 +1939,18 @@ export const orderApi = {
   // Operations -> Printers isn't wired to the real backend yet, so this is
   // a real, current limitation, not a client-side gap.
   kotOrder: (payload: KotPayload) =>
-    apiPost<{ message?: string; kotInfo: { order_id: number; bill_no?: string } }>(
+    apiPost<{
+      message?: string;
+      kotInfo: {
+        order_id: number;
+        bill_no?: string;
+        /** KDS kitchen each sent line went to, in the order the lines were
+         * sent (null = no kitchen). Empty for "Only KOT" or no kitchens. */
+        kdsStations?: (string | null)[];
+        /** The order's daily token (0 = tokens off for this order type). */
+        token?: number;
+      };
+    }>(
       "/kotOrder",
       payload,
     ),
@@ -2257,6 +2305,8 @@ export type RawOrderHeader = {
   discount_value?: number | null;
   /** Explicit per-order packaging override, null when the rule applies. */
   packaging_override?: number | null;
+  /** The cashier's manual service charge, null when none was entered. */
+  service_override?: number | null;
   packaging_charge?: number | null;
   totalAmount?: number | null;
   roundOff?: number | null;
@@ -2457,6 +2507,8 @@ export type RawAuditLogEntry = {
   reason: string | null;
   device: string | null;
   ip: string | null;
+  /** The order's real bill number once the exe has it (null = not an order entry, or never linked). */
+  bill_no?: string | null;
   createdAt: string;
 };
 export type RawAuditLogPage = {
@@ -2475,11 +2527,25 @@ export const auditLogApi = {
     before: string;
     after: string;
     reason?: string;
+    /** The POS's own id for the order this entry is about, and the exe's
+     * id once it exists - lets the exe link the entry (and earlier ones
+     * logged under a temporary number) to the real bill number. */
+    order_ref?: string;
+    order_id?: number;
   }) => apiPost<{ ok: boolean }>("/auditLog", entry),
-  getAll: (page: number, limit: number, q?: string, userId?: string) =>
-    apiGet<RawAuditLogPage>(
-      `/auditLog?page=${page}&limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ""}${userId && userId !== "all" ? `&userId=${encodeURIComponent(userId)}` : ""}`,
-    ),
+  getAll: (
+    page: number,
+    limit: number,
+    filters: { q?: string; userId?: string; action?: string; orderNo?: string } = {},
+  ) => {
+    const params = new URLSearchParams({ page: String(page), limit: String(limit) });
+    if (filters.q?.trim()) params.set("q", filters.q.trim());
+    if (filters.userId && filters.userId !== "all") params.set("userId", filters.userId);
+    if (filters.action && filters.action !== "all") params.set("action", filters.action);
+    if (filters.orderNo?.trim()) params.set("orderNo", filters.orderNo.trim());
+    return apiGet<RawAuditLogPage>(`/auditLog?${params.toString()}`);
+  },
+  getActions: () => apiGet<{ actions: string[] }>("/auditLog/actions"),
 };
 
 // Every /kitchen/* route is guarded by a *different* auth middleware
@@ -2535,6 +2601,8 @@ export type RawDueOrder = {
   id: number;
   bill_no: string;
   due: number;
+  /** The whole bill - shown beside what is still due after a part-payment. */
+  grandAmount?: number;
   createdAt: string;
   hms_user_master?: { name: string; number: string } | null;
 };
@@ -2816,6 +2884,42 @@ export const localServerApi = {
 // services/pdfGenerator.js, a verbatim port of the real backend's own
 // templates) and sends it straight to whichever printer(s) Printer
 // Settings has configured, no browser print dialog involved.
+export type BillExtras = {
+  firstPrint: true;
+  /** Items the kitchen has not received yet - "Bill with KOT" prints only these. */
+  kotItems: {
+    item_name: string;
+    qty: number;
+    comment: string;
+    menu_categ_id: number;
+    variantData: { variants_name: string } | null;
+    addons: unknown[];
+  }[];
+  kotNumber: number;
+};
+
+// Token display + manual reset (billerpe-local-exe/controller/tokenBoard.js).
+export type TokenBoardEntry = {
+  orderId: number;
+  token: number;
+  orderType: "dinin" | "pickup";
+  table: string | null;
+  readyAt: string | null;
+  createdAt: string;
+};
+export const tokenApi = {
+  getBoard: () =>
+    apiGet<{
+      hotelName: string;
+      tokensOn: boolean;
+      preparing: TokenBoardEntry[];
+      ready: TokenBoardEntry[];
+    }>("/tokenBoard"),
+  setStatus: (orderId: number, status: "ready" | "preparing" | "collected") =>
+    apiPost<{ message?: string }>("/tokenBoard/status", { order_id: orderId, status }),
+  reset: () => apiPost<{ message?: string }>("/token/reset", {}),
+};
+
 export const localPrintApi = {
   printKot: (params: {
     order_type: "dinin" | "pickup";
@@ -2861,7 +2965,17 @@ export const localPrintApi = {
     roundOff?: number;
     headerText: string[];
     footerText: string[];
-  }) => apiPost<{ orderId: string; printer: string }>("/printInvoiceDirect", params),
+    /** Only on the bill's FIRST print (Generate Bill) - the exe then adds
+     * the token slip / KOT when the hotel's settings ask for them. A
+     * reprint leaves this out and prints the bill alone. */
+    billExtras?: BillExtras;
+  }) =>
+    apiPost<{
+      orderId: string;
+      printer: string;
+      token?: number;
+      extras?: { what: "token" | "kot"; ok: boolean; error?: string }[];
+    }>("/printInvoiceDirect", params),
   testPrint: (params: { printerName: string; printerSize?: string }) =>
     apiPost<{ printer: string }>("/testPrintDirect", params),
 };

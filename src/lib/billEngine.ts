@@ -63,6 +63,9 @@ export type EngineInput = {
   tableCategId?: string | number | null | undefined;
   discount: EngineDiscount;
   packagingOverride?: number | null | undefined;
+  /** The cashier's manual service charge - used when the service charge is
+   * not automatic for this order type (see serviceIsAutomatic). */
+  serviceOverride?: number | null | undefined;
   config: EngineConfig;
 };
 export type EngineTaxLine = {
@@ -118,6 +121,16 @@ export function asArray(v: unknown): string[] {
   return Array.isArray(value) ? (value as unknown[]).map((x) => String(x)) : [];
 }
 
+// The service charge is AUTOMATIC only for the order types ticked in its
+// setting - an EMPTY list means "none: the cashier adds it by hand", as the
+// Settings screen says and the old BillerPe did. It used orderTypeAllowed's
+// "empty = all", so switching automatic off changed nothing (owner report,
+// 2026-09-22). Same rule as billerpe-local-exe/helpers/billEngine.js.
+export function serviceIsAutomatic(rule: EngineChargeRule | null | undefined, orderType: string): boolean {
+  if (!rule || !rule.active) return false;
+  return asArray(rule.orderTypes).map(normaliseOrderType).filter(Boolean).includes(normaliseOrderType(orderType));
+}
+
 function orderTypeAllowed(list: unknown, orderType: string): boolean {
   const clean = asArray(list).map(normaliseOrderType).filter(Boolean);
   if (!clean.length) return true;
@@ -166,7 +179,17 @@ export function computeBill(input: EngineInput): EngineTotals {
   }
   discount = Math.min(subtotal, Math.max(0, discount));
 
-  const service = evaluateChargeRule(config.serviceCharge, { subtotal, discount, orderType });
+  // Automatic for this order type -> the rule; otherwise what the cashier
+  // entered on the order (nothing entered = no service charge).
+  const manualService = Number(input.serviceOverride);
+  const service = serviceIsAutomatic(config.serviceCharge, orderType)
+    ? evaluateChargeRule(config.serviceCharge, { subtotal, discount, orderType })
+    : config.serviceCharge?.active &&
+        input.serviceOverride != null &&
+        Number.isFinite(manualService) &&
+        subtotal > 0
+      ? r2(Math.max(0, manualService))
+      : 0;
 
   let packaging: number;
   if (

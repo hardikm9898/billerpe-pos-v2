@@ -26,6 +26,7 @@ import {
   invoiceFormateApi,
   type RawInvoiceFormate,
   kotFormatApi,
+  type BillExtras,
   type RawKotFormate,
   billChargeApi,
   type RawBillChargeRule,
@@ -101,6 +102,7 @@ import {
   setStoredAuthToken,
   setPermissionChecker,
 } from "@/lib/api";
+import { discountProblem } from "@/lib/formCheck";
 import type { KdsTicketPayload } from "@/lib/kdsSocket";
 import type {
   AddonGroup,
@@ -109,6 +111,7 @@ import type {
   DueBill,
   RefundDue,
   InvoiceFormat,
+  TokenScope,
   InvoiceLine,
   InvoiceLineContent,
   KotFormat,
@@ -187,6 +190,13 @@ const uid = (p: string) => `${p}-${++seq}`;
 // kotRounds` check elsewhere in this file keeps working unmodified, since
 // Infinity is always ">" any real round count and never "<=" one.
 const UNSENT_ROUND = Infinity;
+
+// The round the exe files a bill's never-sent lines under when the bill is
+// saved: one after the highest real KOT round (billerpe-local-exe
+// controller/order.js#buildOrderDetailsRows - same rule, both sides).
+function billedWithoutKotRound(lines: OrderLine[]): number {
+  return Math.max(0, ...lines.map((l) => (Number.isFinite(l.kotRound) ? l.kotRound : 0))) + 1;
+}
 
 /** The two billing screens each carry their own permission grant - callers
  * that mutate a cart line pass which one they're on so the right module's
@@ -349,8 +359,25 @@ const EMPTY_INVOICE_FORMAT: State["invoiceFormat"] = {
     { id: "h5", content: "fssai", fontSize: 10 },
   ],
   footer: [{ id: "f1", content: "upi-qr", fontSize: 12 }],
-  unconfirmed: { isTokenOn: false, billWithKot: false, billWithToken: false, saveBehaviour: false },
+  tokens: { tokenFor: "off", billWithKot: "off", billWithToken: "off" },
+  saveBehave: "save",
 };
+
+// Hotel.is_token_on / bill_with_kot / bill_with_token codes (old BillerPe's).
+const TOKEN_SCOPE_FROM_CODE: Record<string, TokenScope> = {
+  "0": "pickup",
+  "1": "dinein",
+  "2": "both",
+  "3": "off",
+};
+const TOKEN_SCOPE_TO_CODE: Record<TokenScope, "0" | "1" | "2" | "3"> = {
+  pickup: "0",
+  dinein: "1",
+  both: "2",
+  off: "3",
+};
+const tokenScopeFromCode = (code: unknown): TokenScope =>
+  TOKEN_SCOPE_FROM_CODE[String(code ?? "3")] ?? "off";
 
 const DEFAULT_KOT_FORMAT: State["kotFormat"] = {
   header: [
@@ -536,6 +563,13 @@ function toEngineTax(rule: TaxRule, menuItems: BillSettings["menuItems"]): Engin
   };
 }
 
+/** True when the service charge is ON but NOT automatic for this order's
+ * type - the cashier then enters it by hand on the order (owner rule,
+ * 2026-09-22; same test as billEngine.ts#serviceIsAutomatic). */
+export function serviceIsManual(rule: ServiceChargeRule, orderType: Order["type"]): boolean {
+  return rule.active && !rule.autoApply.includes(orderType === "Dine In" ? "Dine-in" : "Pickup");
+}
+
 /** Single bill-calculation engine - a thin adapter over the shared
  * computeBill() (src/lib/billEngine.ts), which is a literal port of the
  * exe's helpers/billEngine.js. The exe persists the authoritative figures
@@ -577,6 +611,7 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
     tableCategId,
     discount,
     packagingOverride: order.packagingCharge,
+    serviceOverride: order.serviceCharge,
     config: {
       gstOn: settings.invoiceFormat.gstCalculation,
       taxTypes: settings.taxRules.map((r) => toEngineTax(r, settings.menuItems)),
@@ -607,6 +642,7 @@ function discountPayload(o: Order, totals: BillTotals) {
     discount_type: (o.discount?.type === "percent" ? "pr" : "fix") as "fix" | "pr",
     discount_value: o.discount?.type === "percent" ? (o.discount.value ?? 0) : totals.discount,
     ...(o.packagingCharge !== undefined ? { packaging_override: o.packagingCharge } : {}),
+    ...(o.serviceCharge !== undefined ? { service_charge_override: o.serviceCharge } : {}),
   };
 }
 
@@ -769,20 +805,27 @@ interface Ctx extends State {
   removeOrder: (id: string) => void;
   removeOrders: (ids: string[]) => void;
   remakeOrderSequence: () => void;
-  generateKot: (orderId: string, options?: { print?: boolean; lineIds?: string[] }) => void;
+  /** The exe prints the fired round itself whenever a KOT printer is
+   * configured (billerpe-local-exe/services/kotAutoPrint.js). `onlyKot`
+   * records the round without printing it or sending it to any KDS. */
+  generateKot: (orderId: string, options?: { lineIds?: string[]; onlyKot?: boolean }) => void;
   /** `type`/`value` are the ORIGINAL input (e.g. "percent", 10) - stored so
    * orderTotals can keep recomputing the discount amount as the order's
    * subtotal changes, rather than freezing it at today's subtotal. Pass
    * `type: "flat"` (value === the flat amount) for a flat discount or a
-   * promo code that isn't percent-based. */
-  applyDiscount: (orderId: string, label: string, type: "percent" | "flat", value: number) => void;
+   * promo code that isn't percent-based. Returns false (and says why) when
+   * the discount is refused: more than 100%, or a flat amount above the
+   * bill - owner rule, 2026-09-22. */
+  applyDiscount: (orderId: string, label: string, type: "percent" | "flat", value: number) => boolean;
   setCustomer: (
     orderId: string,
     name: string,
     phone: string,
     extra?: { address?: string; gstin?: string },
   ) => void;
-  setCharges: (orderId: string, packaging: number) => void;
+  /** `service` is the manual service charge (₹) - only meaningful when the
+   * service charge is not automatic for the order's type (serviceIsManual). */
+  setCharges: (orderId: string, packaging: number | undefined, service?: number) => void;
   /** Resolves { ok: true, backendId } on success (ok:false on any failure/
    * guard) - the backendId is handed back explicitly rather than read off
    * `s.orders` afterward, since `s` is this render's stale snapshot and
@@ -791,7 +834,9 @@ interface Ctx extends State {
    * first without a second, separately-stale order lookup. */
   generateBill: (
     orderId: string,
-    options?: { print?: boolean },
+    /** `save`: make sure the bill exists on the exe even for a pickup
+     * (which otherwise stays local until settled) - the e-bill needs it. */
+    options?: { print?: boolean; save?: boolean },
   ) => Promise<{ ok: boolean; backendId?: number }>;
   /** tip is Dine In only (settleBills' own contract - Pickup settles
    * through adminOrder instead, a different call this doesn't carry tip
@@ -1096,6 +1141,7 @@ function mapRawTable(t: RawTable): RestaurantTable {
     reservedGuestName: t.reserved_name || undefined,
     reservedGuestPhone: t.reserved_number || undefined,
     qrVersion: t.qr_version,
+    cloudId: t.cloud_table_id ?? undefined,
   };
 }
 
@@ -1248,6 +1294,10 @@ function mapRawInvoiceLines(raw: RawInvoiceFormate, slot: "header" | "footer"): 
     );
   }
   return lines;
+}
+
+function withMarketingText(lines: InvoiceLine[], text: string | null | undefined): InvoiceLine[] {
+  return lines.map((l) => (l.content === "marketing" ? { ...l, text: text ?? "" } : l));
 }
 
 // The inverse of mapRawInvoiceLines - always emits all 10 slots per side
@@ -1551,6 +1601,7 @@ function mapRawDueOrder(o: RawDueOrder): DueBill {
     date: `${dd}/${mm}/${created.getFullYear()}`,
     daysAgo,
     amount: o.due,
+    ...(o.grandAmount != null ? { billTotal: Number(o.grandAmount) } : {}),
     status: "Due",
   };
 }
@@ -2040,6 +2091,44 @@ function mapRawDiscount(detail: RawOrderDetail): Order["discount"] {
 // order (and its table card total) immediately - the old code refused to
 // touch an order it already had, or skipped entirely while a draft round
 // existed, so the POS lagged until the cashier reopened the order.
+// One real order must never be two entries in the order list. Enforced on
+// every state change (see `patch`) because the duplicate comes from timing,
+// not from any single action: Hold / KOT / Save create the order on the exe,
+// the exe broadcasts the change at once, this same screen reloads the live
+// orders in response - and when that reload lands BEFORE the action's own
+// response has told this screen the new order's id, the reload adds the
+// order as a second entry ("o-live-<id>"), which the action then gives the
+// same id. The Order list showed it twice until a page refresh (owner
+// report, 2026-09-22). The entry this screen created is the one staff are
+// working in, so it is kept; the reloaded copy is dropped, and anything
+// pointing at it (a table, its KOTs) is pointed at the kept one.
+function oneOrderPerBackendId(state: State): State {
+  const seen = new Map<number, Order>();
+  let dropped: Map<string, string> | null = null;
+  for (const o of state.orders) {
+    if (o.backendId === undefined) continue;
+    const other = seen.get(o.backendId);
+    if (!other) {
+      seen.set(o.backendId, o);
+      continue;
+    }
+    const otherIsReloadCopy = other.id.startsWith("o-live-");
+    const keep = otherIsReloadCopy && !o.id.startsWith("o-live-") ? o : other;
+    const drop = keep === o ? other : o;
+    seen.set(o.backendId, keep);
+    (dropped ??= new Map()).set(drop.id, keep.id);
+  }
+  if (!dropped) return state;
+  const renamed = dropped;
+  const to = (id: string | undefined) => (id && renamed.has(id) ? renamed.get(id) : id);
+  return {
+    ...state,
+    orders: state.orders.filter((o) => !renamed.has(o.id)),
+    tables: state.tables.map((t) => (t.orderId && renamed.has(t.orderId) ? { ...t, orderId: to(t.orderId) } : t)),
+    kots: state.kots.map((k) => (renamed.has(k.orderId) ? { ...k, orderId: to(k.orderId)! } : k)),
+  };
+}
+
 function mergeServerOrder(local: Order, fresh: Order): Order {
   if (local.status === "Settled" || local.status === "Cancelled" || local.editingSettledOrderId) {
     return local;
@@ -2074,6 +2163,7 @@ function mergeServerOrder(local: Order, fresh: Order): Order {
     // wiped by a refresh while the draft is still open.
     discount: hasDraft ? local.discount : (fresh.discount ?? local.discount),
     packagingCharge: hasDraft ? local.packagingCharge : fresh.packagingCharge,
+    serviceCharge: hasDraft ? local.serviceCharge : (fresh.serviceCharge ?? local.serviceCharge),
     itemised: fresh.itemised || hasDraft,
     fallbackTotal: fresh.fallbackTotal,
     tip: fresh.tip,
@@ -2133,6 +2223,7 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
     customerGstin: detail.hms_user_master?.gstin || undefined,
     discount: mapRawDiscount(detail),
     ...(detail.packaging_override != null ? { packagingCharge: detail.packaging_override } : {}),
+    ...(detail.service_override != null ? { serviceCharge: detail.service_override } : {}),
     businessDate,
     createdAt: formatOrderTimestamp(detail.createdAt, businessDate),
     createdBy: staffName,
@@ -2467,7 +2558,7 @@ function loadInitialState(): State {
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [s, set] = useState<State>(loadInitialState);
 
-  const patch = useCallback((fn: (p: State) => State) => set(fn), []);
+  const patch = useCallback((fn: (p: State) => State) => set((prev) => oneOrderPerBackendId(fn(prev))), []);
 
   // Chained table transfers (Table 2 -> Garden 1 -> Garden 3, back-to-back)
   // each fire their own loadTablesFromServer() call. Those calls race - the
@@ -2496,8 +2587,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [s.tables, s.tableCategories],
   );
 
+  // `order`: the order an entry is about - its POS id and, once it has
+  // one, its exe id. Lets the Audit Log find every entry for a bill number,
+  // including ones logged under the temporary number an order has before
+  // its first KOT/bill (billerpe-local-exe/controller/auditLog.js).
   const log = useCallback(
-    (action: string, entity: string, before: string, after: string, reason?: string) => {
+    (
+      action: string,
+      entity: string,
+      before: string,
+      after: string,
+      reason?: string,
+      order?: { id: string; backendId?: number },
+    ) => {
       const userId = s.currentUserId;
       const userName = currentUser.name;
       const entry: AuditLog = {
@@ -2519,7 +2621,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // none of which should ever be blocked or interrupted by a logging
       // write failing in the background.
       void auditLogApi
-        .create({ user_id: userId, user_name: userName, action, entity, before, after, reason })
+        .create({
+          user_id: userId,
+          user_name: userName,
+          action,
+          entity,
+          before,
+          after,
+          reason,
+          ...(order ? { order_ref: order.id } : {}),
+          ...(order?.backendId ? { order_id: order.backendId } : {}),
+        })
         .catch(() => {});
     },
     [currentUser, patch, s.currentUserId],
@@ -2685,6 +2797,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         addons: buildAddonsPayload(l.addons),
         comment: l.note ?? "",
         menu_categ_id: mi ? Number(mi.categoryId) : 0,
+        variantData: variantPayload(l, mi),
         // finalizeExistingOrder (billerpe-local-exe/controller/order.js)
         // destroys and rebuilds every OrderDetails row - without the
         // round, every KOT round collapsed into one once billed.
@@ -2715,6 +2828,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // department-grouped shape the backend actually reads/writes (see
   // parseOrderAddons's comment - same shape, reverse direction) for every
   // KOT/bill payload that carries addons.
+  // The line's chosen variant, as the exe stores it (variant_id =
+  // Variants master id, variant_name). Every save payload carries it: it
+  // used to be sent only when PRINTING, so the variant was never stored -
+  // the KOT the exe prints, the e-bill (uat-backend-v2 getBillViewData)
+  // and an order re-opened from the exe all showed the dish without it.
+  const variantPayload = (l: OrderLine, mi: MenuItem | undefined) => {
+    if (!l.variant) return null;
+    const v = mi?.variants?.find((x) => x.name === l.variant);
+    return { ...(v ? { id: Number(v.id) } : {}), variants_name: l.variant };
+  };
+
   const buildAddonsPayload = (addons?: OrderLine["addons"]) => {
     if (!addons?.length) return [];
     const byGroup = new Map<
@@ -2764,8 +2888,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       amount: number;
     },
   ): Promise<string[]> => {
+    // Same rules as the e-bill (uat-backend-v2 kto.js#
+    // getHearderAndFooterDataBillView), so paper and e-bill look the same:
+    // each line's configured font size, identical labels, and nothing
+    // printed for a detail that has no value.
     const out: string[] = [];
     for (const l of lines) {
+      const size = l.fontSize ? ` style="font-size:${l.fontSize}px"` : "";
       switch (l.content) {
         case "logo":
           if (ctx.logoUrl) {
@@ -2790,19 +2919,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
           break;
         case "outlet-name":
-          out.push(`<p class="hotel-name">${ctx.hotelName}</p>`);
+          out.push(`<p class="hotel-name"${size}>${ctx.hotelName}</p>`);
           break;
         case "address":
-          if (ctx.address) out.push(`<p class="hotel-address">${ctx.address}</p>`);
+          if (ctx.address) out.push(`<p class="hotel-address"${size}>${ctx.address}</p>`);
           break;
         case "gstin":
-          if (ctx.gstNo) out.push(`<p>GSTIN: ${ctx.gstNo}</p>`);
+          if (ctx.gstNo) out.push(`<p${size}>GSTIN: ${ctx.gstNo}</p>`);
           break;
         case "fssai":
-          if (ctx.fssaiNo) out.push(`<p>FSSAI: ${ctx.fssaiNo}</p>`);
+          if (ctx.fssaiNo) out.push(`<p${size}>FSSAI: ${ctx.fssaiNo}</p>`);
           break;
         default:
-          if (l.text) out.push(`<p>${l.text}</p>`);
+          if (l.text?.trim()) out.push(`<p${size}>${l.text}</p>`);
           break;
       }
     }
@@ -2813,7 +2942,94 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // as an explicit argument rather than re-deriving it from `s`, since `s`
   // is this render's immutable snapshot and won't reflect a patch() that
   // just happened moments earlier in the same async flow.
-  const doPrintBill = async (o: Order, backendId: number): Promise<boolean> => {
+  // Puts a pickup order's not-yet-sent lines on the exe WITHOUT sending
+  // them to the kitchen: an "Only KOT" round (billerpe-local-exe/
+  // controller/kot.js#kotOrder - on the order, not printed, not on any
+  // KDS). Used when a pickup bill is generated before any KOT, so the order
+  // exists on the exe (and gets its token) and can be printed. Returns the
+  // order as it now stands.
+  const recordPickupLinesWithoutKitchen = async (
+    o: Order,
+    lines: OrderLine[],
+  ): Promise<{ backendId: number; order: Order }> => {
+    if (!lines.length) {
+      if (o.backendId) return { backendId: o.backendId, order: o };
+      throw new Error("Add items before generating the bill");
+    }
+    const billSettings: BillSettings = {
+      serviceCharge: s.serviceCharge,
+      deliveryChargeRule: s.deliveryChargeRule,
+      packagingChargeRule: s.packagingChargeRule,
+      taxRules: s.taxRules,
+      invoiceFormat: s.invoiceFormat,
+      tables: s.tables,
+      menuItems: s.menuItems,
+    };
+    const totals = orderTotals(o, billSettings);
+    const res = await orderApi.kotOrder({
+      order_type: "pickup",
+      ...(o.backendId ? { order_id: o.backendId } : {}),
+      only_kot: true,
+      userName: o.customerName,
+      mobile: o.customerPhone,
+      gstin: o.customerGstin,
+      address: o.customerAddress,
+      cart: {
+        gst: totals.tax,
+        totalDiscount: totals.discount,
+        grandAmount: totals.grand,
+        myAmount: totals.subtotal,
+        service_charger: totals.service,
+        delivery_charge: totals.delivery,
+        packaging_charge: totals.packaging,
+        ...discountPayload(o, totals),
+        taxes: buildCartTaxes(totals, s.taxRules),
+        items: [
+          {
+            status: "H",
+            menuItems: lines.map((l) => {
+              const mi = s.menuItems.find((m) => m.id === l.itemId);
+              return {
+                id: Number(l.itemId),
+                qty: l.qty,
+                price: l.price,
+                discount: 0,
+                addons: buildAddonsPayload(l.addons),
+                comment: l.note ?? "",
+                menu_categ_id: mi ? Number(mi.categoryId) : 0,
+                variantData: variantPayload(l, mi),
+              };
+            }),
+          },
+        ],
+      },
+    });
+    const backendId = res.kotInfo.order_id;
+    const billNo = res.kotInfo.bill_no;
+    const round = o.kotRounds + 1;
+    const order: Order = {
+      ...o,
+      backendId,
+      kotRounds: round,
+      ...(billNo ? { billNo, orderNo: parseBillNoAsOrderNo(billNo, backendId) } : {}),
+      ...(res.kotInfo.token ? { token: res.kotInfo.token } : {}),
+      lines: o.lines.map((l) => (lines.some((pl) => pl.id === l.id) ? { ...l, kotRound: round } : l)),
+    };
+    patch((p) => ({
+      ...p,
+      orders: p.orders.map((x) => (x.id === o.id ? { ...order, status: x.status } : x)),
+    }));
+    return { backendId, order };
+  };
+
+  // `extras`: only on the bill's first print (Generate Bill) - see
+  // BillExtras. `pdfOnly`: "Save" with Save behaviour = PDF - skip the
+  // printer and open the bill as a PDF straight away.
+  const doPrintBill = async (
+    o: Order,
+    backendId: number,
+    opts: { extras?: BillExtras; pdfOnly?: boolean } = {},
+  ): Promise<boolean> => {
     try {
       const hotel = await hotelApi.getSettings();
       const t = o.backendTotals
@@ -2893,7 +3109,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // the old "open a PDF tab" flow only if that fails (e.g. no invoice
       // printer configured yet, or the EXE can't be reached).
       try {
-        const { printer } = await localPrintApi.printInvoice({
+        if (opts.pdfOnly) throw new Error("pdf requested");
+        const { printer, extras } = await localPrintApi.printInvoice({
           orderId: String(backendId),
           // The actual bill number to print - see Order.billNo's own
           // comment. orderId above is the internal order id, kept only for
@@ -2920,8 +3137,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           roundOff: t.roundOff ?? 0,
           headerText,
           footerText,
+          ...(opts.extras ? { billExtras: opts.extras } : {}),
         });
         toast.success(`Bill sent to ${printer}`);
+        const failedExtras = (extras ?? []).filter((x) => !x.ok);
+        if (failedExtras.length) {
+          toast.error(
+            `The ${failedExtras.map((x) => (x.what === "kot" ? "KOT" : "token slip")).join(" and ")} did not print`,
+            { description: "The bill printed. Check the printer and reprint from the order." },
+          );
+        }
         return true;
       } catch {
         // Fall through to the PDF-preview path below.
@@ -2955,7 +3180,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
       const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
       window.open(URL.createObjectURL(blob), "_blank");
-      toast.success("Bill ready to print (no local printer configured - opened as a PDF instead)");
+      toast.success(
+        opts.pdfOnly
+          ? "Bill saved - opened as a PDF"
+          : "Bill ready to print (no local printer configured - opened as a PDF instead)",
+      );
       return true;
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
@@ -3480,7 +3709,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               )
             : p.tables,
       }));
-      log("Order Type Changed", `Order #${o.orderNo}`, o.type, type);
+      log("Order Type Changed", `Order #${o.orderNo}`, o.type, type, undefined, { id: o.id, backendId: o.backendId });
       toast.success(`Order #${o.orderNo} switched to ${type}`);
     },
 
@@ -3541,6 +3770,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `Order #${order.orderNo}`,
           "—",
           `${input.qty ?? 1}× ${mi.name}${input.variant ? ` (${input.variant})` : ""}`,
+          undefined,
+          { id: order.id, backendId: order.backendId },
         );
       }
     },
@@ -3580,6 +3811,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `Order #${order.orderNo}`,
           `${line.name} ×${line.qty}`,
           newQty > 0 ? `×${newQty}` : "Removed",
+          undefined,
+          { id: order.id, backendId: order.backendId },
         );
         // Nothing left on this table/pickup order - don't leave it sitting
         // Hold/Running with zero items blocking the table for everyone else.
@@ -3620,6 +3853,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `Order #${order.orderNo}`,
           `${line.name} ×${line.qty}`,
           newQty > 0 ? `×${newQty}` : "Removed",
+          undefined,
+          { id: order.id, backendId: order.backendId },
         );
         // Nothing left on this table/pickup order - don't leave it sitting
         // Hold/Running with zero items blocking the table for everyone else.
@@ -3646,7 +3881,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       if (order && line) {
-        log("Price Changed", `Order #${order.orderNo}`, `${line.name} ₹${line.price}`, `₹${next}`);
+        log("Price Changed", `Order #${order.orderNo}`, `${line.name} ₹${line.price}`, `₹${next}`, undefined, { id: order.id, backendId: order.backendId });
       }
     },
 
@@ -3672,6 +3907,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `Order #${order.orderNo}`,
           line.addons?.map((a) => a.name).join(", ") || "—",
           addons.map((a) => a.name).join(", ") || "—",
+          undefined,
+          { id: order.id, backendId: order.backendId },
         );
       }
     },
@@ -3688,7 +3925,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       if (order && line) {
-        log("Note Added", `Order #${order.orderNo}`, line.name, note || "—");
+        log("Note Added", `Order #${order.orderNo}`, line.name, note || "—", undefined, { id: order.id, backendId: order.backendId });
       }
     },
 
@@ -3721,6 +3958,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `${line.name} ×${line.qty}`,
           "Removed",
           reason,
+          { id: order.id, backendId: order.backendId },
         );
         // Nothing left on this table/pickup order - don't leave it sitting
         // Hold/Running with zero items blocking the table for everyone else.
@@ -3775,6 +4013,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           addons: buildAddonsPayload(l.addons),
           comment: l.note ?? "",
           menu_categ_id: mi ? Number(mi.categoryId) : 0,
+          variantData: variantPayload(l, mi),
         };
       });
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
@@ -3821,8 +4060,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ),
             tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Hold" } : t)),
           }));
-          log("Order Hold", `Order #${backendId}`, o.status ?? "", "Hold");
-          toast.success(`Order #${backendId} on hold`, { description: o.tableLabel });
+          log("Order Hold", `Order #${orderNo}`, o.status ?? "", "Hold", undefined, {
+            id: o.id,
+            backendId,
+          });
+          toast.success(`Order #${orderNo} on hold`, { description: o.tableLabel });
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not hold order");
         }
@@ -3837,7 +4079,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Running" } : x)),
         tables: p.tables.map((t) => (t.id === o?.tableId ? { ...t, status: "Running" } : t)),
       }));
-      log("Order Saved", `Order #${o?.orderNo}`, o?.status ?? "", "Running");
+      log("Order Saved", `Order #${o?.orderNo}`, o?.status ?? "", "Running", undefined, o ? { id: o.id, backendId: o.backendId } : undefined);
       toast.success(`Order #${o?.orderNo} saved`, { description: o?.tableLabel });
     },
 
@@ -3885,7 +4127,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : k,
         ),
       }));
-      log("Order Cancelled", `Order #${o?.orderNo}`, o?.status ?? "", "Cancelled", reason);
+      log(
+        "Order Cancelled",
+        `Order #${o?.orderNo}`,
+        o?.status ?? "",
+        "Cancelled",
+        reason,
+        o ? { id: o.id, backendId: o.backendId } : undefined,
+      );
       toast.success(`Order #${o?.orderNo} cancelled`);
       // The backend has no concept of "cancel" distinct from delete (see
       // orderApi.remove's comment) - this soft-deletes the order for
@@ -4000,7 +4249,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return;
       const round = o.kotRounds + 1;
-      const shouldPrint = options?.print ?? false;
       const allUnsent = o.lines.filter((l) => l.kotRound === UNSENT_ROUND);
       // A lineIds subset sends just those items this round, leaving
       // whatever's left unchecked still unsent (UNSENT_ROUND) for a later
@@ -4034,6 +4282,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           addons: buildAddonsPayload(l.addons),
           comment: l.note ?? "",
           menu_categ_id: mi ? Number(mi.categoryId) : 0,
+          variantData: variantPayload(l, mi),
         };
       });
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
@@ -4043,6 +4292,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const res = await orderApi.kotOrder({
             order_type: o.type === "Dine In" ? "dinin" : "pickup",
             ...(o.backendId ? { order_id: o.backendId } : {}),
+            ...(options?.onlyKot ? { only_kot: true } : {}),
             ...(o.type === "Dine In" && table
               ? { table_id: Number(table.id), tableNumber: table.name }
               : {}),
@@ -4067,27 +4317,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const billNo = res.kotInfo.bill_no;
           const orderNo = billNo ? parseBillNoAsOrderNo(billNo, backendId) : backendId;
 
+          // Stations come from the exe, which routes each line to a KDS
+          // kitchen by that kitchen's order-type / table / menu-category
+          // settings - the same answer every KDS screen gets, so this tab's
+          // copy of the round never disagrees with (or duplicates) the
+          // tickets the KDS receives live. The category-only guess is kept
+          // only for an exe too old to answer.
+          const serverStations = res.kotInfo.kdsStations ?? [];
           const byStation = new Map<string, OrderLine[]>();
           const fallbackKitchenName =
             (s.kitchens.find((k) => k.isDefault) ?? s.kitchens[0])?.name ?? "Kitchen";
-          pending.forEach((l) => {
+          pending.forEach((l, i) => {
             const mi = s.menuItems.find((m) => m.id === l.itemId);
-            const st = mi
-              ? (resolveKitchen(s.kitchens, mi.categoryId)?.name ?? fallbackKitchenName)
-              : fallbackKitchenName;
+            const st =
+              serverStations[i] ??
+              (mi
+                ? (resolveKitchen(s.kitchens, mi.categoryId)?.name ?? fallbackKitchenName)
+                : fallbackKitchenName);
             byStation.set(st, [...(byStation.get(st) ?? []), l]);
           });
           const newKots: Kot[] = [...byStation.entries()].map(([station, lines], i) => ({
             id: uid("k"),
             kotNo: Math.max(...s.kots.map((k) => k.kotNo), 300) + 1 + i,
             orderId,
-            tableLabel: o.tableLabel,
+            tableLabel: res.kotInfo.token
+              ? `${o.tableLabel} · Token ${res.kotInfo.token}`
+              : o.tableLabel,
             round,
             station,
             status: "Pending",
             createdAt: nowStamp(),
             backendOrderId: backendId,
             kotNumber: round,
+            ...(options?.onlyKot ? { kdsHidden: true } : {}),
             items: lines.map((l) => ({
               name: `${l.name}${l.variant ? ` (${l.variant})` : ""}`,
               qty: l.qty,
@@ -4104,6 +4366,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                     kotRounds: round,
                     status: "Running",
                     backendId,
+                    ...(res.kotInfo.token ? { token: res.kotInfo.token } : {}),
                     // startOrder's materialization (ensureRealOrder) gave
                     // this a session-local placeholder number (101, 102,
                     // ...) since no real order existed yet to derive one
@@ -4150,26 +4413,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }));
           log(
             "KOT Sent",
-            `Order #${o.orderNo}`,
+            `Order #${orderNo}`,
             `Round ${round - 1}`,
             `Round ${round} · ${pending.length} item(s)`,
+            undefined,
+            { id: orderId, backendId },
           );
-          // Firing a KOT and physically printing it are separate backend
-          // calls (kotOrder never prints anything itself - it only returns
-          // print-job data the caller has to act on, and doPrintKot/
-          // localPrintApi.printKot is the only code path that actually
-          // does). This used to unconditionally claim "N ticket(s)
-          // printed" regardless of whether printing was even requested,
-          // which was simply false - "Only KOT" callers got a lying toast
-          // and nothing was ever sent to a printer.
-          if (shouldPrint) {
-            toast.success(`KOT round ${round} sent`, {
-              description: `Sending ${newKots.length} station ticket(s) to print…`,
-            });
-            await doPrintKot(o, round);
-          } else {
-            toast.success(`KOT round ${round} sent to kitchen`);
-          }
+          // Printing is the exe's job now: it prints every fired round
+          // itself whenever a KOT printer is configured, whichever app fired
+          // it (billerpe-local-exe/services/kotAutoPrint.js), and reports a
+          // failed print to every screen (AppShell's kotPrintStatus toast).
+          // Printing here as well would put two tickets in the kitchen.
+          toast.success(
+            options?.onlyKot
+              ? `KOT round ${round} saved (not printed)`
+              : `KOT round ${round} sent to kitchen`,
+          );
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not send KOT");
         }
@@ -4180,13 +4439,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     applyDiscount: (orderId, label, type, value) => {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
-      if (!o) return;
+      if (!o) return false;
       // Same subtotal formula as orderTotals - kept in sync there for the
       // toast/log's own preview amount, but the stored type/value (not this
       // resolved amount) is what actually drives future recalculation.
       const subtotal = o.itemised
         ? o.lines.reduce((sum, l) => sum + lineTotal(l), 0)
         : (o.fallbackTotal ?? 0);
+      // Checked HERE, for every way a discount arrives - the typed-in
+      // dialogs already checked, but a promo code went straight through, so
+      // a Rs 500 flat promo on a Rs 300 bill was accepted (owner report,
+      // 2026-09-22). Removing a discount (value 0) is always allowed.
+      if (value) {
+        const problem = discountProblem(type, value, subtotal);
+        if (problem) {
+          toast.error("Discount not applied", { description: problem });
+          return false;
+        }
+      }
       const amount =
         type === "percent" ? Math.round(((subtotal * value) / 100) * 100) / 100 : value;
       patch((p) => ({
@@ -4197,8 +4467,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : x,
         ),
       }));
-      log("Discount Applied", `Order #${o.orderNo}`, "₹0", `₹${amount} (${label})`);
+      log("Discount Applied", `Order #${o.orderNo}`, "₹0", `₹${amount} (${label})`, undefined, { id: o.id, backendId: o.backendId });
       toast.success(value ? `Discount applied · ₹${amount}` : "Discount removed");
+      return true;
     },
 
     setCustomer: (orderId, name, phone, extra) => {
@@ -4246,19 +4517,39 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 ...p.customers,
               ],
       }));
-      log("Customer Attached", `Order #${o?.orderNo}`, "—", `${name} · ${phone}`);
+      log("Customer Attached", `Order #${o?.orderNo}`, "—", `${name} · ${phone}`, undefined, o ? { id: o.id, backendId: o.backendId } : undefined);
       toast.success("Customer details saved");
     },
 
-    setCharges: (orderId, packaging) => {
+    setCharges: (orderId, packaging, service) => {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
       patch((p) => ({
         ...p,
-        orders: p.orders.map((o) => (o.id === orderId ? { ...o, packagingCharge: packaging } : o)),
+        orders: p.orders.map((o) =>
+          o.id === orderId
+            ? {
+                ...o,
+                ...(packaging !== undefined ? { packagingCharge: packaging } : {}),
+                ...(service !== undefined ? { serviceCharge: service } : {}),
+              }
+            : o,
+        ),
       }));
-      log("Charges Updated", `Order #${o?.orderNo}`, "—", `Packaging ₹${packaging}`);
+      log(
+        "Charges Updated",
+        `Order #${o?.orderNo}`,
+        "—",
+        [
+          packaging !== undefined ? `Packaging ₹${packaging}` : null,
+          service !== undefined ? `Service charge ₹${service}` : null,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+        undefined,
+        o ? { id: o.id, backendId: o.backendId } : undefined,
+      );
       toast.success("Charges updated");
     },
 
@@ -4267,27 +4558,57 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const o = s.orders.find((x) => x.id === orderId);
       if (!o) return { ok: false };
 
+      // "Bill with KOT" prints only what the kitchen has NOT received yet
+      // (owner decision, 2026-09-22) - a table whose KOTs already went
+      // prints no extra ticket, so nothing is cooked twice. The exe decides
+      // from the hotel's settings whether to print it at all.
+      const unsentLines = o.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+      const billExtras: BillExtras = {
+        firstPrint: true,
+        kotItems: unsentLines.map((l) => {
+          const mi = s.menuItems.find((m) => m.id === l.itemId);
+          return {
+            item_name: l.name,
+            qty: l.qty,
+            comment: l.note ?? "",
+            menu_categ_id: mi ? Number(mi.categoryId) : 0,
+            variantData: l.variant ? { variants_name: l.variant } : null,
+            addons: buildAddonsPayload(l.addons),
+          };
+        }),
+        kotNumber: o.kotRounds + 1,
+      };
+      const pdfAfterSave = !options?.print && s.invoiceFormat.saveBehave === "pdf";
+
       if (o.type !== "Dine In") {
-        // Pickup has no backend-visible "bill generated" state -
-        // AdminOrder's pickup branch requires payment info up front and
-        // finalizes + settles in one call (confirmed live, see
-        // settleOrder and adminOrder's comment in lib/api.ts), so this
-        // step stays purely local until the real settle call - no
-        // backendId needed either way, so nothing to gate on here.
+        // Pickup has no backend "bill generated" state - it is paid through
+        // AdminOrder at settle. But printing (or a PDF) needs the order on
+        // the exe, and used to fail with "Send a KOT first" - so a counter
+        // order could not be billed until it had gone to the kitchen, which
+        // also made "Bill with KOT" useless for pickup. Its unsent items are
+        // now recorded on the exe as "Only KOT" (on the order, not printed,
+        // not on any KDS), which also gives the order its token.
+        let backendId = o.backendId;
+        let billed: Order = o;
+        if ((options?.print || options?.save || pdfAfterSave) && (unsentLines.length || !backendId)) {
+          try {
+            const recorded = await recordPickupLinesWithoutKitchen(o, unsentLines);
+            backendId = recorded.backendId;
+            billed = recorded.order;
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : "Could not save this order");
+            return { ok: false };
+          }
+        }
         patch((p) => ({
           ...p,
           orders: p.orders.map((x) => (x.id === orderId ? { ...x, status: "Bill Generated" } : x)),
         }));
-        log("Bill Generated", `Order #${o.orderNo}`, o.status, "Bill Generated");
-        toast.success(`Bill generated for #${o.orderNo}`);
-        if (options?.print) {
-          if (o.backendId) {
-            await doPrintBill(o, o.backendId);
-          } else {
-            toast.error("Send a KOT first to print a pickup bill without settling");
-          }
-        }
-        return { ok: true, backendId: o.backendId };
+        log("Bill Generated", `Order #${billed.orderNo}`, o.status, "Bill Generated", undefined, { id: billed.id, backendId: billed.backendId });
+        toast.success(`Bill generated for #${billed.orderNo}`);
+        if (backendId && options?.print) await doPrintBill(billed, backendId, { extras: billExtras });
+        else if (backendId && pdfAfterSave) await doPrintBill(billed, backendId, { pdfOnly: true });
+        return { ok: true, backendId };
       }
 
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
@@ -4297,6 +4618,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
 
       const { cart } = dineInBillCart(o);
+      // What this Save/Bill puts on the exe that it did not have yet.
+      const savedDraftIds = new Set(unsentLines.map((l) => l.id));
+      const billedRound = billedWithoutKotRound(o.lines);
 
       const run = async (): Promise<{ ok: boolean; backendId?: number }> => {
         try {
@@ -4331,16 +4655,44 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               // see its comment. This is the OTHER path an order first gets
               // a real backendId through (billing without ever sending a
               // KOT), so it needs the same fix.
-              x.id === orderId ? { ...x, status: "Bill Generated", backendId, orderNo, billNo } : x,
+              //
+              // The never-sent lines are now ON the exe (the bill carried
+              // them), so they stop being local drafts here too - under the
+              // round the exe filed them. Left as drafts, the next refresh
+              // kept them AND added the exe's copy: every item showed twice
+              // on reopening the table, and the next Save stored the doubled
+              // list, doubling the amount (owner report, 2026-09-22).
+              x.id === orderId
+                ? {
+                    ...x,
+                    status: "Bill Generated",
+                    backendId,
+                    orderNo,
+                    billNo,
+                    ...(savedDraftIds.size
+                      ? {
+                          lines: x.lines.map((l) =>
+                            savedDraftIds.has(l.id) ? { ...l, kotRound: billedRound } : l,
+                          ),
+                          kotRounds: Math.max(x.kotRounds, billedRound),
+                        }
+                      : {}),
+                  }
+                : x,
             ),
             tables: p.tables.map((t) =>
               t.id === o.tableId ? { ...t, status: "Bill Generated" } : t,
             ),
           }));
-          log("Bill Generated", `Order #${o.orderNo}`, o.status, "Bill Generated");
+          log("Bill Generated", `Order #${orderNo}`, o.status, "Bill Generated", undefined, {
+            id: o.id,
+            backendId,
+          });
           toast.success(`Bill generated for #${o.orderNo}`);
           if (options?.print && backendId) {
-            await doPrintBill(o, backendId);
+            await doPrintBill(o, backendId, { extras: billExtras });
+          } else if (pdfAfterSave && backendId) {
+            await doPrintBill(o, backendId, { pdfOnly: true });
           }
           return { ok: true, backendId };
         } catch (err) {
@@ -4481,6 +4833,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 addons: buildAddonsPayload(l.addons),
                 comment: l.note ?? "",
                 menu_categ_id: mi ? Number(mi.categoryId) : 0,
+                variantData: variantPayload(l, mi),
               };
             });
             await orderApi.adminOrder({
@@ -4509,7 +4862,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             });
           }
           applySettlement(backendId, orderNo, billNo);
-          log("Bill Settled", `Order #${orderNo}`, o.status, `Settled · ${mode} ₹${total}`);
+          // A bill settled partly as Due: show its real Due entry (dated by
+          // the bill), straight from the exe.
+          if (duePortion > 0) void value.loadDueBillsFromServer();
+          log("Bill Settled", `Order #${orderNo}`, o.status, `Settled · ${mode} ₹${total}`, undefined, {
+            id: o.id,
+            backendId,
+          });
           toast.success(`Order #${orderNo} settled`, {
             description:
               payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") +
@@ -4534,7 +4893,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                       status: "Bill Generated",
                       backendId: savedId,
                       lines: x.lines.map((l) =>
-                        Number.isFinite(l.kotRound) ? l : { ...l, kotRound: 1 },
+                        Number.isFinite(l.kotRound)
+                          ? l
+                          : { ...l, kotRound: billedWithoutKotRound(x.lines) },
                       ),
                       ...(saved.bill_no
                         ? {
@@ -4591,26 +4952,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 }
               : x,
           ),
-          dueBills:
-            duePortion > 0
-              ? [
-                  {
-                    id: uid("due"),
-                    billNo: `#${orderNo}`,
-                    customerName: o.customerName ?? "Guest",
-                    mobile: o.customerPhone ?? "",
-                    date: realToday(),
-                    daysAgo: 0,
-                    amount: duePortion,
-                    status: "Due" as const,
-                    // Tagged immediately so this bill is settleable from
-                    // the Due Bills screen right away, without waiting for
-                    // the next loadDueBillsFromServer to pick it up.
-                    backendOrderId: bid,
-                  },
-                  ...p.dueBills,
-                ]
-              : p.dueBills,
+          // The due entry is NOT hand-built here any more (see the
+          // loadDueBillsFromServer call after this patch): the copy made
+          // here was dated today and 0 days old, while the real entry is
+          // dated by the bill - so the Due list showed a different date
+          // until the page was refreshed (owner report, 2026-09-22).
           tables: p.tables.map((t) =>
             t.id === o.tableId
               ? {
@@ -4792,7 +5138,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         } else if (due > 0) {
           await value.loadDueBillsFromServer();
         }
-        log("Order Edited", `Order #${o.orderNo}`, "Settled", `updated after settlement`);
+        log("Order Edited", `Order #${o.orderNo}`, "Settled", `updated after settlement`, undefined, { id: o.id, backendId: o.backendId });
         toast.success(`Order #${o.orderNo} updated`, {
           description:
             due > 0
@@ -5145,19 +5491,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // same backendOrderId+kotNumber by generateKot, and this is a no-op).
     receiveKdsTicket: (payload) => {
       patch((p) => {
-        const already = p.kots.some(
-          (k) => k.backendOrderId === payload.id && k.kotNumber === payload.kotNumber,
-        );
-        if (already) return p;
-
+        // The exe sends one ticket PER KITCHEN (payload.kitchenName), so
+        // the same order+round legitimately arrives once for each kitchen
+        // it touches - dedupe per station, not per round.
         const fallbackKitchenName =
           (p.kitchens.find((k) => k.isDefault) ?? p.kitchens[0])?.name ?? "Kitchen";
         const byStation = new Map<string, KdsTicketPayload["items"]>();
         payload.items.forEach((item) => {
           const station =
-            resolveKitchen(p.kitchens, String(item.menu_categ_id))?.name ?? fallbackKitchenName;
+            payload.kitchenName ??
+            resolveKitchen(p.kitchens, String(item.menu_categ_id))?.name ??
+            fallbackKitchenName;
           byStation.set(station, [...(byStation.get(station) ?? []), item]);
         });
+        for (const station of [...byStation.keys()]) {
+          const already = p.kots.some(
+            (k) =>
+              k.backendOrderId === payload.id &&
+              k.kotNumber === payload.kotNumber &&
+              k.station === station,
+          );
+          if (already) byStation.delete(station);
+        }
+        if (!byStation.size) return p;
 
         const table =
           payload.type === "dinin"
@@ -5166,7 +5522,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const category = table
           ? p.tableCategories.find((c) => c.id === table.categoryId)
           : undefined;
-        const tableLabel = table ? `${category?.name ?? ""} · ${table.name}` : "Take Away";
+        const baseLabel = table ? `${category?.name ?? ""} · ${table.name}` : "Take Away";
+        const tableLabel = payload.token ? `${baseLabel} · Token ${payload.token}` : baseLabel;
         const order = p.orders.find((o) => o.backendId === payload.id);
 
         const newKots: Kot[] = [...byStation.entries()].map(([station, items], i) => ({
@@ -5436,25 +5793,28 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const headBackendId = headId.startsWith("eh-")
         ? Number(headId.replace("eh-", ""))
         : undefined;
+      if (!headBackendId) {
+        toast.error("Select a valid expense head");
+        return Promise.resolve(false);
+      }
       const run = async () => {
         try {
-          if (headBackendId) {
-            await expenseApi.create({
-              expense_head_id: headBackendId,
-              amount,
-              paymentMode: "Cash",
-              reason: note,
-              addExpense: true,
-              date,
-            });
-            await value.loadExpensesFromServer();
-          }
-          await cashSessionApi.addMovement({
-            type: "Expense",
+          // ONE call: the exe saves the expense and takes the cash out of
+          // the open session together, or refuses both ("No cash session
+          // is open", "Not enough cash in the drawer") - billerpe-local-exe
+          // controller/expense.js#addExpense. This used to save the expense
+          // and then add the drawer movement separately, so a refused
+          // movement still left the expense saved (owner report,
+          // 2026-09-22).
+          await expenseApi.create({
+            expense_head_id: headBackendId,
             amount,
-            reason: `${head?.name ?? "Expense"} — ${note}`,
+            paymentMode: "Cash",
+            reason: note,
+            addExpense: true,
+            date,
           });
-          await value.loadCashSessionsFromServer();
+          await Promise.all([value.loadExpensesFromServer(), value.loadCashSessionsFromServer()]);
           log("Expense Added", head?.name ?? "Expense", "—", `₹${amount} · Cash · ${note}`);
           toast.success("Expense attached to session", {
             description: `${head?.name} · ₹${amount}`,
@@ -6312,8 +6672,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               hotel_logo && hotel_logo !== "placeholder.png"
                 ? `${API_BASE_URL}/images/${hotel_logo}`
                 : undefined,
-            header: mapRawInvoiceLines(headerFooterData, "header"),
-            footer: mapRawInvoiceLines(headerFooterData, "footer"),
+            // A "marketing text" line stores only its keyword; the text itself
+            // lives on Hotel (invoiceFormateHeaderText / BottomText). It was
+            // never put back here, so the printed bill showed an empty line
+            // and the editor showed it blank - and the next Save wiped it.
+            header: withMarketingText(
+              mapRawInvoiceLines(headerFooterData, "header"),
+              settings.invoiceFormateHeaderText,
+            ),
+            footer: withMarketingText(
+              mapRawInvoiceLines(headerFooterData, "footer"),
+              settings.invoiceFormateBottomText,
+            ),
+            tokens: {
+              tokenFor: tokenScopeFromCode(settings.is_token_on),
+              billWithKot: tokenScopeFromCode(settings.bill_with_kot),
+              billWithToken: tokenScopeFromCode(settings.bill_with_token),
+            },
+            saveBehave: settings.saveBehave === "pdf" ? "pdf" : "save",
           },
           qrOnSettle: hms_res_setting?.qr_code_open_on_settle ?? false,
         }));
@@ -6897,7 +7273,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               `₹${e.amount} · ${e.mode} · ${e.note}`,
             );
           }
-          await value.loadExpensesFromServer();
+          // An edited Cash expense can move money in the open cash session
+          // (billerpe-local-exe controller/expense.js#editExpense).
+          await Promise.all([value.loadExpensesFromServer(), value.loadCashSessionsFromServer()]);
           toast.success("Expense saved");
           return true;
         } catch (err) {
@@ -6921,7 +7299,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const run = async () => {
         try {
           await expenseApi.remove(backendId);
-          await value.loadExpensesFromServer();
+          // Deleting a Cash expense puts its cash back in the open session.
+          await Promise.all([value.loadExpensesFromServer(), value.loadCashSessionsFromServer()]);
           log(
             "Expense Deleted",
             headName,
@@ -8283,9 +8662,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // (header or footer) actually has content:"marketing" right
           // now; if neither side uses it, sends "" to clear a
           // previously-set value rather than leaving a stale one behind.
-          await Promise.all([
+          const [identity] = await Promise.all([
             hotelApi.updateIdentity({
               upiId: fmt.upiId,
+              is_token_on: TOKEN_SCOPE_TO_CODE[fmt.tokens.tokenFor],
+              bill_with_kot: TOKEN_SCOPE_TO_CODE[fmt.tokens.billWithKot],
+              bill_with_token: TOKEN_SCOPE_TO_CODE[fmt.tokens.billWithToken],
+              saveBehave: fmt.saveBehave,
               invoiceFormateHeaderText:
                 fmt.header.find((l) => l.content === "marketing")?.text ?? "",
               invoiceFormateBottomText:
@@ -8293,7 +8676,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             }),
             invoiceFormateApi.saveHeaderFooter(toRawInvoiceFormatePayload(fmt.header, fmt.footer)),
           ]);
-          toast.success("Invoice format saved");
+          if (identity.cloudUpdated === false) {
+            toast.warning("Invoice format saved on this PC", {
+              description:
+                "The BillerPe server could not be reached, so the e-bill still shows the old details. Save again once online.",
+            });
+          } else {
+            toast.success("Invoice format saved");
+          }
         } catch (err) {
           toast.error(
             err instanceof ApiError ? err.message : "Saved locally, but didn't sync to the server",
@@ -8757,7 +9147,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         orders: p.orders.map((o) => (o.id === orderId ? { ...o, menuId } : o)),
       }));
-      log("Menu Switched", `Order #${o?.orderNo}`, fromName, toName);
+      log("Menu Switched", `Order #${o?.orderNo}`, fromName, toName, undefined, o ? { id: o.id, backendId: o.backendId } : undefined);
       toast.success("Menu switched", { description: toName });
     },
     setDisplayMode: (mode) => {
@@ -8794,7 +9184,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         tables: p.tables.map((t) => (t.id === o?.tableId ? { ...t, guests: safe } : t)),
       }));
       if (o && o.guests !== safe) {
-        log("Guests Updated", `Order #${o.orderNo}`, `${o.guests}`, `${safe}`);
+        log("Guests Updated", `Order #${o.orderNo}`, `${o.guests}`, `${safe}`, undefined, { id: o.id, backendId: o.backendId });
       }
     },
     addCustomLine: (orderId, name, price, qty) => {
@@ -8816,7 +9206,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           x.id === orderId ? { ...x, lines: [newLine, ...x.lines] } : x,
         ),
       }));
-      log("Item Added", `Order #${o.orderNo}`, "—", `${qty}× ${name.trim()} (custom) · ₹${price}`);
+      log("Item Added", `Order #${o.orderNo}`, "—", `${qty}× ${name.trim()} (custom) · ₹${price}`, undefined, { id: o.id, backendId: o.backendId });
       toast.success("Custom item added", { description: `${name.trim()} · ₹${price}` });
     },
     upsertCustomer: (customer) => {
@@ -8880,6 +9270,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return Promise.resolve(false);
       }
+      // A single bill may be PART-paid - the rest stays due (owner
+      // requirement, 2026-09-22). Several bills at once are always settled
+      // in full: there is no sensible way to guess how a part-payment
+      // should be divided between them.
+      const received = Math.round(payments.reduce((sum, p) => sum + p.amount, 0) * 100) / 100;
+      const billDue = bills.reduce((sum, b) => sum + b.amount, 0);
+      if (received <= 0) {
+        toast.error("Enter the amount received");
+        return Promise.resolve(false);
+      }
+      if (received > Math.round(billDue * 100) / 100 + 0.009) {
+        toast.error("More than the amount due", {
+          description: `Only ₹${billDue.toLocaleString("en-IN")} is due.`,
+        });
+        return Promise.resolve(false);
+      }
+      if (bills.length > 1 && Math.abs(received - billDue) > 0.5) {
+        toast.error("Several bills are settled in full", {
+          description: "To take a part-payment, settle one bill at a time.",
+        });
+        return Promise.resolve(false);
+      }
+      const remaining = Math.max(0, Math.round((billDue - received) * 100) / 100);
+      const fullySettled = remaining <= 0.009;
 
       const mode = payments.length > 1 ? "Split" : payments[0].mode;
       const cashPortion = payments
@@ -8915,7 +9329,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ...p,
             dueBills: p.dueBills.map((b) =>
               ids.includes(b.id) && b.status === "Due"
-                ? { ...b, status: "Settled" as const, settledMode: mode }
+                ? fullySettled
+                  ? { ...b, status: "Settled" as const, settledMode: mode }
+                  : { ...b, amount: remaining }
                 : b,
             ),
             cashSessions: p.cashSessions.map((cs) =>
@@ -8938,14 +9354,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ),
           }));
           log(
-            "Due Settled",
+            fullySettled ? "Due Settled" : "Due Part-Paid",
             bills.map((b) => b.billNo).join(", "),
-            "Due",
-            `${mode} · ₹${payments.reduce((sum, p) => sum + p.amount, 0)}`,
+            `Due ₹${billDue}`,
+            fullySettled
+              ? `${mode} · ₹${received}`
+              : `${mode} · ₹${received} received · ₹${remaining} still due`,
           );
-          toast.success(bills.length > 1 ? `${bills.length} bills settled` : "Bill settled", {
-            description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + "),
-          });
+          toast.success(
+            fullySettled
+              ? bills.length > 1
+                ? `${bills.length} bills settled`
+                : "Bill settled"
+              : `₹${received.toLocaleString("en-IN")} received · ₹${remaining.toLocaleString("en-IN")} still due`,
+            { description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") },
+          );
           return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not settle due bill(s)");
@@ -8963,6 +9386,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         s.orders.find((x) => x.id === orderId) ?? s.orderHistory.find((x) => x.id === orderId);
       if (!o?.customerPhone) {
         toast.error("No customer phone number attached to this order");
+        return false;
+      }
+      // Never send a blank bill (owner report, 2026-09-22: a customer
+      // attached to an empty table, E-Bill pressed, a Rs 0 bill generated
+      // and sent). The exe and the cloud refuse it too.
+      if (!o.lines.length) {
+        toast.error("This bill has no items", {
+          description: "Add items before sending the e-bill.",
+        });
         return false;
       }
       // Local credit check for instant feedback before round-tripping -
@@ -8987,8 +9419,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // yet for this to work. Only live s.orders entries reach this
       // branch; orderHistory entries are already "Settled"
       // (mapRawOrderHistoryEntry), so they never do.
-      if (o.status !== "Bill Generated" && o.status !== "Settled") {
-        const result = await value.generateBill(orderId);
+      //
+      // Sending an e-bill IS generating the bill (owner rule, 2026-09-22):
+      // the order is billed first, and stays billed even if the WhatsApp
+      // send then fails. Pickup included - `save` makes sure a pickup bill
+      // exists on the exe, which the e-bill is rendered from.
+      const hasUnsent = o.lines.some((l) => l.kotRound === UNSENT_ROUND);
+      if ((o.status !== "Bill Generated" && o.status !== "Settled") || hasUnsent) {
+        const result = await value.generateBill(orderId, { save: true });
         if (!result.ok) return false; // generateBill already toasted why
         backendId = result.backendId;
       }
@@ -9004,13 +9442,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           `Order #${o.orderNo}`,
           `${s.eBillCredit} credits`,
           `${Math.max(0, s.eBillCredit - 1)} credits`,
+          undefined,
+          { id: o.id, backendId },
         );
         toast.success("Bill shared on WhatsApp", {
           description: `${o.customerPhone} · sent via WhatsApp`,
         });
         return true;
       } catch (err) {
-        toast.error(err instanceof ApiError ? err.message : "Could not send the e-bill");
+        // The bill itself is generated either way - say so, so staff settle
+        // it normally instead of thinking nothing happened.
+        toast.error("Bill generated, but the e-bill was not sent", {
+          description: err instanceof ApiError ? err.message : "Please try sending it again.",
+        });
         return false;
       }
     },
@@ -9072,7 +9516,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           tableId2: Number(destTableId),
         });
         await value.loadTablesFromServer();
-        log("KOT Moved", `Round ${round} · ${o.tableLabel}`, o.tableLabel, destLabel);
+        log("KOT Moved", `Order #${o.orderNo} · Round ${round}`, o.tableLabel, destLabel, undefined, {
+          id: o.id,
+          backendId: o.backendId,
+        });
         toast.success(`KOT round ${round} moved to ${destLabel}`);
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not move this KOT round");

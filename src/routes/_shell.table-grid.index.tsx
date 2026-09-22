@@ -446,7 +446,10 @@ function TableGridPage() {
                       <StatusBadge status={o.status} className="shrink-0" />
                     </span>
                     <span className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span>#{o.orderNo}</span>
+                      <span>
+                        #{o.orderNo}
+                        {o.token ? ` · Token ${o.token}` : ""}
+                      </span>
                       <Money value={orderTotals(o, store).grand} className="font-medium" />
                     </span>
                   </button>

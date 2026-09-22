@@ -101,6 +101,12 @@ export interface RestaurantTable {
    * "regenerate this table's QR" (qrOrderApi.regenerateTableQr), which
    * invalidates every previously-printed/shared link for this table. */
   qrVersion?: number;
+  /** This table's id on the cloud (RawTable.cloud_table_id). The only id a
+   * printed ordering QR may encode - a customer's phone resolves it
+   * against the cloud, which does not know this app's local ids.
+   * Undefined means the table has not synced up yet, and no QR may be
+   * shown for it at all. */
+  cloudId?: number;
 }
 
 export interface MenuCategory {
@@ -267,6 +273,9 @@ export interface Order {
   discount?: { label: string; amount: number; type?: "percent" | "flat"; value?: number };
   deliveryCharge?: number;
   packagingCharge?: number;
+  /** The cashier's manual service charge (₹), for an order type where the
+   * service charge is not automatic - see serviceIsManual in store.tsx. */
+  serviceCharge?: number;
   /** Waiter service tip, attributed to whoever created the order
    * (createdBy) - only ever set once, at settlement (store.settleOrder).
    * See uat-backend-v2/model/order.js's own comment. */
@@ -347,6 +356,8 @@ export interface Kot {
    * session that has both the Orders and KDS pages open, not corrupt
    * anything, per the "visibility only" scope this was built to. */
   kotNumber?: number;
+  /** Fired with "Only KOT": on the bill, never on a Kitchen Display. */
+  kdsHidden?: boolean;
 }
 
 export interface Customer {
@@ -725,6 +736,11 @@ export interface InvoiceLine {
   fontSize: number;
 }
 
+/** Which order types a token setting applies to - Hotel.is_token_on /
+ * bill_with_kot / bill_with_token, stored as "0" pickup, "1" dine-in,
+ * "2" both, "3" off (same codes as the old BillerPe). */
+export type TokenScope = "off" | "dinein" | "pickup" | "both";
+
 export interface InvoiceFormat {
   /** the real GST master switch for the whole POS */
   gstCalculation: boolean;
@@ -738,13 +754,20 @@ export interface InvoiceFormat {
   logoUrl?: string;
   header: InvoiceLine[];
   footer: InvoiceLine[];
-  /** fields present in the source form with no confirmed frontend consumer */
-  unconfirmed: {
-    isTokenOn: boolean;
-    billWithKot: boolean;
-    billWithToken: boolean;
-    saveBehaviour: boolean;
+  /** Token settings (billerpe-local-exe/model/orderHooks.js assigns the
+   * daily token; controller/print.js prints the token slip and the
+   * bill-with-KOT on the bill's first print). */
+  tokens: {
+    /** which orders get a token */
+    tokenFor: TokenScope;
+    /** Generate Bill also prints the items the kitchen hasn't received, as a KOT on the invoice printer (never sent to the KDS) */
+    billWithKot: TokenScope;
+    /** Generate Bill also prints a token slip for the customer */
+    billWithToken: TokenScope;
   };
+  /** Hotel.saveBehave - "Save" only saves, or also opens the bill as a PDF
+   * (for outlets without a printer). */
+  saveBehave: "save" | "pdf";
 }
 
 // Dynamic KOT format (Task 1) - same header/footer-lines shape as
@@ -805,7 +828,10 @@ export interface DueBill {
   date: string;
   /** ISO-ish day offset used only for the date filters in the prototype */
   daysAgo: number;
+  /** What is still due on the bill. */
   amount: number;
+  /** The whole bill, when known - lets the list show "due of bill" after a part-payment. */
+  billTotal?: number;
   status: DueBillStatus;
   settledMode?: string;
   /** uat-backend's hms_order_msts.id this due bill was loaded from -

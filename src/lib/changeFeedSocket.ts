@@ -25,6 +25,13 @@ export type ChangeFeedEvent = {
   action?: string;
 };
 
+export type KotPrintStatusEvent = {
+  orderId: number;
+  tableId: number | null;
+  kotNumber: number;
+  results: { printer: string; ok: boolean; error?: string }[];
+};
+
 export type ChangeFeedHandlers = {
   onChange: (orderId: number, event: ChangeFeedEvent) => void;
   /** Table status/structure changed with no single order behind it (move, reservation hold, edit). */
@@ -33,6 +40,8 @@ export type ChangeFeedHandlers = {
   onConfigChange?: (entities: string[]) => void;
   /** The QR ordering inbox changed (new, expired, accepted or rejected). */
   onQrOrdersChange?: () => void;
+  /** The exe finished printing a fired KOT round itself (billerpe-local-exe/services/kotAutoPrint.js). */
+  onKotPrintStatus?: (event: KotPrintStatusEvent) => void;
   /** Fired on every (re)connect - the caller should do one full refresh to cover anything missed. */
   onConnect?: () => void;
 };
@@ -65,6 +74,9 @@ export function connectChangeFeed(
     if (data && Array.isArray(data.entities)) h.onConfigChange?.(data.entities);
   });
   socket.on("qrOrdersChanged", () => h.onQrOrdersChange?.());
+  socket.on("kotPrintStatus", (data: KotPrintStatusEvent) => {
+    if (data && Array.isArray(data.results)) h.onKotPrintStatus?.(data);
+  });
   return () => {
     socket.removeAllListeners();
     socket.close();

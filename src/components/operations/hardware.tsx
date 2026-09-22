@@ -247,20 +247,9 @@ export function KitchenSection() {
                 }
                 allLabel="All categories"
               />
-              <ChipSelect
-                label="Tables"
-                hint="Leave empty to serve every table."
-                options={store.tables.map((t) => ({ id: t.id, name: tblName(t.id) }))}
+              <TableAreaPicker
                 selected={draft.tableIds}
-                onToggle={(id) =>
-                  setDraft({
-                    ...draft,
-                    tableIds: draft.tableIds.includes(id)
-                      ? draft.tableIds.filter((x) => x !== id)
-                      : [...draft.tableIds, id],
-                  })
-                }
-                allLabel="All tables"
+                onChange={(tableIds) => setDraft({ ...draft, tableIds })}
               />
             </div>
           ) : null}
@@ -297,6 +286,67 @@ export function KitchenSection() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+
+/**
+ * Which tables a KOT printer or KDS kitchen serves, chosen by TABLE CATEGORY
+ * (one tap ticks every table in "Rooftop", say) with the individual tables
+ * below for exceptions. What is saved is the table ids - the exe routes on
+ * those (billerpe-local-exe/helpers/kotPrinterRouting.js). A table added to
+ * a category later is not included until it is ticked here too. Nothing
+ * ticked = every table.
+ */
+function TableAreaPicker({
+  selected,
+  onChange,
+}: {
+  selected: string[];
+  onChange: (tableIds: string[]) => void;
+}) {
+  const store = useStore();
+  const tablesOf = (categoryId: string) =>
+    store.tables.filter((t) => t.categoryId === categoryId).map((t) => t.id);
+  const fullCategories = store.tableCategories
+    .filter((c) => {
+      const ids = tablesOf(c.id);
+      return ids.length > 0 && ids.every((id) => selected.includes(id));
+    })
+    .map((c) => c.id);
+  const tableLabel = (id: string) => {
+    const t = store.tables.find((x) => x.id === id);
+    if (!t) return id;
+    const cat = store.tableCategories.find((c) => c.id === t.categoryId)?.name ?? "";
+    return `${cat} ${t.name}`.trim();
+  };
+  return (
+    <>
+      <ChipSelect
+        label="Table categories"
+        hint="Tick a category to serve all of its tables. Leave tables empty to serve every table."
+        options={store.tableCategories.map((c) => ({ id: c.id, name: c.name }))}
+        selected={fullCategories}
+        onToggle={(categoryId) => {
+          const ids = tablesOf(categoryId);
+          onChange(
+            fullCategories.includes(categoryId)
+              ? selected.filter((id) => !ids.includes(id))
+              : [...new Set([...selected, ...ids])],
+          );
+        }}
+        allLabel="All categories"
+      />
+      <ChipSelect
+        label="Tables"
+        options={store.tables.map((t) => ({ id: t.id, name: tableLabel(t.id) }))}
+        selected={selected}
+        onToggle={(id) =>
+          onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id])
+        }
+        allLabel="All tables"
+      />
+    </>
   );
 }
 
@@ -633,6 +683,13 @@ export function PrinterSection() {
                       : [...draft.categories, id],
                   })
                 }
+              />
+              {/* Dine-in tables only - a pickup KOT has no table. The form
+                  never offered this, so KOT printers could not be routed
+                  by table even though the exe supports it. */}
+              <TableAreaPicker
+                selected={draft.tableIds ?? []}
+                onChange={(tableIds) => setDraft({ ...draft, tableIds })}
               />
             </div>
           ) : null}

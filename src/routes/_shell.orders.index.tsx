@@ -391,7 +391,16 @@ function OrdersPage() {
               // already-real-numbered one both strip down to the same
               // digits), and never matched what a printed bill showed for
               // the same order.
-              cell: (o) => <span className="num font-medium">#{displayBillNo(o)}</span>,
+              cell: (o) => (
+                <span className="num font-medium">
+                  #{displayBillNo(o)}
+                  {o.token ? (
+                    <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                      Token {o.token}
+                    </span>
+                  ) : null}
+                </span>
+              ),
             },
             { key: "table", header: "Table", cell: (o) => o.tableLabel },
             { key: "type", header: "Type", cell: (o) => o.type },

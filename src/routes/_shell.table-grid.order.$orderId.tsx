@@ -71,7 +71,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ApiError, customerApi, type RawOrderDetail } from "@/lib/api";
 import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
-import { lineTotal, orderTotals, parseOrderAddons, useStore } from "@/mock/store";
+import { lineTotal, orderTotals, parseOrderAddons, serviceIsManual, useStore } from "@/mock/store";
 import type { MenuItem, OrderLine, PaymentSplit } from "@/mock/types";
 
 export const Route = createFileRoute("/_shell/table-grid/order/$orderId")({
@@ -307,11 +307,13 @@ function OrderCartPage() {
   const [customQty, setCustomQty] = useState(1);
   const [chargesOpen, setChargesOpen] = useState(false);
   const [packagingOverride, setPackagingOverride] = useState(0);
+  const [serviceOpen, setServiceOpen] = useState(false);
+  const [serviceInput, setServiceInput] = useState(0);
   const bForm = useFormCheck();
   const bFormReset = bForm.reset;
   useEffect(() => {
-    if (!customItemOpen && !chargesOpen && !discountOpen) bFormReset();
-  }, [customItemOpen, chargesOpen, discountOpen, bFormReset]);
+    if (!customItemOpen && !chargesOpen && !discountOpen && !serviceOpen) bFormReset();
+  }, [customItemOpen, chargesOpen, discountOpen, serviceOpen, bFormReset]);
   const [removeTarget, setRemoveTarget] = useState<OrderLine | null>(null);
   const [removeReason, setRemoveReason] = useState("");
 
@@ -851,7 +853,31 @@ function OrderCartPage() {
             {totals.discount ? (
               <Row label={`Discount (${order.discount?.label})`} value={-totals.discount} />
             ) : null}
-            {totals.service ? <Row label="Service charge" value={totals.service} /> : null}
+            {/* Service charge not automatic for this order type: the
+                cashier enters it here (owner rule, 2026-09-22). */}
+            {serviceIsManual(store.serviceCharge, order.type) ? (
+              <div className="flex items-center justify-between text-muted-foreground">
+                <dt className="flex items-center gap-1">
+                  Service charge
+                  <button
+                    disabled={settled}
+                    aria-label="Enter service charge"
+                    onClick={() => {
+                      setServiceInput(order.serviceCharge ?? 0);
+                      setServiceOpen(true);
+                    }}
+                    className="text-muted-foreground hover:text-primary disabled:opacity-40"
+                  >
+                    <Pencil className="size-3" />
+                  </button>
+                </dt>
+                <dd>
+                  <Money value={totals.service} />
+                </dd>
+              </div>
+            ) : totals.service ? (
+              <Row label="Service charge" value={totals.service} />
+            ) : null}
             <div className="flex items-center justify-between text-muted-foreground">
               <dt className="flex items-center gap-1">
                 Packaging
@@ -959,7 +985,7 @@ function OrderCartPage() {
               </Button>
               <Button
                 variant="outline"
-                disabled={!order.customerPhone}
+                disabled={!order.customerPhone || !order.lines.length}
                 onClick={() => {
                   void store.sendEBill(order.id);
                   goToTables();
@@ -1136,6 +1162,52 @@ function OrderCartPage() {
         </DialogContent>
       </Dialog>
 
+      {/* manual service charge */}
+      <Dialog open={serviceOpen} onOpenChange={setServiceOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Service charge</DialogTitle>
+            <DialogDescription>
+              Service charge is not automatic for this order type - enter it for this order. 0
+              means no service charge.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <Label htmlFor="serviceInput">Service charge (₹)</Label>
+            <Input
+              {...bForm.fieldProps("service")}
+              id="serviceInput"
+              type="number"
+              min={0}
+              className="num mt-1.5"
+              value={serviceInput}
+              onChange={(e) => setServiceInput(Number(e.target.value) || 0)}
+            />
+            <FieldError message={bForm.error("service")} />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                const valid = bForm.check([
+                  {
+                    key: "service",
+                    label: "Service charge",
+                    value: serviceInput,
+                    valid: (v) => typeof v === "number" && v >= 0,
+                    message: "Service charge can't be negative",
+                  },
+                ]);
+                if (!valid) return;
+                store.setCharges(order.id, undefined, serviceInput);
+                setServiceOpen(false);
+              }}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* item config */}
       <Dialog open={!!configItem} onOpenChange={(o) => !o && setConfigItem(null)}>
         <DialogContent className="max-h-[85vh] overflow-y-auto">
@@ -1276,13 +1348,13 @@ function OrderCartPage() {
                       size="sm"
                       variant="outline"
                       onClick={() => {
-                        store.applyDiscount(
+                        const ok = store.applyDiscount(
                           order.id,
                           p.code,
                           p.type === "percent" ? "percent" : "flat",
                           p.value,
                         );
-                        setDiscountOpen(false);
+                        if (ok) setDiscountOpen(false);
                       }}
                     >
                       {p.code}

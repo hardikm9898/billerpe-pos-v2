@@ -51,7 +51,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
-import { lineTotal, orderTotals, useStore } from "@/mock/store";
+import { lineTotal, orderTotals, serviceIsManual, useStore } from "@/mock/store";
 import type { AddonGroup, MenuItem, Order, OrderLine, PaymentSplit } from "@/mock/types";
 
 /* ------------------------------------------------------------------ */
@@ -310,16 +310,19 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
       toast.error("Nothing new to send", { description: "Add items before sending a KOT." });
       return;
     }
-    store.generateKot(order.id, { print: true });
+    // Prints on the KOT printer(s) and shows on the KDS
+    // (billerpe-local-exe/services/kotAutoPrint.js, connection/socket.js).
+    store.generateKot(order.id);
     moveToNewOrder();
   };
+  // Records the round on the bill only: no printer, no KDS.
   const doKotOnly = () => {
     if (!order || settled) return;
     if (!newLines.length) {
       toast.error("Nothing new to send", { description: "Add items before sending a KOT." });
       return;
     }
-    store.generateKot(order.id);
+    store.generateKot(order.id, { onlyKot: true });
     moveToNewOrder();
   };
   const doHold = () => {
@@ -813,7 +816,31 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                 tone="success"
               />
             ) : null}
-            {totals.service > 0 ? <Row label="Service charge" value={totals.service} /> : null}
+            {/* Service charge not automatic for this order type: typed in
+                here (owner rule, 2026-09-22). Saved on Enter / leaving the box. */}
+            {serviceIsManual(store.serviceCharge, order.type) ? (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-muted-foreground">Service charge</span>
+                <Input
+                  key={`${order.id}-${order.serviceCharge ?? 0}`}
+                  type="number"
+                  min={0}
+                  aria-label="Service charge"
+                  disabled={settled}
+                  defaultValue={order.serviceCharge ?? 0}
+                  className="num h-7 w-24 text-right"
+                  onBlur={(e) => {
+                    const v = Math.max(0, Number(e.target.value) || 0);
+                    if (v !== (order.serviceCharge ?? 0)) store.setCharges(order.id, undefined, v);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                  }}
+                />
+              </div>
+            ) : totals.service > 0 ? (
+              <Row label="Service charge" value={totals.service} />
+            ) : null}
             {totals.taxLines.map((t) => (
               <Row key={t.id} label={t.name} value={t.amount} muted />
             ))}
@@ -900,6 +927,12 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
             // used elsewhere on this screen (see the customer summary
             // above) lets them add it right here instead of hunting for
             // where to enter it.
+            if (!order.lines.length) {
+              toast.error("This bill has no items", {
+                description: "Add items before sending the e-bill.",
+              });
+              return;
+            }
             if (!order.customerPhone) {
               setCustomerOpen(true);
               return;
@@ -1360,8 +1393,9 @@ function DiscountDialog({
   }, [open]);
 
   const apply = (label: string, type: "percent" | "flat", amountValue: number) => {
-    store.applyDiscount(order.id, label, type, amountValue);
-    onOpenChange(false);
+    // A promo code bigger than the bill is refused by the store (it says
+    // why) - the dialog then stays open.
+    if (store.applyDiscount(order.id, label, type, amountValue)) onOpenChange(false);
   };
   // A typed-in discount is checked first; promo codes and "remove" aren't.
   const applyManual = () => {

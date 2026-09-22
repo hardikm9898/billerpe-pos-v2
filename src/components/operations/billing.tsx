@@ -2,6 +2,9 @@ import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { ChefHat, ImageUp, Plus, Receipt, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
+import { toast } from "sonner";
+
+import { ApiError, tokenApi } from "@/lib/api";
 
 import {
   DataTable,
@@ -32,6 +35,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { orderTotals, useStore, type BillSettings } from "@/mock/store";
 import type {
+  InvoiceFormat,
   InvoiceLine,
   KotLine,
   OpsOrderType,
@@ -39,6 +43,7 @@ import type {
   PaymentModeConfig,
   PromoCode,
   TaxRule,
+  TokenScope,
 } from "@/mock/types";
 
 // Same shape orderTotals expects for a real order - two sample lines is
@@ -595,7 +600,22 @@ const CONTENT_LABEL: Record<string, string> = {
 
 export function InvoiceFormatSection() {
   const store = useStore();
-  const [fmt, setFmt] = useState(store.invoiceFormat);
+  const [fmt, setFmtState] = useState(store.invoiceFormat);
+  // The editor used to copy the saved format ONCE, when it opened. Opened
+  // before the saved format had loaded (straight after login, or a refresh
+  // on this page) it started from the built-in default lines instead - and
+  // saving then overwrote the real format with those defaults plus the
+  // edit: default lines twice, and the format that had been set gone
+  // (owner report, 2026-09-22). Until the first edit it now follows the
+  // saved format; after an edit, the edit is never overwritten.
+  const [dirty, setDirty] = useState(false);
+  const setFmt: typeof setFmtState = (next) => {
+    setDirty(true);
+    setFmtState(next);
+  };
+  useEffect(() => {
+    if (!dirty) setFmtState(store.invoiceFormat);
+  }, [store.invoiceFormat, dirty]);
   const fmtForm = useFormCheck();
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [uploadingLogo, setUploadingLogo] = useState(false);
@@ -645,6 +665,7 @@ export function InvoiceFormatSection() {
   }, [fmt.upiId, totals.grand]);
 
   const update = (patch: Partial<typeof fmt>) => setFmt((f) => ({ ...f, ...patch }));
+  const [resetOpen, setResetOpen] = useState(false);
   const updateLine = (slot: "header" | "footer", id: string, patch: Partial<InvoiceLine>) =>
     setFmt((f) => ({
       ...f,
@@ -944,37 +965,109 @@ export function InvoiceFormatSection() {
           ))}
 
           <SectionCard
-            title="Awaiting confirmation"
-            description="Present in the current system with no confirmed effect on the bill."
+            title="Tokens & bill printing"
+            description="Tokens start from 1 every business day. Saved with the invoice format below."
             bodyClassName="p-3 sm:p-4"
           >
-            <div className="space-y-2">
+            <div className="grid gap-3 sm:grid-cols-2">
               {(
                 [
-                  ["isTokenOn", "Token display"],
-                  ["billWithKot", "Bill with KOT"],
-                  ["billWithToken", "Bill with token"],
-                  ["saveBehaviour", "Save behaviour"],
+                  ["tokenFor", "Token number", "Which orders get a token."],
+                  [
+                    "billWithKot",
+                    "Bill with KOT",
+                    "Generate Bill also prints the items not yet sent to the kitchen as a KOT on the bill printer. Not sent to the KDS.",
+                  ],
+                  [
+                    "billWithToken",
+                    "Bill with token slip",
+                    "Generate Bill also prints a token slip for the customer.",
+                  ],
                 ] as const
-              ).map(([key, label]) => (
-                <div
-                  key={key}
-                  className="flex items-center justify-between gap-4 rounded-xl border border-dashed border-warning/40 bg-warning-soft/40 p-3"
-                >
-                  <p className="text-sm font-medium">{label}</p>
-                  <Switch
-                    checked={fmt.unconfirmed[key]}
-                    onCheckedChange={(v) =>
-                      update({ unconfirmed: { ...fmt.unconfirmed, [key]: v } })
+              ).map(([key, label, hint]) => (
+                <div key={key} className="space-y-1.5">
+                  <Label>{label}</Label>
+                  <Select
+                    value={fmt.tokens[key]}
+                    onValueChange={(v) =>
+                      update({ tokens: { ...fmt.tokens, [key]: v as TokenScope } })
                     }
-                  />
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off">Off</SelectItem>
+                      <SelectItem value="dinein">Dine-in only</SelectItem>
+                      <SelectItem value="pickup">Pickup only</SelectItem>
+                      <SelectItem value="both">Dine-in & pickup</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">{hint}</p>
                 </div>
               ))}
+              <div className="space-y-1.5">
+                <Label>Save button</Label>
+                <Select
+                  value={fmt.saveBehave}
+                  onValueChange={(v) => update({ saveBehave: v as InvoiceFormat["saveBehave"] })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="save">Only save</SelectItem>
+                    <SelectItem value="pdf">Save and open bill PDF</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  PDF is handy for outlets without a printer, like food trucks.
+                </p>
+              </div>
             </div>
-            <p className="mt-3 text-[11px] font-medium uppercase tracking-wide text-warning">
-              No frontend consumer found — behaviour to be confirmed before release
-            </p>
+            <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.open("/token-display", "_blank")}
+              >
+                Open token display
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setResetOpen(true)}>
+                Reset tokens now
+              </Button>
+            </div>
           </SectionCard>
+
+          <Dialog open={resetOpen} onOpenChange={setResetOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Reset tokens?</DialogTitle>
+              </DialogHeader>
+              <p className="text-sm text-muted-foreground">
+                The next order gets token 1. Tokens already given keep their numbers. Tokens also
+                restart on their own at the start of every business day.
+              </p>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setResetOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => {
+                    setResetOpen(false);
+                    void tokenApi
+                      .reset()
+                      .then(() => toast.success("Tokens reset - the next order gets token 1"))
+                      .catch((err) =>
+                        toast.error(err instanceof ApiError ? err.message : "Could not reset tokens"),
+                      );
+                  }}
+                >
+                  Reset tokens
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           <div className="flex justify-end">
             <Button
@@ -1004,7 +1097,10 @@ export function InvoiceFormatSection() {
                     message: "Enter a UPI ID like name@bank, or leave it blank",
                   },
                 ]);
-                if (valid) store.setInvoiceFormat(fmt);
+                if (valid) {
+                  store.setInvoiceFormat(fmt);
+                  setDirty(false);
+                }
               }}
             >
               <Receipt className="size-4" /> Save invoice format
@@ -1106,7 +1202,22 @@ const KOT_PREVIEW_CTX = {
 
 export function KotFormatSection() {
   const store = useStore();
-  const [fmt, setFmt] = useState(store.kotFormat);
+  const [fmt, setFmtState] = useState(store.kotFormat);
+  // Same as InvoiceFormatSection: the editor used to copy the saved format ONCE, when it opened. Opened
+  // before the saved format had loaded (straight after login, or a refresh
+  // on this page) it started from the built-in default lines instead - and
+  // saving then overwrote the real format with those defaults plus the
+  // edit: default lines twice, and the format that had been set gone
+  // (owner report, 2026-09-22). Until the first edit it now follows the
+  // saved format; after an edit, the edit is never overwritten.
+  const [dirty, setDirty] = useState(false);
+  const setFmt: typeof setFmtState = (next) => {
+    setDirty(true);
+    setFmtState(next);
+  };
+  useEffect(() => {
+    if (!dirty) setFmtState(store.kotFormat);
+  }, [store.kotFormat, dirty]);
 
   const updateLine = (slot: "header" | "footer", id: string, patch: Partial<KotLine>) =>
     setFmt((f) => ({
@@ -1228,7 +1339,12 @@ export function KotFormatSection() {
         ))}
 
         <div className="flex justify-end">
-          <Button onClick={() => store.setKotFormat(fmt)}>
+          <Button
+            onClick={() => {
+              store.setKotFormat(fmt);
+              setDirty(false);
+            }}
+          >
             <ChefHat className="size-4" /> Save KOT format
           </Button>
         </div>

@@ -80,6 +80,8 @@ function KdsPage() {
 
   const kots = store.kots
     .filter((k) => k.status !== "Served" && k.status !== "Cancelled")
+    // "Only KOT" rounds are on the bill but never go to the kitchen screen.
+    .filter((k) => !k.kdsHidden)
     .filter((k) => station === "All" || k.station === station);
 
   const lanes: { title: string; match: KotStatus[] }[] = [

@@ -78,12 +78,21 @@ function BillViewPage() {
   return (
     <Shell>
       <div className="text-center">
-        <h1 className="text-lg font-semibold">{d.restaurantName}</h1>
-        {d.restaurantAddress ? (
-          <p className="mt-0.5 text-xs text-muted-foreground">{d.restaurantAddress}</p>
-        ) : null}
-        {d.restaurantNumber ? (
-          <p className="text-xs text-muted-foreground">{d.restaurantNumber}</p>
+        {/* The hotel's own Invoice Format decides the header, exactly as on
+            the printed bill. The name/address/number block used to be shown
+            ALWAYS, on top of a header that normally contains them too - so
+            they appeared twice (owner report, 2026-09-22). It is now only
+            the fallback for a hotel with no header configured. */}
+        {!d.headerText?.length ? (
+          <>
+            <h1 className="text-lg font-semibold">{d.restaurantName}</h1>
+            {d.restaurantAddress?.trim() ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">{d.restaurantAddress}</p>
+            ) : null}
+            {d.restaurantNumber ? (
+              <p className="text-xs text-muted-foreground">{d.restaurantNumber}</p>
+            ) : null}
+          </>
         ) : null}
         {d.headerText?.length ? (
           <div
@@ -124,6 +133,13 @@ function BillViewPage() {
               <td className="py-1.5 pr-2">
                 {item.item_name}
                 {item.variantData?.variants_name ? ` (${item.variantData.variants_name})` : ""}
+                {billAddons(item.addons).map((a, j) => (
+                  <span key={j} className="block text-xs text-muted-foreground">
+                    + {a.addon_name}
+                    {a.qty > 1 ? ` ×${a.qty}` : ""}
+                    {a.price ? ` · ${currency}${a.price * a.qty}` : ""}
+                  </span>
+                ))}
               </td>
               <td className="py-1.5 text-right num">{item.qty}</td>
               <td className="py-1.5 text-right num">
@@ -147,11 +163,16 @@ function BillViewPage() {
         {d.packaging_charge ? (
           <Row label="Packaging charge" value={`${currency}${d.packaging_charge}`} />
         ) : null}
+        {/* An order-tax row's `amount` is the RATE and `tax_value` the rupees
+            charged (billerpe-local-exe helpers/orderTotals.js). This showed
+            `amount`, so a customer read "CGST Rs 2.5" for Rs 58.50. */}
         {d.orderTax.map((t, i) => (
           <Row
             key={i}
-            label={t.hms_tax_type_mst?.tax_name ?? "Tax"}
-            value={`${currency}${t.amount ?? 0}`}
+            label={`${t.hms_tax_type_mst?.tax_name ?? "Tax"}${
+              t.amount ? ` @${t.amount}${t.tax_type === "pr" ? "%" : ""}` : ""
+            }`}
+            value={`${currency}${Number(t.tax_value ?? 0).toFixed(2)}`}
           />
         ))}
         {d.tip ? <Row label="Tip" value={`${currency}${d.tip}`} /> : null}
@@ -177,13 +198,29 @@ function BillViewPage() {
           dangerouslySetInnerHTML={{ __html: d.footerText.join("") }}
         />
       ) : null}
-      {d.bottomText ? (
+      {/* Same rule as the header: the footer lines already include the
+          bottom (marketing) text when the hotel put it there. */}
+      {d.bottomText && !d.footerText?.length ? (
         <p className="mt-1 whitespace-pre-wrap text-center text-xs text-muted-foreground">
           {d.bottomText}
         </p>
       ) : null}
     </Shell>
   );
+}
+
+// The e-bill API sends add-ons as a flat [{ addon_name, price, qty }] list;
+// anything else (an older cloud) shows none rather than breaking the page.
+function billAddons(value: unknown): { addon_name: string; price: number; qty: number }[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((a): a is { addon_name?: unknown; price?: unknown; qty?: unknown } => !!a && typeof a === "object")
+    .map((a) => ({
+      addon_name: String(a.addon_name ?? ""),
+      price: Number(a.price) || 0,
+      qty: Number(a.qty) || 1,
+    }))
+    .filter((a) => a.addon_name);
 }
 
 function Row({ label, value }: { label: string; value: string }) {

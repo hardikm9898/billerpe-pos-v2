@@ -16,6 +16,12 @@ export type KdsTicketPayload = {
   kotNumber: number;
   type: "dinin" | "pickup";
   tableId: number | "";
+  /** The kitchen this ticket was routed to by the exe (its order-type /
+   * table / menu-category settings). Absent from an older exe. */
+  kitchenId?: number;
+  kitchenName?: string;
+  /** The order's daily token, 0 when tokens are off for it. */
+  token?: number;
   items: {
     name: string;
     qty: number;

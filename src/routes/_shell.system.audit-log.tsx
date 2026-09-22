@@ -38,28 +38,47 @@ function AuditLogPage() {
   const store = useStore();
   const [q, setQ] = useState("");
   const [user, setUser] = useState("all");
+  const [action, setAction] = useState("all");
+  const [orderNo, setOrderNo] = useState("");
+  const [actions, setActions] = useState<string[]>([]);
   const [page, setPage] = useState(1);
+  // What the list is actually fetched with - the typed text is debounced
+  // into this, so a search does not fire on every keystroke.
+  const [filters, setFilters] = useState({ q: "", orderNo: "" });
   const [rows, setRows] = useState<RawAuditLogEntry[]>([]);
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  // Real, persisted (billerpe-local-exe's GET /auditLog), paginated
-  // (10/page) and server-searched/filtered - see auditLogApi's own
-  // comment. Resets to page 1 whenever the filters change, since a stale
-  // page number from a previous filter wouldn't mean anything under a new
-  // one.
   useEffect(() => {
-    const t = setTimeout(() => setPage(1), 300);
+    void auditLogApi
+      .getActions()
+      .then((r) => setActions(r.actions))
+      .catch(() => setActions([]));
+  }, []);
+
+  // Real, persisted (billerpe-local-exe's GET /auditLog), paginated
+  // (10/page) and server-searched/filtered. Any filter change goes back to
+  // page 1.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setFilters({ q, orderNo });
+      setPage(1);
+    }, 300);
     return () => clearTimeout(t);
-  }, [q, user]);
+  }, [q, orderNo]);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     const run = async () => {
       try {
-        const res = await auditLogApi.getAll(page, 10, q, user);
+        const res = await auditLogApi.getAll(page, 10, {
+          q: filters.q,
+          userId: user,
+          action,
+          orderNo: filters.orderNo,
+        });
         if (cancelled) return;
         setRows(res.entries);
         setTotalPages(res.totalPages);
@@ -77,8 +96,11 @@ function AuditLogPage() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+    // Every filter is a dependency. This used to depend on `page` alone and
+    // reset page to 1 on a filter change - which, when the list was already
+    // on page 1, changed nothing, so the search box and the user filter
+    // never refetched at all.
+  }, [page, filters, user, action]);
 
   return (
     <Page>
@@ -95,11 +117,43 @@ function AuditLogPage() {
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search action, entity or reason"
+              placeholder="Search action, order, item, user or reason"
               className="pl-9"
             />
           </div>
-          <Select value={user} onValueChange={setUser}>
+          <Input
+            value={orderNo}
+            onChange={(e) => setOrderNo(e.target.value.replace(/[^0-9a-zA-Z]/g, ""))}
+            placeholder="Order / bill no."
+            inputMode="numeric"
+            className="sm:w-40"
+          />
+          <Select
+            value={action}
+            onValueChange={(v) => {
+              setAction(v);
+              setPage(1);
+            }}
+          >
+            <SelectTrigger className="sm:w-52">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All actions</SelectItem>
+              {actions.map((a) => (
+                <SelectItem key={a} value={a}>
+                  {a}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={user}
+            onValueChange={(v) => {
+              setUser(v);
+              setPage(1);
+            }}
+          >
             <SelectTrigger className="sm:w-56">
               <SelectValue />
             </SelectTrigger>

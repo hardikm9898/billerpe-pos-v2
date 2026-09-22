@@ -73,6 +73,8 @@ export const ROUTE_PERMISSIONS: Record<string, RouteRule> = {
   "POST /qrOrder/:id/accept": ["biller","create"],
   "POST /qrOrder/:id/reject": ["biller","edit"],
   "POST /kotReady": ["kds","edit"],
+  "POST /tokenBoard/status": ["biller","edit"],
+  "POST /token/reset": ["ops-billing","edit"],
   "POST /getDueOrders": ["ops-ledger","view"],
   "POST /settleDue": ["ops-ledger","edit"],
   "POST /allSettleDue": ["ops-ledger","edit"],

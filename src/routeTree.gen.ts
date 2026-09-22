@@ -14,6 +14,7 @@ import { Route as ShellRouteImport } from './routes/_shell'
 import { Route as BillviewRouteImport } from './routes/billview'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as QrMenuRouteImport } from './routes/qr-menu'
+import { Route as TokenDisplayRouteImport } from './routes/token-display'
 import { Route as ShellCashSessionRouteImport } from './routes/_shell.cash-session'
 import { Route as ShellDashboardRouteImport } from './routes/_shell.dashboard'
 import { Route as ShellKdsRouteImport } from './routes/_shell.kds'
@@ -71,6 +72,11 @@ const LoginRoute = LoginRouteImport.update({
 const QrMenuRoute = QrMenuRouteImport.update({
   id: '/qr-menu',
   path: '/qr-menu',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TokenDisplayRoute = TokenDisplayRouteImport.update({
+  id: '/token-display',
+  path: '/token-display',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ShellCashSessionRoute = ShellCashSessionRouteImport.update({
@@ -254,6 +260,7 @@ export interface FileRoutesByFullPath {
   '/billview': typeof BillviewRoute
   '/login': typeof LoginRoute
   '/qr-menu': typeof QrMenuRoute
+  '/token-display': typeof TokenDisplayRoute
   '/cash-session': typeof ShellCashSessionRoute
   '/dashboard': typeof ShellDashboardRoute
   '/kds': typeof ShellKdsRoute
@@ -294,6 +301,7 @@ export interface FileRoutesByTo {
   '/billview': typeof BillviewRoute
   '/login': typeof LoginRoute
   '/qr-menu': typeof QrMenuRoute
+  '/token-display': typeof TokenDisplayRoute
   '/cash-session': typeof ShellCashSessionRoute
   '/dashboard': typeof ShellDashboardRoute
   '/kds': typeof ShellKdsRoute
@@ -336,6 +344,7 @@ export interface FileRoutesById {
   '/billview': typeof BillviewRoute
   '/login': typeof LoginRoute
   '/qr-menu': typeof QrMenuRoute
+  '/token-display': typeof TokenDisplayRoute
   '/_shell/cash-session': typeof ShellCashSessionRoute
   '/_shell/dashboard': typeof ShellDashboardRoute
   '/_shell/kds': typeof ShellKdsRoute
@@ -378,6 +387,7 @@ export interface FileRouteTypes {
     | '/billview'
     | '/login'
     | '/qr-menu'
+    | '/token-display'
     | '/cash-session'
     | '/dashboard'
     | '/kds'
@@ -418,6 +428,7 @@ export interface FileRouteTypes {
     | '/billview'
     | '/login'
     | '/qr-menu'
+    | '/token-display'
     | '/cash-session'
     | '/dashboard'
     | '/kds'
@@ -459,6 +470,7 @@ export interface FileRouteTypes {
     | '/billview'
     | '/login'
     | '/qr-menu'
+    | '/token-display'
     | '/_shell/cash-session'
     | '/_shell/dashboard'
     | '/_shell/kds'
@@ -501,6 +513,7 @@ export interface RootRouteChildren {
   BillviewRoute: typeof BillviewRoute
   LoginRoute: typeof LoginRoute
   QrMenuRoute: typeof QrMenuRoute
+  TokenDisplayRoute: typeof TokenDisplayRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -538,6 +551,13 @@ declare module '@tanstack/react-router' {
       path: '/qr-menu'
       fullPath: '/qr-menu'
       preLoaderRoute: typeof QrMenuRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/token-display': {
+      id: '/token-display'
+      path: '/token-display'
+      fullPath: '/token-display'
+      preLoaderRoute: typeof TokenDisplayRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_shell/cash-session': {
@@ -863,6 +883,7 @@ const rootRouteChildren: RootRouteChildren = {
   BillviewRoute: BillviewRoute,
   LoginRoute: LoginRoute,
   QrMenuRoute: QrMenuRoute,
+  TokenDisplayRoute: TokenDisplayRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
