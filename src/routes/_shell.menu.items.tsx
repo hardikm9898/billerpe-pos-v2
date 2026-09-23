@@ -1,4 +1,5 @@
 import { FieldError, useFormCheck } from "@/lib/formCheck";
+import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import {
@@ -65,7 +66,7 @@ interface ImportRow {
   error?: string;
 }
 
-const CSV_TEMPLATE_HEADERS = ["Name", "Category", "Price", "SKU", "Veg", "Active"];
+const CSV_TEMPLATE_HEADERS = ["Name", "Category", "Price", "Short code", "Veg", "Active"];
 const CSV_TEMPLATE_SAMPLE = [
   ["Paneer Tikka", "Punjabi Mains", "260", "PT01", "Yes", "Yes"],
   ["Egg Fry", "Starters", "180", "", "No", "Yes"],
@@ -180,14 +181,14 @@ function MenuItemsPage() {
     [store.variantMasters, viewMenuId],
   );
 
-  const rows = useMemo(
-    () =>
-      store.menuItems
-        .filter((i) => categoriesById.get(i.categoryId)?.menuId === viewMenuId)
-        .filter((i) => cat === "all" || i.categoryId === cat)
-        .filter((i) => !q || i.name.toLowerCase().includes(q.toLowerCase())),
-    [store.menuItems, categoriesById, viewMenuId, cat, q],
-  );
+  const rows = useMemo(() => {
+    const onMenu = store.menuItems
+      .filter((i) => categoriesById.get(i.categoryId)?.menuId === viewMenuId)
+      .filter((i) => cat === "all" || i.categoryId === cat);
+    // Name OR short code (owner request, 2026-09-22) - searchMenuItems is the
+    // biller's own item search, so typing a code finds the same item here.
+    return q ? searchMenuItems(onMenu, q) : onMenu;
+  }, [store.menuItems, categoriesById, viewMenuId, cat, q]);
   const paged = usePagedRows(rows, 10);
 
   useEffect(() => setSelected([]), [q, cat]);
@@ -311,7 +312,7 @@ function MenuItemsPage() {
             <Input
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search items"
+              placeholder="Search items or short code"
               className="pl-9"
             />
           </div>
@@ -430,9 +431,11 @@ function MenuItemsPage() {
               },
               { key: "cat", header: "Category", cell: (i) => catName(i.categoryId) },
               {
-                key: "kitchen",
-                header: "Kitchen",
-                cell: (i) => store.resolveKitchenForCategory(i.categoryId)?.name ?? "—",
+                key: "shortCode",
+                header: "Short code",
+                cell: (i) => (
+                  <span className="num">{itemShortCode(i.sku)?.toUpperCase() ?? "—"}</span>
+                ),
               },
               {
                 key: "variants",
@@ -461,8 +464,7 @@ function MenuItemsPage() {
                 <div>
                   <p className="font-medium">{i.name}</p>
                   <p className="text-xs text-muted-foreground">
-                    {catName(i.categoryId)} ·{" "}
-                    {store.resolveKitchenForCategory(i.categoryId)?.name ?? "—"}
+                    {catName(i.categoryId)} · {itemShortCode(i.sku)?.toUpperCase() ?? "—"}
                   </p>
                 </div>
                 <div className="text-right">
@@ -562,7 +564,7 @@ function MenuItemsPage() {
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>SKU (optional)</Label>
+                  <Label>Short code (optional)</Label>
                   <Input
                     value={draft.sku ?? ""}
                     onChange={(e) => setDraft({ ...draft, sku: e.target.value.slice(0, 5) })}
@@ -917,7 +919,7 @@ function MenuItemsPage() {
                     header: "Price",
                     cell: (r) => (r.price ? <Money value={r.price} /> : "—"),
                   },
-                  { key: "sku", header: "SKU", cell: (r) => r.sku ?? "—" },
+                  { key: "sku", header: "Short code", cell: (r) => r.sku ?? "—" },
                   { key: "veg", header: "Veg", cell: (r) => (r.veg ? "Veg" : "Non-Veg") },
                   {
                     key: "status",

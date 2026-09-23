@@ -10,6 +10,7 @@ import {
 import type { ReactNode } from "react";
 import { toast } from "sonner";
 import { computeBill, type EngineChargeRule, type EngineTax } from "@/lib/billEngine";
+import { splitCheck } from "@/lib/payments";
 import QRCode from "qrcode";
 
 import { OFFLINE_SETTINGS, ROLE_PERMISSION_DEFAULTS, ROLE_SPECIAL_DEFAULTS } from "./data";
@@ -21,6 +22,7 @@ import {
   menuApi,
   paymentModeApi,
   type RawPaymentMode,
+  type OtherPayment,
   paymentModeDefaultApi,
   type RawPaymentModeDefault,
   invoiceFormateApi,
@@ -31,6 +33,8 @@ import {
   billChargeApi,
   type RawBillChargeRule,
   notificationSettingApi,
+  posPreferenceApi,
+  type RawPosPreferences,
   type RawNotificationSetting,
   rolePermissionApi,
   type RawRolePermissionDefault,
@@ -837,7 +841,7 @@ interface Ctx extends State {
     /** `save`: make sure the bill exists on the exe even for a pickup
      * (which otherwise stays local until settled) - the e-bill needs it. */
     options?: { print?: boolean; save?: boolean },
-  ) => Promise<{ ok: boolean; backendId?: number }>;
+  ) => Promise<{ ok: boolean; backendId?: number; orderNo?: number; billNo?: string }>;
   /** tip is Dine In only (settleBills' own contract - Pickup settles
    * through adminOrder instead, a different call this doesn't carry tip
    * into) and deliberately separate from `payments`: it's not part of the
@@ -966,6 +970,8 @@ interface Ctx extends State {
   loadPaymentModesFromServer: () => Promise<void>;
   loadPaymentModeDefaultsFromServer: () => Promise<void>;
   loadBillChargeRulesFromServer: () => Promise<void>;
+  /** How this outlet's screens are laid out, from the exe. */
+  loadPosPreferencesFromServer: () => Promise<void>;
   loadNotificationSettingsFromServer: () => Promise<void>;
   loadRolePermissionsFromServer: () => Promise<void>;
   loadServiceChargeFromServer: () => Promise<void>;
@@ -1223,12 +1229,45 @@ function mapRawMenuCatalog(m: RawMenuCatalog): Menu {
   };
 }
 
+// Cash/UPI/Card/Due have their own amounts on an order; every other mode
+// (the outlet's own - Paytm, ...) travels as `other` and is stored in
+// other_payments (billerpe-local-exe/helpers/otherPayments.js; owner report,
+// 2026-09-22: such a bill could not be settled at all).
+const BUILT_IN_MODES = ["cash", "upi", "card", "due"];
+export function isBuiltInMode(mode: string): boolean {
+  return BUILT_IN_MODES.includes(mode.trim().toLowerCase());
+}
+export function otherPaymentsOf(payments: PaymentSplit[]): OtherPayment[] {
+  const byName = new Map<string, number>();
+  for (const p of payments) {
+    if (isBuiltInMode(p.mode) || !(p.amount > 0)) continue;
+    byName.set(p.mode, Math.round(((byName.get(p.mode) ?? 0) + p.amount) * 100) / 100);
+  }
+  return [...byName].map(([name, amount]) => ({ name, amount }));
+}
+/** The order's stored other_payments as payment lines (bad JSON -> none). */
+export function parseOtherPayments(value: string | null | undefined): PaymentSplit[] {
+  if (!value) return [];
+  try {
+    const list = JSON.parse(value) as { name?: string; amount?: number }[];
+    return Array.isArray(list)
+      ? list
+          .filter((p) => p && p.name && Number(p.amount) > 0)
+          .map((p) => ({ mode: String(p.name), amount: Number(p.amount) }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 function mapRawPaymentMode(m: RawPaymentMode): PaymentModeConfig {
   return {
     id: String(m.id),
     name: m.name,
     active: m.active,
-    deletable: m.deletable,
+    // Cash and Due are mandatory (never off, renamed or removed) - the exe
+    // enforces it; the name check covers a row that lost its flag.
+    deletable: m.deletable && !["cash", "due"].includes(m.name.trim().toLowerCase()),
   };
 }
 
@@ -1562,6 +1601,7 @@ function mapRawUser(u: RawHotelUser): User {
     // way to display or re-derive it. Left blank; only a re-save sets a
     // new one.
     pin: "",
+    ...(u.is_owner ? { isOwner: true } : {}),
     permissionOverrides: parseOverrides(u.permission_overrides),
     // permissionOverrides deliberately isn't seeded from the real
     // backend's own hms_user_accesses here (used to be, via
@@ -1992,8 +2032,10 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       { mode: "UPI" as const, amount: detail.upi },
       { mode: "Card" as const, amount: detail.card },
       { mode: "Due" as const, amount: detail.due },
-    ] satisfies PaymentSplit[]
-  ).filter((p) => p.amount > 0);
+    ] as PaymentSplit[]
+  )
+    .filter((p) => p.amount > 0)
+    .concat(parseOtherPayments(detail.other_payments));
   return {
     id: `oh-${detail.id}`,
     orderNo: parseBillNoAsOrderNo(detail.bill_no, detail.id),
@@ -2129,6 +2171,35 @@ function oneOrderPerBackendId(state: State): State {
   };
 }
 
+/**
+ * The exe's copy of an order THIS tab has just created (its first KOT/Hold/
+ * Save/Settle is still in flight), taken over by the local order it belongs
+ * to. The exe's copy is the truth for everything that was sent; only items
+ * added to the cart after the request left are still local-only, so each
+ * fresh line cancels out one matching local un-sent line and the rest are
+ * kept. Without that the item appeared twice and the amount doubled.
+ */
+function adoptOwnOrder(local: Order, fresh: Order): Order {
+  const leftovers = local.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+  for (const line of fresh.lines) {
+    const i = leftovers.findIndex(
+      (l) => l.itemId === line.itemId && l.qty === line.qty && l.price === line.price,
+    );
+    if (i >= 0) leftovers.splice(i, 1);
+  }
+  return {
+    ...fresh,
+    id: local.id,
+    guests: local.guests || fresh.guests,
+    menuId: local.menuId ?? fresh.menuId,
+    customerName: fresh.customerName ?? local.customerName,
+    customerPhone: fresh.customerPhone ?? local.customerPhone,
+    customerAddress: fresh.customerAddress ?? local.customerAddress,
+    customerGstin: fresh.customerGstin ?? local.customerGstin,
+    lines: [...fresh.lines, ...leftovers],
+  };
+}
+
 function mergeServerOrder(local: Order, fresh: Order): Order {
   if (local.status === "Settled" || local.status === "Cancelled" || local.editingSettledOrderId) {
     return local;
@@ -2210,7 +2281,11 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
     billNo: detail.bill_no,
     type: detail.order_type === "dinin" ? "Dine In" : "Pickup",
     tableId,
-    tableLabel: detail.hms_table_mst?.table_name ?? "—",
+    // A pickup order has no table at all, so the table name is empty - it
+    // showed as "—" in the Running pickup list after a reload (owner report,
+    // 2026-09-22), while the same order said "Take Away" before it.
+    tableLabel:
+      detail.order_type === "dinin" ? (detail.hms_table_mst?.table_name ?? "—") : "Take Away",
     // Not tracked anywhere on the backend Order model - see
     // mapRawOrderHistoryEntry's own comment on the same gap.
     guests: 0,
@@ -2544,11 +2619,20 @@ function loadInitialState(): State {
     const saved = window.localStorage.getItem("billerpe.session");
     if (!saved) return initialState;
     const parsed = JSON.parse(saved) as { userId?: string; authed: boolean };
+    // Which billing screen THIS terminal uses. It is deliberately per
+    // terminal (the Settings screen says so), but it was not remembered at
+    // all, so a refresh sent a keyboard till back to touch billing. The
+    // outlet-wide display settings come from the exe instead
+    // (loadPosPreferencesFromServer).
+    const terminalMode = window.localStorage.getItem("billerpe.displayMode");
     // Registration is never restored from here - ServerGate asks the exe.
     return {
       ...initialState,
       authed: parsed.authed === true && !!parsed.userId,
       currentUserId: parsed.userId ?? initialState.currentUserId,
+      ...(terminalMode === "Keyboard" || terminalMode === "Touch"
+        ? { displayMode: terminalMode }
+        : {}),
     };
   } catch {
     return initialState;
@@ -2571,6 +2655,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // sequence number - only the response to the most-recently-issued call is
   // ever applied.
   const tablesLoadSeq = useRef(0);
+
+  // Keeps a display setting for the whole outlet (the exe holds it). Never
+  // blocks the screen: the change is already applied locally, and a failed
+  // save only means the next device won't see it yet.
+  const savePosPreference = useCallback(async (change: Partial<RawPosPreferences>) => {
+    try {
+      await posPreferenceApi.save(change);
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.message : "Could not save this display setting",
+      );
+    }
+  }, []);
+
+  // Local orders whose FIRST save to the exe is in flight right now (KOT,
+  // Hold, Save/Bill, Settle). The exe creates the real order and announces it
+  // immediately, so a refresh can land while this tab still has no order id
+  // for it - and used to reconstruct it as a second entry, showing one pickup
+  // order twice in the Running pickup list (owner report, 2026-09-22; it only
+  // collapsed back into one once the reply finally arrived). While an id is
+  // in here, loadTablesFromServer hands the incoming order to that local
+  // order instead of adding a new one.
+  const creatingRef = useRef<Set<string>>(new Set());
+  const markCreating = useCallback((id: string) => {
+    creatingRef.current.add(id);
+  }, []);
+  const doneCreating = useCallback((id: string) => {
+    creatingRef.current.delete(id);
+  }, []);
 
   const currentUser = useMemo(
     () => s.sessionUser ?? s.users.find((u) => u.id === s.currentUserId) ?? NO_USER,
@@ -4019,6 +4132,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
 
       const run = async () => {
+        if (!o.backendId) markCreating(orderId);
         try {
           const res = await orderApi.holdOrder({
             order_type: o.type === "Dine In" ? "dinin" : "pickup",
@@ -4067,6 +4181,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.success(`Order #${orderNo} on hold`, { description: o.tableLabel });
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not hold order");
+        } finally {
+          doneCreating(orderId);
         }
       };
       void run();
@@ -4288,6 +4404,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
 
       const run = async () => {
+        if (!o.backendId) markCreating(orderId);
         try {
           const res = await orderApi.kotOrder({
             order_type: o.type === "Dine In" ? "dinin" : "pickup",
@@ -4431,6 +4548,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           );
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not send KOT");
+        } finally {
+          doneCreating(orderId);
         }
       };
       void run();
@@ -4590,7 +4709,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // not on any KDS), which also gives the order its token.
         let backendId = o.backendId;
         let billed: Order = o;
-        if ((options?.print || options?.save || pdfAfterSave) && (unsentLines.length || !backendId)) {
+        // Always put the order on the exe when its bill is generated -
+        // "Save" alone used to skip this, so a saved pickup bill existed
+        // nowhere but this screen: it was announced with the placeholder
+        // number this screen had invented ("#101"), had no real bill number,
+        // and vanished on the next refresh (owner report, 2026-09-22).
+        if (unsentLines.length || !backendId) {
           try {
             const recorded = await recordPickupLinesWithoutKitchen(o, unsentLines);
             backendId = recorded.backendId;
@@ -4608,7 +4732,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.success(`Bill generated for #${billed.orderNo}`);
         if (backendId && options?.print) await doPrintBill(billed, backendId, { extras: billExtras });
         else if (backendId && pdfAfterSave) await doPrintBill(billed, backendId, { pdfOnly: true });
-        return { ok: true, backendId };
+        return { ok: true, backendId, orderNo: billed.orderNo, ...(billed.billNo ? { billNo: billed.billNo } : {}) };
       }
 
       const table = o.tableId ? s.tables.find((t) => t.id === o.tableId) : undefined;
@@ -4622,7 +4746,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const savedDraftIds = new Set(unsentLines.map((l) => l.id));
       const billedRound = billedWithoutKotRound(o.lines);
 
-      const run = async (): Promise<{ ok: boolean; backendId?: number }> => {
+      const run = async (): Promise<{
+        ok: boolean;
+        backendId?: number;
+        orderNo?: number;
+        billNo?: string;
+      }> => {
+        if (!o.backendId) markCreating(orderId);
         try {
           // No KOT fired yet (no backendId) - controller/kto.js#AdminOrder's
           // "no order_id" branch creates the Order fresh in this same call
@@ -4688,16 +4818,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             id: o.id,
             backendId,
           });
-          toast.success(`Bill generated for #${o.orderNo}`);
+          // The order as it now IS - `o` is this render's snapshot, taken
+          // before the exe answered, so it still carries the placeholder
+          // number this screen invented ("#101"). Printing/telling the
+          // cashier from `o` put that number on the paper and in the message
+          // instead of the real bill number (owner report, 2026-09-22).
+          const billed: Order = { ...o, backendId, orderNo, ...(billNo ? { billNo } : {}) };
+          toast.success(`Bill generated for #${orderNo}`);
           if (options?.print && backendId) {
-            await doPrintBill(o, backendId, { extras: billExtras });
+            await doPrintBill(billed, backendId, { extras: billExtras });
           } else if (pdfAfterSave && backendId) {
-            await doPrintBill(o, backendId, { pdfOnly: true });
+            await doPrintBill(billed, backendId, { pdfOnly: true });
           }
-          return { ok: true, backendId };
+          return { ok: true, backendId, orderNo, ...(billNo ? { billNo } : {}) };
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not generate bill");
           return { ok: false };
+        } finally {
+          doneCreating(orderId);
         }
       };
       return run();
@@ -4717,31 +4855,50 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return;
       }
       // Dine-in no longer needs a saved order first: saveAndSettle below
-      // saves and settles in one call. Pickup still settles through the
-      // order it was saved as.
-      if (o.type !== "Dine In" && !o.backendId) {
-        toast.error("Send a KOT first, then settle this order");
+      // saves and settles in one call. A counter (pickup) order records its
+      // items on the exe first (an "Only KOT" round - on the order, not
+      // printed, not on any KDS), the same way generating its bill does:
+      // before this, "add item, Settle" was refused outright with "Send a
+      // KOT first" (owner report, 2026-09-22).
+      if (o.type !== "Dine In" && !o.backendId && !o.lines.length) {
+        toast.error("Add items to this order before settling");
         return;
       }
-      // Backend only has cash/upi/card/due - any other configured payment
-      // mode (custom modes are supported by this app's PaymentModeConfig,
-      // the backend has no equivalent) can't be sent and would silently
-      // vanish from the real total if allowed through.
-      const known = new Set(["Cash", "UPI", "Card", "Due"]);
-      const unknownMode = payments.find((p) => !known.has(p.mode));
-      if (unknownMode) {
-        toast.error(`"${unknownMode.mode}" isn't a payment mode the backend supports yet`, {
-          description: "Only Cash, UPI, Card, and Due can be settled against the real order.",
-        });
-        return;
-      }
+      // The outlet's own payment modes (Paytm, ...) travel as `other`.
+      const other = otherPaymentsOf(payments);
       const sumFor = (mode: string) =>
         payments.filter((p) => p.mode === mode).reduce((sum, p) => sum + p.amount, 0);
-      const cashAmt = sumFor("Cash");
+      // What this bill still needs, from the one bill engine - never just the
+      // sum of what was typed. Only CASH may be more than that: the extra is
+      // change handed back, so the bill records exactly its own total (owner
+      // rule, 2026-09-22; the keyboard screen used to settle a bill for twice
+      // its value when two modes each held the full amount).
+      const settleBillSettings: BillSettings = {
+        serviceCharge: s.serviceCharge,
+        deliveryChargeRule: s.deliveryChargeRule,
+        packagingChargeRule: s.packagingChargeRule,
+        taxRules: s.taxRules,
+        invoiceFormat: s.invoiceFormat,
+        tables: s.tables,
+        menuItems: s.menuItems,
+      };
+      const alreadyPaid = (o.payments ?? []).reduce((sum, p) => sum + p.amount, 0);
+      const billDue =
+        Math.round((orderTotals(o, settleBillSettings).grand - alreadyPaid) * 100) / 100;
+      const check = splitCheck(payments, billDue);
+      if (check.problem) {
+        toast.error("Payment does not match the bill", { description: check.problem });
+        return;
+      }
+      const cashAmt =
+        billDue > 0
+          ? Math.max(0, Math.round((billDue - check.nonCash) * 100) / 100)
+          : sumFor("Cash");
+      const changeDue = check.change;
       const upiAmt = sumFor("UPI");
       const cardAmt = sumFor("Card");
       const dueAmt = sumFor("Due");
-      const settleTotal = payments.reduce((sum, p) => sum + p.amount, 0);
+      const settleTotal = billDue > 0 ? billDue : payments.reduce((sum, p) => sum + p.amount, 0);
 
       const mode = payments.length > 1 ? "Split" : payments[0].mode;
       const cashPortion = payments
@@ -4750,11 +4907,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const total = payments.reduce((sum, p) => sum + p.amount, 0);
 
       const run = async () => {
+        if (!o.backendId) markCreating(orderId);
         let backendId = o.backendId;
         // A never-saved order only gets its real bill number now.
         let orderNo = o.orderNo;
         let billNo = o.billNo;
+        let target = o;
         try {
+          if (o.type !== "Dine In") {
+            const unsent = o.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+            if (!backendId || unsent.length) {
+              const recorded = await recordPickupLinesWithoutKitchen(o, unsent);
+              target = recorded.order;
+              backendId = recorded.backendId;
+              orderNo = target.orderNo;
+              if (target.billNo) billNo = target.billNo;
+            }
+          }
           if (o.type === "Dine In") {
             // Already billed and nothing changed since: settle that bill.
             // Anything else (never saved, running without a bill, or items
@@ -4772,6 +4941,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 upi: upiAmt,
                 card: cardAmt,
                 due: dueAmt,
+                ...(other.length ? { other } : {}),
                 ...(tip ? { tip } : {}),
                 ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
               });
@@ -4796,6 +4966,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                   upi: upiAmt,
                   card: cardAmt,
                   due: dueAmt,
+                  ...(other.length ? { other } : {}),
                   ...(tip ? { tip } : {}),
                   ...(dueAmt > 0 && o.customerPhone ? { mobile: o.customerPhone } : {}),
                 },
@@ -4822,8 +4993,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               tables: s.tables,
               menuItems: s.menuItems,
             };
-            const totals = orderTotals(o, billSettings);
-            const allMenuItems = o.lines.map((l) => {
+            const totals = orderTotals(target, billSettings);
+            const allMenuItems = target.lines.map((l) => {
               const mi = s.menuItems.find((m) => m.id === l.itemId);
               return {
                 id: Number(l.itemId),
@@ -4836,13 +5007,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 variantData: variantPayload(l, mi),
               };
             });
-            await orderApi.adminOrder({
+            const res = await orderApi.adminOrder({
               order_type: "pickup",
-              order_id: o.backendId!,
+              order_id: backendId!,
               cash: cashAmt,
               upi: upiAmt,
               card: cardAmt,
               due: dueAmt,
+              ...(other.length ? { other } : {}),
               userName: o.customerName,
               mobile: o.customerPhone,
               gstin: o.customerGstin,
@@ -4860,6 +5032,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 taxes: buildCartTaxes(totals, s.taxRules),
               },
             });
+            // The exe answers with the order's real bill number - the
+            // screen's own copy can still be the placeholder one.
+            if (res.bill_no) {
+              billNo = res.bill_no;
+              orderNo = parseBillNoAsOrderNo(res.bill_no, res.orderId ?? backendId ?? o.orderNo);
+            }
           }
           applySettlement(backendId, orderNo, billNo);
           // A bill settled partly as Due: show its real Due entry (dated by
@@ -4872,7 +5050,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.success(`Order #${orderNo} settled`, {
             description:
               payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") +
-              (tip ? ` · Tip ₹${tip}` : ""),
+              (tip ? ` · Tip ₹${tip}` : "") +
+              (changeDue > 0 ? ` · Return ₹${changeDue}` : ""),
           });
         } catch (err) {
           // Saved but not settled (e.g. the payment was refused): the table
@@ -4912,6 +5091,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             }));
           }
           toast.error(err instanceof ApiError ? err.message : "Could not settle order");
+        } finally {
+          doneCreating(orderId);
         }
       };
 
@@ -5078,14 +5259,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
       let payment: Parameters<typeof editSettledOrderApi.edit>[0]["payment"];
       if (payments) {
-        const unknown = payments.find((p) => !["Cash", "UPI", "Card", "Due"].includes(p.mode));
-        if (unknown) {
-          toast.error(`"${unknown.mode}" isn't a payment mode the backend supports yet`);
-          return false;
-        }
         const sum = (mode: string) =>
           payments.filter((p) => p.mode === mode).reduce((t, p) => t + p.amount, 0);
-        payment = { cash: sum("Cash"), upi: sum("UPI"), card: sum("Card"), due: sum("Due") };
+        const other = otherPaymentsOf(payments);
+        payment = {
+          cash: sum("Cash"),
+          upi: sum("UPI"),
+          card: sum("Card"),
+          due: sum("Due"),
+          ...(other.length ? { other } : {}),
+        };
         if (payment.due > 0) {
           if (!o.customerPhone) {
             toast.error("Attach the customer's mobile number to keep an amount as Due");
@@ -5231,6 +5414,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         return;
       }
+      // A held order is never merged - neither away nor into (owner rule,
+      // 2026-09-22); it can only be transferred to a free table. Same rule
+      // on the exe (controller/table.js#destinationProblem).
+      if (srcOrder.status === "Hold") {
+        toast.error("Held orders can't be merged", {
+          description: `${sourceLabel} is on hold — transfer it to a free table instead.`,
+        });
+        return;
+      }
+      if (dstOrder?.status === "Hold") {
+        toast.error("Held orders can't be merged", {
+          description: `${destLabel} is on hold — pick a running table.`,
+        });
+        return;
+      }
 
       // POST /moveTable (controller/table.js) does exactly this merge -
       // folds table1's order into whatever's already on table2 - but it
@@ -5355,6 +5553,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Transfer blocked", { description: "The destination table is Reserved." });
         return;
       }
+      if (o.status === "Hold" && dst.status !== "Free") {
+        toast.error("Transfer blocked", {
+          description: "A held order can only be transferred to a free table — it can't be merged.",
+        });
+        return;
+      }
 
       // See mergeTables' comment - POST /moveTable decides merge-vs-transfer
       // itself based on whether table2 already has an order, so a synced
@@ -5428,7 +5632,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             return {
               ...t,
               status:
-                o.status === "Bill Generated" ? ("Bill Generated" as const) : ("Running" as const),
+                o.status === "Bill Generated"
+                  ? ("Bill Generated" as const)
+                  : o.status === "Hold"
+                    ? ("Hold" as const)
+                    : ("Running" as const),
               guests: o.guests,
               orderId: o.id,
               occupiedSince: nowStamp(),
@@ -6340,9 +6548,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const currentKnownIds = new Set(
             p.orders.map((o) => o.backendId).filter((id): id is number => id !== undefined),
           );
-          const trulyNew = resolved.filter(
+          const candidates = resolved.filter(
             (o) => o.backendId === undefined || !currentKnownIds.has(o.backendId),
           );
+          // An order this tab is in the middle of creating (see creatingRef):
+          // give it to the local order it belongs to - a dine-in order by its
+          // table, a pickup order to the one pickup draft being saved - rather
+          // than adding a second entry for the same real order.
+          const adopted = new Map<string, Order>();
+          const trulyNew = candidates.filter((fresh) => {
+            const mine = p.orders.find(
+              (o) =>
+                o.backendId === undefined &&
+                !adopted.has(o.id) &&
+                creatingRef.current.has(o.id) &&
+                (fresh.tableId ? o.tableId === fresh.tableId : o.type === "Pickup"),
+            );
+            if (!mine) return true;
+            adopted.set(mine.id, adoptOwnOrder(mine, fresh));
+            return false;
+          });
           // Prefer a freshly-resolved order for this table (a genuinely new
           // discovery this call). Otherwise, if the server's activeOrders
           // list still includes an order for this table, keep pointing at
@@ -6357,6 +6582,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // table grid a second time. Reads `p.orders` here too (not
           // `s.orders`) for the same freshness reason as trulyNew above.
           const tablesWithOrders = mappedTables.map((t) => {
+            const mineHere = [...adopted.values()].find((o) => o.tableId === t.id);
+            if (mineHere) return { ...t, orderId: mineHere.id };
             const freshMatch = trulyNew.find((o) => o.tableId === t.id);
             if (freshMatch) return { ...t, orderId: freshMatch.id };
             const stillActiveBackendId = activeOrders.find(
@@ -6369,6 +6596,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             return knownLocal ? { ...t, orderId: knownLocal.id } : t;
           });
           const merged = p.orders.map((o) => {
+            const mine = adopted.get(o.id);
+            if (mine) return mine;
             if (o.backendId === undefined) return o;
             const fresh = freshByBackendId.get(o.backendId);
             // The merge is what makes a KOT fired on the Captain App show up
@@ -6421,8 +6650,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                           { mode: "UPI" as const, amount: raw.upi },
                           { mode: "Card" as const, amount: raw.card },
                           { mode: "Due" as const, amount: raw.due },
-                        ] satisfies PaymentSplit[]
-                      ).filter((pm) => pm.amount > 0),
+                        ] as PaymentSplit[]
+                      )
+                        .filter((pm) => pm.amount > 0)
+                        .concat(parseOtherPayments(raw.other_payments)),
                     }
                   : { ...x, id: `o-final-${backendId}`, status: "Cancelled" }
                 : x,
@@ -8422,6 +8653,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         notifications: p.notifications.map((n) => ({ ...n, read: true })),
       })),
+    // How this outlet's screens are laid out. These used to live only in
+    // this tab's memory, so choosing "Sections" and refreshing put the Table
+    // Grid straight back to Tabs (owner report, 2026-09-22).
+    loadPosPreferencesFromServer: async () => {
+      try {
+        const { preferences } = await posPreferenceApi.get();
+        patch((p) => ({
+          ...p,
+          tableGridView: preferences.tableGridView,
+          menuImages: preferences.menuImages,
+          keyboardOnly: preferences.keyboardOnly,
+          defaultOrderType: preferences.defaultOrderType,
+        }));
+      } catch (err) {
+        // Never blocks billing - the screens just keep their defaults.
+        console.error(
+          "[settings] Could not load display settings:",
+          err instanceof ApiError ? err.message : err,
+        );
+      }
+    },
     loadNotificationSettingsFromServer: async () => {
       try {
         const { settings } = await notificationSettingApi.getAll();
@@ -8982,6 +9234,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setPaymentModeActive: (id, active) => {
       const target = s.paymentModes.find((m) => m.id === id);
       if (!target) return;
+      if (!target.deletable && !active) {
+        toast.error("Cash and Due are mandatory payment modes", {
+          description: "They can't be turned off.",
+        });
+        return;
+      }
       const run = async () => {
         try {
           await paymentModeApi.edit(Number(id), target.name, active);
@@ -9152,18 +9410,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     setDisplayMode: (mode) => {
       patch((p) => ({ ...p, displayMode: mode }));
+      try {
+        window.localStorage.setItem("billerpe.displayMode", mode);
+      } catch {
+        // A locked-down browser just forgets it on the next reload.
+      }
       toast.success(`${mode} layout applied to this terminal`);
     },
     setMenuImages: (on) => {
       patch((p) => ({ ...p, menuImages: on }));
+      void savePosPreference({ menuImages: on });
       toast.success(on ? "Item grid shows images" : "Item grid shows a compact list");
     },
     setTableGridView: (view) => {
       patch((p) => ({ ...p, tableGridView: view }));
+      void savePosPreference({ tableGridView: view });
       toast.success(`Table Grid set to ${view === "Sections" ? "Sections" : "Tabs"} layout`);
     },
     setKeyboardOnly: (on) => {
       patch((p) => ({ ...p, keyboardOnly: on }));
+      void savePosPreference({ keyboardOnly: on });
       toast.success(
         on
           ? "Keyboard Billing is now the only billing screen"
@@ -9172,6 +9438,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     setDefaultOrderType: (type) => {
       patch((p) => ({ ...p, defaultOrderType: type }));
+      void savePosPreference({ defaultOrderType: type });
       toast.success(`New orders default to ${type}`);
     },
     setGuestCount: (orderId, guests) => {
@@ -9241,11 +9508,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       })),
     settleDueBills: (ids, payments) => {
       if (guardBlocked()) return Promise.resolve(false);
-      const known = new Set(["Cash", "UPI", "Card"]);
-      const unknownMode = payments.find((p) => !known.has(p.mode));
-      if (unknownMode) {
-        toast.error(`"${unknownMode.mode}" isn't a payment mode the backend supports here`, {
-          description: "Only Cash, UPI, and Card can be recorded against a due bill.",
+      // Any mode collects a due - Cash/UPI/Card or the outlet's own (Paytm,
+      // ...) - except Due itself: collecting a due can't create more due.
+      if (payments.some((p) => p.mode.trim().toLowerCase() === "due")) {
+        toast.error("Pick how the customer paid", {
+          description: "A due can't be collected as more Due.",
         });
         return Promise.resolve(false);
       }
@@ -9304,6 +9571,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         UPI: "upi",
         Card: "card",
       };
+      // The outlet's own modes are sent by name.
+      const dueMode = (m: string) => modeMap[m] ?? m;
 
       const run = async () => {
         try {
@@ -9315,14 +9584,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             for (const payment of payments) {
               await dueApi.settleDue({
                 id: bills[0].backendOrderId!,
-                mode: modeMap[payment.mode],
+                mode: dueMode(payment.mode),
                 receive: payment.amount,
               });
             }
           } else {
             await dueApi.settleAllDue(
               bills.map((b) => b.backendOrderId!),
-              modeMap[payments[0].mode],
+              dueMode(payments[0].mode),
             );
           }
           patch((p) => ({
@@ -9425,10 +9694,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // send then fails. Pickup included - `save` makes sure a pickup bill
       // exists on the exe, which the e-bill is rendered from.
       const hasUnsent = o.lines.some((l) => l.kotRound === UNSENT_ROUND);
+      // The number to name this bill by: `o` is this render's snapshot, so
+      // for an order billed just now it still holds the placeholder number
+      // this screen invented until generateBill hands back the real one.
+      let orderNo = o.orderNo;
       if ((o.status !== "Bill Generated" && o.status !== "Settled") || hasUnsent) {
         const result = await value.generateBill(orderId, { save: true });
         if (!result.ok) return false; // generateBill already toasted why
         backendId = result.backendId;
+        if (result.orderNo !== undefined) orderNo = result.orderNo;
       }
       if (!backendId) {
         toast.error("Order isn't synced with the server yet");
@@ -9439,7 +9713,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         await value.loadEBillCreditFromServer();
         log(
           "E-Bill Sent",
-          `Order #${o.orderNo}`,
+          `Order #${orderNo}`,
           `${s.eBillCredit} credits`,
           `${Math.max(0, s.eBillCredit - 1)} credits`,
           undefined,
@@ -9508,6 +9782,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return;
       }
       const destLabel = tableLabel(destTableId);
+      const destTable = s.tables.find((t) => t.id === destTableId);
+      if (
+        destTable &&
+        destTable.status !== "Free" &&
+        (o.status === "Hold" || destTable.status === "Hold")
+      ) {
+        toast.error("Held orders can't be merged", {
+          description: "Move this round to a free table instead.",
+        });
+        return;
+      }
       try {
         await tableApi.moveKot({
           orderId: o.backendId,

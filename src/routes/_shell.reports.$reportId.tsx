@@ -188,6 +188,11 @@ function ReportDetailPage() {
               { label: "UPI", value: Math.round(Number(pc.upiTotal)) },
               { label: "Card", value: Math.round(Number(pc.cardTotal)) },
               { label: "Due", value: Math.round(Number(pc.dueTotal)) },
+              // The outlet's own payment modes (Paytm, ...), one line each.
+              ...(pc.otherModes ?? []).map((m) => ({
+                label: m.name,
+                value: Math.round(Number(m.total)),
+              })),
             ];
             result = {
               headers: ["Payment mode", "Amount"],

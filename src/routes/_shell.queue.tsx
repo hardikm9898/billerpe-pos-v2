@@ -196,6 +196,8 @@ function QueuePage() {
           <div className="space-y-1.5">
             <Label>Min. group size</Label>
             <Input
+              step={1}
+              allowEmpty
               type="number"
               min={1}
               value={minParty}
@@ -206,6 +208,8 @@ function QueuePage() {
           <div className="space-y-1.5">
             <Label>Max. group size</Label>
             <Input
+              step={1}
+              allowEmpty
               type="number"
               min={1}
               value={maxParty}
@@ -216,6 +220,7 @@ function QueuePage() {
           <div className="space-y-1.5">
             <Label>Alert after (min)</Label>
             <Input
+              step={1}
               type="number"
               min={1}
               value={thresholdMinutes}
@@ -386,6 +391,7 @@ function QueuePage() {
                 <div className="space-y-1.5">
                   <Label required>Party size</Label>
                   <Input
+                    step={1}
                     type="number"
                     min={1}
                     value={addDraft.partySize}

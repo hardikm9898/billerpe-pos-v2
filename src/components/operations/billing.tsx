@@ -1765,18 +1765,21 @@ export function PaymentModesSection() {
                 <p className="text-sm font-semibold">{m.name}</p>
                 {!m.deletable ? (
                   <span className="rounded-lg bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
-                    Protected
+                    Mandatory
                   </span>
                 ) : null}
               </div>
               <div className="mt-4 flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
+                  {/* Cash and Due are mandatory - always on (owner rule). */}
                   <Switch
-                    checked={m.active}
+                    checked={m.active || !m.deletable}
+                    disabled={!m.deletable}
+                    aria-label={`${m.name} selectable at billing`}
                     onCheckedChange={(v) => store.setPaymentModeActive(m.id, v)}
                   />
                   <span className="text-xs text-muted-foreground">
-                    {m.active ? "Selectable" : "Hidden"}
+                    {!m.deletable ? "Always on" : m.active ? "Selectable" : "Hidden"}
                   </span>
                 </div>
                 <div className="flex gap-1.5">
@@ -1815,7 +1818,8 @@ export function PaymentModesSection() {
               <FieldError message={modeForm.error("name")} />
               {!draft.deletable ? (
                 <p className="text-xs text-muted-foreground">
-                  Protected default modes can't be renamed.
+                  Cash and Due are mandatory payment modes — they can't be renamed, turned off
+                  or removed.
                 </p>
               ) : null}
             </div>

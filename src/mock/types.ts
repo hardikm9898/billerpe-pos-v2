@@ -72,6 +72,9 @@ export interface User {
   pin: string;
   /** Sparse exceptions to the role default. Owner ignores this entirely — always full access. */
   permissionOverrides?: PermissionOverrides;
+  /** THE owner's own login: locked - never turned off, never moved to
+   * another role, permissions never changed (owner rule, 2026-09-22). */
+  isOwner?: boolean;
 }
 
 export type TableStatus = "Free" | "Hold" | "Running" | "Bill Generated" | "Reserved";

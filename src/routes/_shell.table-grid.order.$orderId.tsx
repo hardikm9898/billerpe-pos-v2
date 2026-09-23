@@ -1,6 +1,7 @@
 import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
-import { searchMenuItems } from "@/lib/menuSearch";
+import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
+import { CustomerHistoryPanel } from "@/components/billing/customer-history";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import {
@@ -37,7 +38,7 @@ import {
   type SelectedAddon,
 } from "@/components/billing/keyboard-display";
 import { EmptyState, IconButton, Money, StatusBadge } from "@/components/kit";
-import { PaymentSplitEditor } from "@/components/operations/payment-split-editor";
+import { PaymentSplitEditor, splitCheck } from "@/components/operations/payment-split-editor";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -283,9 +284,6 @@ function OrderCartPage() {
   const [discountType, setDiscountType] = useState<"percent" | "flat">("percent");
   const [discountValue, setDiscountValue] = useState(10);
   const [customerOpen, setCustomerOpen] = useState(false);
-  const [custPhone, setCustPhone] = useState("");
-  const [lastOrder, setLastOrder] = useState<RawOrderDetail | null>(null);
-  const [lastOrderLoading, setLastOrderLoading] = useState(false);
   const [settleOpen, setSettleOpen] = useState(false);
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
   const [tip, setTip] = useState(0);
@@ -390,76 +388,6 @@ function OrderCartPage() {
     return [...map.entries()].sort((a, b) => b[0] - a[0]);
   }, [order?.lines]);
 
-  const digits = custPhone.replace(/\D/g, "");
-  const dueForPhone =
-    digits.length === 10
-      ? store.dueBills.filter((b) => b.mobile === digits && b.status === "Due")
-      : [];
-  const dueTotalForPhone = dueForPhone.reduce((s, b) => s + b.amount, 0);
-
-  // "Repeat this order" suggestion - fires the same moment the due-bill
-  // check above does (10 real digits entered), same reasoning: only worth
-  // a real lookup once the number is actually complete. excludeOrderId
-  // (this order's own backendId) keeps a returning customer's brand-new,
-  // still-empty order from "suggesting" itself.
-  useEffect(() => {
-    if (digits.length !== 10 || !order) {
-      setLastOrder(null);
-      return;
-    }
-    let cancelled = false;
-    setLastOrderLoading(true);
-    customerApi
-      .getLastOrder(digits, order.backendId)
-      .then(({ order: found }) => {
-        if (!cancelled) setLastOrder(found);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setLastOrder(null);
-        console.error(
-          "[order] Could not load last order for customer:",
-          err instanceof ApiError ? err.message : err,
-        );
-      })
-      .finally(() => {
-        if (!cancelled) setLastOrderLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [digits, order?.backendId]);
-
-  // Adds every still-available item from the suggested last order to the
-  // CURRENT cart at today's live price (store.addLine already re-resolves
-  // price/variant from the current local menu, same as any other add -
-  // never bills the old order's possibly-stale price). An item deleted or
-  // deactivated since that order is silently skipped rather than blocking
-  // the rest - matches the same "never trust a stale cart wholesale"
-  // stance QR ordering's own accept-time repricing already takes.
-  const repeatLastOrder = () => {
-    if (!order || !lastOrder) return;
-    let addedCount = 0;
-    for (const line of lastOrder.hms_orderDetails) {
-      const itemId = String(line.MenuId);
-      if (!store.menuItems.some((m) => m.id === itemId && m.active)) continue;
-      store.addLine(order.id, {
-        itemId,
-        qty: line.qty,
-        variant: line.variant_name ?? undefined,
-        addons: parseOrderAddons(line.addons),
-        note: line.comment || undefined,
-      });
-      addedCount += 1;
-    }
-    if (addedCount === 0) {
-      toast.error("None of those items are on the menu anymore");
-    } else {
-      toast.success(`Added ${addedCount} item${addedCount === 1 ? "" : "s"} from their last order`);
-    }
-  };
-
   if (!order && resumingEdit) {
     return <div className="p-6 text-sm text-muted-foreground">Opening the bill for editing…</div>;
   }
@@ -498,6 +426,9 @@ function OrderCartPage() {
 
   const paid = splits.reduce((s, p) => s + p.amount, 0);
   const due = Math.round((balance - paid) * 100) / 100;
+  // Only cash may be more than the bill; the extra is change (owner rule,
+  // 2026-09-22 - splitCheck is shared by every settle screen).
+  const settleCheck = splitCheck(splits, balance);
 
   return (
     <div className="grid h-[calc(100vh-4rem)] grid-rows-[auto_1fr] lg:grid-cols-[minmax(0,1fr)_400px] lg:grid-rows-1">
@@ -602,8 +533,10 @@ function OrderCartPage() {
                     ) : null}
                   </div>
                   <p className="mt-2 line-clamp-2 text-sm font-medium">{item.name}</p>
-                  {item.sku ? (
-                    <p className="num text-[10px] text-muted-foreground">{item.sku}</p>
+                  {itemShortCode(item.sku) ? (
+                    <p className="num text-[10px] text-muted-foreground">
+                      {itemShortCode(item.sku)}
+                    </p>
                   ) : null}
                   <div className="mt-2 flex items-center justify-between">
                     <Money value={item.price} className="text-sm font-semibold" />
@@ -1414,39 +1347,13 @@ function OrderCartPage() {
           address: order.customerAddress,
           gstin: order.customerGstin,
         }}
-        onPhoneChange={setCustPhone}
         onSave={(d) =>
           store.setCustomer(order.id, d.name, d.phone, { address: d.address, gstin: d.gstin })
         }
         onClear={() => store.setCustomer(order.id, "", "")}
       >
-        {() => (
-          <>
-            {digits.length === 10 && dueForPhone.length ? (
-              <p className="mt-1.5 rounded-lg bg-warning-soft px-2.5 py-1.5 text-xs text-warning">
-                Outstanding due: <Money value={dueTotalForPhone} className="font-semibold" /> ·{" "}
-                {dueForPhone.length} bill{dueForPhone.length > 1 ? "s" : ""}
-              </p>
-            ) : null}
-            {digits.length === 10 && lastOrderLoading ? (
-              <p className="mt-1.5 text-xs text-muted-foreground">Checking their last order…</p>
-            ) : null}
-            {digits.length === 10 && !lastOrderLoading && lastOrder ? (
-              <div className="mt-1.5 space-y-1.5 rounded-lg bg-surface-muted px-2.5 py-2">
-                <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-                  <History className="size-3.5" /> Last order · Bill #{lastOrder.bill_no}
-                </p>
-                <p className="text-xs">
-                  {lastOrder.hms_orderDetails
-                    .map((l) => `${l.qty}× ${l.hms_menu_mst?.item_name ?? "Item"}`)
-                    .join(", ")}
-                </p>
-                <Button size="sm" variant="outline" className="w-full" onClick={repeatLastOrder}>
-                  <History className="size-3.5" /> Repeat this order
-                </Button>
-              </div>
-            ) : null}
-          </>
+        {(typed) => (
+          <CustomerHistoryPanel digits={typed} orderId={order.id} backendId={order.backendId} />
         )}
       </CustomerDetailsDialog>
 
@@ -1585,12 +1492,10 @@ function OrderCartPage() {
           <DialogFooter>
             <Button
               onClick={() => {
-                if (Math.abs(due) > 0.5) {
+                if (settleCheck.problem) {
                   toast.error(
-                    isRefund
-                      ? "Split does not match refund total"
-                      : "Split does not match bill total",
-                    { description: `Balance of ₹${due.toLocaleString("en-IN")} remaining.` },
+                    isRefund ? "Refund does not match the total" : "Payment does not match the bill",
+                    { description: settleCheck.problem },
                   );
                   return;
                 }

@@ -1,6 +1,8 @@
 import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
-import { searchMenuItems } from "@/lib/menuSearch";
+import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
+import { splitCheck } from "@/lib/payments";
+import { CustomerHistoryPanel } from "@/components/billing/customer-history";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
@@ -16,6 +18,7 @@ import {
   Pause,
   Plus,
   PlusSquare,
+  Pencil,
   Printer,
   Receipt,
   Save,
@@ -36,6 +39,7 @@ import {
 import { toast } from "sonner";
 
 import { IconButton, StatusBadge } from "@/components/kit";
+import { Checkbox } from "@/components/ui/checkbox";
 import { UpiQrPanel } from "@/components/operations/payment-split-editor";
 import { Button } from "@/components/ui/button";
 import {
@@ -145,6 +149,13 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
   const [customerOpen, setCustomerOpen] = useState(false);
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveKotRound, setMoveKotRound] = useState<number | null>(null);
+  // Ticked un-sent lines, so a KOT can carry only part of what is in the
+  // cart - the touch screen has always allowed this, the keyboard screen
+  // could only ever fire everything (owner report, 2026-09-22). Nothing
+  // ticked keeps the old "send everything" behaviour.
+  const [pickedLineIds, setPickedLineIds] = useState<Set<string>>(new Set());
+  const [packagingOpen, setPackagingOpen] = useState(false);
+  const [packagingInput, setPackagingInput] = useState(0);
   const [noteLine, setNoteLine] = useState<OrderLine | null>(null);
   const [addonLine, setAddonLine] = useState<OrderLine | null>(null);
   const [newOrderOpen, setNewOrderOpen] = useState(false);
@@ -312,7 +323,11 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
     }
     // Prints on the KOT printer(s) and shows on the KDS
     // (billerpe-local-exe/services/kotAutoPrint.js, connection/socket.js).
-    store.generateKot(order.id);
+    const picked = [...pickedLineIds].filter((id) => newLines.some((l) => l.id === id));
+    store.generateKot(order.id, picked.length ? { lineIds: picked } : undefined);
+    setPickedLineIds(new Set());
+    // Only part of the cart went: stay on this order to send the rest.
+    if (picked.length && picked.length < newLines.length) return;
     moveToNewOrder();
   };
   // Records the round on the bill only: no printer, no KDS.
@@ -322,7 +337,13 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
       toast.error("Nothing new to send", { description: "Add items before sending a KOT." });
       return;
     }
-    store.generateKot(order.id, { onlyKot: true });
+    const pickedOnly = [...pickedLineIds].filter((id) => newLines.some((l) => l.id === id));
+    store.generateKot(order.id, {
+      onlyKot: true,
+      ...(pickedOnly.length ? { lineIds: pickedOnly } : {}),
+    });
+    setPickedLineIds(new Set());
+    if (pickedOnly.length && pickedOnly.length < newLines.length) return;
     moveToNewOrder();
   };
   const doHold = () => {
@@ -550,8 +571,35 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
             <div className="rounded-lg border border-border p-2.5">
               <p className="text-[10px] uppercase tracking-[0.08em] text-muted-foreground">Order</p>
               <p className="num text-lg font-bold">{order.orderNo ? `#${order.orderNo}` : "New"}</p>
-              <p className="text-[11px] text-muted-foreground">
-                {order.type} · {order.guests} guests · KOT {order.kotRounds}
+              <p className="flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
+                {order.type} ·
+                {/* Guests can be changed here too - only the touch screen
+                    could, so a dine-in order billed by keyboard was stuck at
+                    whatever it started with (owner report, 2026-09-22). */}
+                {order.type === "Dine In" ? (
+                  <span className="inline-flex items-center gap-0.5">
+                    <IconButton
+                      label="Decrease guest count"
+                      className="size-5"
+                      disabled={settled}
+                      onClick={() => store.setGuestCount(order.id, order.guests - 1)}
+                    >
+                      <Minus className="size-3" />
+                    </IconButton>
+                    <span className="num">{order.guests} guests</span>
+                    <IconButton
+                      label="Increase guest count"
+                      className="size-5"
+                      disabled={settled}
+                      onClick={() => store.setGuestCount(order.id, order.guests + 1)}
+                    >
+                      <Plus className="size-3" />
+                    </IconButton>
+                  </span>
+                ) : (
+                  <span>{order.guests} guests</span>
+                )}
+                · KOT {order.kotRounds}
               </p>
             </div>
 
@@ -701,7 +749,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                             <span className="flex min-w-0 items-center gap-2">
                               {/* The item's SKU - it used to show the internal
                                   database id here, which cashiers read as the SKU. */}
-                              {m.sku ? (
+                              {itemShortCode(m.sku) ? (
                                 <span
                                   className={cn(
                                     "num rounded px-1 text-[10px] font-semibold",
@@ -710,7 +758,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                                       : "bg-surface-muted text-muted-foreground",
                                   )}
                                 >
-                                  {m.sku.toUpperCase()}
+                                  {itemShortCode(m.sku)?.toUpperCase()}
                                 </span>
                               ) : null}
                               <span data-item-name className="truncate font-medium">
@@ -797,6 +845,15 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                     onNote={setNoteLine}
                     onAddon={setAddonLine}
                     onMoveKot={setMoveKotRound}
+                    picked={pickedLineIds}
+                    onPick={(id, on) =>
+                      setPickedLineIds((prev) => {
+                        const next = new Set(prev);
+                        if (on) next.add(id);
+                        else next.delete(id);
+                        return next;
+                      })
+                    }
                   />
                 ) : null,
               )
@@ -845,8 +902,28 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
               <Row key={t.id} label={t.name} value={t.amount} muted />
             ))}
             {totals.delivery > 0 ? <Row label="Delivery charge" value={totals.delivery} /> : null}
-            {totals.packaging > 0 ? (
-              <Row label="Packaging charge" value={totals.packaging} />
+            {/* Editable here too - the touch screen has always allowed it, the
+                keyboard screen only ever displayed it (owner report,
+                2026-09-22). */}
+            {!settled || totals.packaging > 0 ? (
+              <div className="flex items-center justify-between text-muted-foreground">
+                <span className="flex items-center gap-1">
+                  Packaging charge
+                  {!settled ? (
+                    <button
+                      aria-label="Enter packaging charge"
+                      onClick={() => {
+                        setPackagingInput(totals.packaging);
+                        setPackagingOpen(true);
+                      }}
+                      className="text-muted-foreground hover:text-primary"
+                    >
+                      <Pencil className="size-3" />
+                    </button>
+                  ) : null}
+                </span>
+                <Amount value={totals.packaging} className="text-sm" />
+              </div>
             ) : null}
             {totals.roundOff !== 0 ? (
               <Row
@@ -978,6 +1055,40 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
 
       <DiscountDialog open={discountOpen} onOpenChange={setDiscountOpen} order={order} />
       <CustomerDialog open={customerOpen} onOpenChange={setCustomerOpen} order={order} />
+      {/* packaging charge (same rule as the touch screen: a number the
+          cashier types wins over the outlet's automatic rule) */}
+      <Dialog open={packagingOpen} onOpenChange={setPackagingOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Packaging charge</DialogTitle>
+            <DialogDescription>
+              What this order is charged for packaging. 0 means none.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <Label htmlFor="kbPackaging">Packaging (₹)</Label>
+            <Input
+              id="kbPackaging"
+              type="number"
+              min={0}
+              className="num mt-1.5"
+              value={packagingInput}
+              onChange={(e) => setPackagingInput(Number(e.target.value) || 0)}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                store.setCharges(order.id, Math.max(0, packagingInput));
+                setPackagingOpen(false);
+              }}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <MoveTableDialog open={moveOpen} onOpenChange={setMoveOpen} order={order} />
       <MoveKotDialog round={moveKotRound} order={order} onClose={() => setMoveKotRound(null)} />
       <NoteDialog line={noteLine} order={order} onClose={() => setNoteLine(null)} />
@@ -1070,6 +1181,8 @@ function CartGroup({
   onNote,
   onAddon,
   onMoveKot,
+  picked,
+  onPick,
 }: {
   state: LineState;
   lines: OrderLine[];
@@ -1077,6 +1190,9 @@ function CartGroup({
   onNote: (l: OrderLine) => void;
   onAddon: (l: OrderLine) => void;
   onMoveKot: (round: number) => void;
+  /** Un-sent lines ticked to go in the next KOT (empty = all of them). */
+  picked?: Set<string>;
+  onPick?: (lineId: string, on: boolean) => void;
 }) {
   const store = useStore();
   const meta = stateMeta[state];
@@ -1167,7 +1283,16 @@ function CartGroup({
               !editable && "opacity-90",
             )}
           >
-            <div className="min-w-0">
+            <div className="flex min-w-0 items-start gap-2">
+              {editable && onPick ? (
+                <Checkbox
+                  className="mt-1 shrink-0"
+                  checked={picked?.has(l.id) ?? false}
+                  onCheckedChange={(on) => onPick(l.id, on === true)}
+                  aria-label={`Send ${l.name} in the next KOT`}
+                />
+              ) : null}
+              <div className="min-w-0">
               <p className="truncate text-sm font-medium">
                 {l.name}
                 {l.variant ? (
@@ -1211,6 +1336,7 @@ function CartGroup({
                   “{l.note}”
                 </p>
               ) : null}
+              </div>
             </div>
 
             <div className="flex items-center gap-2">
@@ -1512,8 +1638,20 @@ function CustomerDialog({
         store.setCustomer(order.id, d.name, d.phone, { address: d.address, gstin: d.gstin })
       }
       onClear={() => store.setCustomer(order.id, "", "")}
-    />
+    >
+      {/* What they owe and what they had last time - the touch screen has
+          shown this for a while; the keyboard screen did not (owner report,
+          2026-09-22). */}
+      {(digits) => (
+        <CustomerHistoryPanel digits={digits} orderId={order.id} backendId={order.backendId} />
+      )}
+    </CustomerDetailsDialog>
   );
+}
+
+/** The section a table belongs to, for the move/transfer pickers. */
+function categoryNameOf(store: ReturnType<typeof useStore>, categoryId: string) {
+  return store.tableCategories.find((c) => c.id === categoryId)?.name ?? "—";
 }
 
 function MoveTableDialog({
@@ -1550,7 +1688,10 @@ function MoveTableDialog({
               }}
             >
               <span className="num text-sm font-semibold">{t.name}</span>
-              <span className="text-[10px] text-muted-foreground">{t.seats} seats</span>
+              {/* the section it belongs to (owner report, 2026-09-22) */}
+              <span className="text-[10px] text-muted-foreground">
+                {categoryNameOf(store, t.categoryId)} · {t.seats} seats
+              </span>
             </Button>
           ))}
           {free.length === 0 ? (
@@ -1595,7 +1736,9 @@ export function MoveKotDialog({
               }}
             >
               <span className="num text-sm font-semibold">{t.name}</span>
-              <span className="text-[10px] text-muted-foreground">{t.seats} seats</span>
+              <span className="text-[10px] text-muted-foreground">
+                {categoryNameOf(store, t.categoryId)} · {t.seats} seats
+              </span>
             </Button>
           ))}
           {free.length === 0 ? (
@@ -2090,6 +2233,10 @@ function SettleDialog({
   const [tip, setTip] = useState(0);
   const paid = splits.reduce((s, p) => s + p.amount, 0);
   const due = Math.round((grand - paid) * 100) / 100;
+  // The keyboard screen used to block only UNDERpayment, so two modes each
+  // holding the full bill settled it for twice the amount (owner report,
+  // 2026-09-22). Same rule as every other settle screen now.
+  const check = splitCheck(splits, grand);
   const upiAmount = splits.filter((p) => p.mode === "UPI").reduce((s, p) => s + p.amount, 0);
 
   useEffect(() => {
@@ -2158,12 +2305,21 @@ function SettleDialog({
           ))}
         </ul>
 
-        <div className="flex items-center justify-between rounded-lg bg-surface-muted px-3 py-2 text-sm">
-          <span className="text-muted-foreground">Balance due</span>
-          <Amount
-            value={due}
-            className={cn("font-bold", due > 0 ? "text-warning" : "text-success")}
-          />
+        <div className="rounded-lg bg-surface-muted px-3 py-2 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">
+              {check.change > 0 ? "Return to customer" : "Balance due"}
+            </span>
+            <Amount
+              value={check.change > 0 ? check.change : due}
+              className={cn("font-bold", check.change > 0 ? "text-success" : due > 0 ? "text-warning" : "text-success")}
+            />
+          </div>
+          {/* Why the button is off - e.g. the bill total typed into two modes
+              at once (owner report, 2026-09-22). */}
+          {check.problem ? (
+            <p className="mt-1 text-xs font-medium text-destructive">{check.problem}</p>
+          ) : null}
         </div>
 
         {order.type === "Dine In" ? (
@@ -2181,7 +2337,7 @@ function SettleDialog({
 
         <DialogFooter>
           <Button
-            disabled={splits.length === 0 || due > 0.5}
+            disabled={splits.length === 0 || !!check.problem}
             onClick={() => {
               store.settleOrder(order.id, splits, tip || undefined);
               onOpenChange(false);

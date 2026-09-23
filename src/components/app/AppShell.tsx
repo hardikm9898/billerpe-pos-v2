@@ -346,6 +346,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     void store.loadPaymentModesFromServer();
     void store.loadPaymentModeDefaultsFromServer();
     void store.loadBillChargeRulesFromServer();
+    void store.loadPosPreferencesFromServer();
     void store.loadNotificationSettingsFromServer();
     void store.loadUnitsFromServer();
     void store.loadRawMaterialsFromServer();

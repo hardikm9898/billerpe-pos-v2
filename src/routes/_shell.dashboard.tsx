@@ -300,6 +300,8 @@ function DashboardPage() {
         ["UPI", totalRow.upi],
         ["Card", totalRow.card],
         ["Due", totalRow.due],
+        // The outlet's own payment modes (Paytm, ...), one line each.
+        ...(totalRow.otherModes ?? []).map((m) => [m.name, m.total]),
       ] as [string, number][]
     )
       .filter(([, v]) => v > 0)

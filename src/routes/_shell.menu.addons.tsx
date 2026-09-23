@@ -217,6 +217,7 @@ function MenuAddonsPage() {
                 <div className="space-y-1.5">
                   <Label>Min</Label>
                   <Input
+                    step={1}
                     type="number"
                     value={draft.min}
                     onChange={(e) => setDraft({ ...draft, min: Number(e.target.value || 0) })}
@@ -225,6 +226,7 @@ function MenuAddonsPage() {
                 <div className="space-y-1.5">
                   <Label>Max</Label>
                   <Input
+                    step={1}
                     {...form.fieldProps("max")}
                     type="number"
                     min={0}

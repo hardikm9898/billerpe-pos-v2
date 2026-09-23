@@ -170,6 +170,8 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/billChargeRule" },
     // Notification settings backend build.
     { method: "GET", test: (p) => p === "/notificationSetting" },
+    { method: "GET", test: (p) => p === "/posPreferences" },
+    { method: "POST", test: (p) => p === "/posPreferences" },
     { method: "POST", test: (p) => p === "/notificationSettingToggle" },
     // Rich Permissions role-defaults backend build.
     { method: "GET", test: (p) => p === "/rolePermissionDefault" },
@@ -1391,6 +1393,22 @@ export type RawNotificationSetting = {
   in_app: boolean;
 };
 
+/** How this outlet's screens are laid out - kept on the exe, so a refresh or
+ * another device opens the same way (billerpe-local-exe/controller/
+ * posPreference.js). */
+export type RawPosPreferences = {
+  tableGridView: "Tabs" | "Sections";
+  menuImages: boolean;
+  keyboardOnly: boolean;
+  defaultOrderType: "Dine In" | "Pickup";
+};
+
+export const posPreferenceApi = {
+  get: () => apiGet<{ preferences: RawPosPreferences }>("/posPreferences"),
+  save: (preferences: Partial<RawPosPreferences>) =>
+    apiPost<{ preferences: RawPosPreferences }>("/posPreferences", { preferences }),
+};
+
 export const notificationSettingApi = {
   getAll: () => apiGet<{ settings: RawNotificationSetting[] }>("/notificationSetting"),
   toggle: (trigger: string, channel: "whatsapp" | "sms" | "in_app") =>
@@ -1789,6 +1807,11 @@ export type RawHotelUser = {
   hms_user_accesses?: RawUserAccess[];
   /** Per-user exceptions to the role's permissions, stored and enforced by the exe. */
   permission_overrides?: RawPermissionOverrides | string | null;
+  /** True for THE owner's own login - the account whose mobile is the
+   * outlet's registered owner number. The exe never lets it be turned off,
+   * moved to another role or have its permissions changed
+   * (billerpe-local-exe/helpers/ownerAccount.js). */
+  is_owner?: boolean;
 };
 
 export type RawPermissionOverrides = {
@@ -2022,6 +2045,9 @@ export const orderApi = {
     upi?: number;
     card?: number;
     due?: number;
+    /** The outlet's own payment modes (Paytm, ...) - billerpe-local-exe/
+     * helpers/otherPayments.js. */
+    other?: OtherPayment[];
     /** See KotPayload's own comment on userName/mobile - same
      * findAndUpdateUser attach/upgrade mechanism, AdminOrder's own call. */
     userName?: string;
@@ -2052,6 +2078,9 @@ export const orderApi = {
       upi: number;
       card: number;
       due: number;
+      /** The outlet's own payment modes (Paytm, ...) - billerpe-local-exe/
+       * helpers/otherPayments.js. */
+      other?: OtherPayment[];
       tip?: number;
       mobile?: string;
     };
@@ -2074,6 +2103,9 @@ export const orderApi = {
     upi: number;
     card: number;
     due: number;
+    /** The outlet's own payment modes (Paytm, ...) - billerpe-local-exe/
+     * helpers/otherPayments.js. */
+    other?: OtherPayment[];
     /** Dine In only - waiter service tip, kept separate from the
      * cash+upi+card+due=amount reconciliation server-side (see
      * uat-backend-v2/model/order.js's own comment). */
@@ -2284,6 +2316,10 @@ export type RawOrderHeader = {
   upi: number;
   card: number;
   due: number;
+  /** JSON [{ name, amount }] - amounts paid with the outlet's own payment
+   * modes (Paytm, ...); see parseOtherPayments in mock/store.tsx. */
+  other_payments?: string | null;
+  other_amount?: number | null;
   /** Waiter service tip, attributed to hotelUserId below (the order's
    * creator) - see uat-backend-v2/model/order.js's own comment. */
   tip?: number | null;
@@ -2629,7 +2665,7 @@ export const dueApi = {
   // separate hms_due_payment_receives audit rows, one per mode. `amount`
   // is destructured server-side but never actually used - sent anyway to
   // match the shape rather than rely on that being permanent.
-  settleDue: (params: { id: number; mode: "cash" | "upi" | "card"; receive: number }) =>
+  settleDue: (params: { id: number; mode: DueMode; receive: number }) =>
     apiPost<{ dueOrders: unknown }>("/settleDue", {
       data: { id: params.id, amount: params.receive, mode: params.mode, receive: params.receive },
       searchData: {},
@@ -2638,7 +2674,7 @@ export const dueApi = {
   // Unlike settleDue, always settles each order's FULL remaining due, in
   // one payment mode, for every id in idArray - no partial amounts, no
   // per-bill mode. Used for the "Settle selected" bulk action.
-  settleAllDue: (idArray: number[], mode: "cash" | "upi" | "card") =>
+  settleAllDue: (idArray: number[], mode: DueMode) =>
     apiPost<{ message?: string }>("/allSettleDue", { idArray, mode }),
 };
 
@@ -2674,6 +2710,9 @@ export const editSettledOrderApi = {
       upi: number;
       card: number;
       due: number;
+      /** The outlet's own payment modes (Paytm, ...) - billerpe-local-exe/
+       * helpers/otherPayments.js. */
+      other?: OtherPayment[];
       mobile?: string;
       name?: string;
       address?: string;
@@ -3751,6 +3790,11 @@ export const cashSessionApi = {
     apiPost<{ session: RawCashSession; expected: number }>("/cashSession/close", params),
 };
 
+/** One amount paid with a payment mode the outlet added itself. */
+export type OtherPayment = { name: string; amount: number };
+/** Collecting a due: a built-in mode, or the name of the outlet's own mode. */
+export type DueMode = "cash" | "upi" | "card" | (string & {});
+
 export type RawDayWisePeriod = {
   period: string;
   totalAmount: number;
@@ -3761,6 +3805,9 @@ export type RawDayWisePeriod = {
   cash: number;
   upi: number;
   due: number;
+  /** Total paid with the outlet's own payment modes, and per mode. */
+  other?: number;
+  otherModes?: { name: string; total: number }[];
   totalOrders: number;
 };
 
@@ -3812,6 +3859,9 @@ export type RawPosCollection = {
   dueTotal: string;
   upiTotal: string;
   cardTotal: string;
+  /** The outlet's own payment modes (Paytm, ...): total and one line each. */
+  otherTotal?: string;
+  otherModes?: { name: string; total: string }[];
   totalGst: string;
   totalDiscount: string;
   totalDynamicTax: number;

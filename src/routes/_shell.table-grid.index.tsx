@@ -16,7 +16,11 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
 import { Money, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
-import { PaymentSplitEditor, splitPaid } from "@/components/operations/payment-split-editor";
+import {
+  PaymentSplitEditor,
+  splitCheck,
+  splitPaid,
+} from "@/components/operations/payment-split-editor";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -167,6 +171,10 @@ function TableGridPage() {
   }, [store.tables]);
 
   const freeTables = store.tables.filter((t) => t.status === "Free");
+  // Which section a table sits in - shown in the merge/transfer pickers so
+  // the right table is chosen (owner report, 2026-09-22).
+  const categoryName = (categoryId: string) =>
+    store.tableCategories.find((c) => c.id === categoryId)?.name ?? "—";
 
   const openBiller = (orderId: string) => {
     if (store.displayMode === "Keyboard") {
@@ -363,18 +371,21 @@ function TableGridPage() {
             ) : null}
             {t.status !== "Bill Generated" ? (
               <>
-                <span
-                  role="button"
-                  tabIndex={-1}
-                  title="Merge into another table"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setMergeFrom(t);
-                  }}
-                  className={actionIconCls}
-                >
-                  <Merge className="size-3.5" />
-                </span>
+                {/* A held table is never merged - only transferred. */}
+                {t.status !== "Hold" ? (
+                  <span
+                    role="button"
+                    tabIndex={-1}
+                    title="Merge into another table"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMergeFrom(t);
+                    }}
+                    className={actionIconCls}
+                  >
+                    <Merge className="size-3.5" />
+                  </span>
+                ) : null}
                 <span
                   role="button"
                   tabIndex={-1}
@@ -545,7 +556,10 @@ function TableGridPage() {
       <Dialog open={!!mergeFrom} onOpenChange={(o) => !o && setMergeFrom(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Merge {mergeFrom?.name} into…</DialogTitle>
+            <DialogTitle>
+              Merge {mergeFrom ? `${categoryName(mergeFrom.categoryId)} · ${mergeFrom.name}` : ""}{" "}
+              into…
+            </DialogTitle>
             <DialogDescription>
               Items keep their origin table tag on the KOT and bill.
             </DialogDescription>
@@ -557,13 +571,21 @@ function TableGridPage() {
                 <Button
                   key={t.id}
                   variant="outline"
+                  className="h-auto flex-col gap-0.5 py-2"
                   onClick={() => {
                     if (!mergeFrom) return;
                     store.mergeTables(mergeFrom.id, t.id);
                     setMergeFrom(null);
                   }}
                 >
-                  <Merge className="size-4" /> {t.name}
+                  <span className="flex items-center gap-1.5">
+                    <Merge className="size-4" /> {t.name}
+                  </span>
+                  {/* which section the table is in - two tables can share a
+                      name across sections (owner report, 2026-09-22) */}
+                  <span className="text-[10px] font-normal text-muted-foreground">
+                    {categoryName(t.categoryId)}
+                  </span>
                 </Button>
               ))}
           </div>
@@ -573,7 +595,11 @@ function TableGridPage() {
       <Dialog open={!!transferFrom} onOpenChange={(o) => !o && setTransferFrom(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Transfer {transferFrom?.name} to…</DialogTitle>
+            <DialogTitle>
+              Transfer{" "}
+              {transferFrom ? `${categoryName(transferFrom.categoryId)} · ${transferFrom.name}` : ""}{" "}
+              to…
+            </DialogTitle>
             <DialogDescription>Only free tables can receive a transfer.</DialogDescription>
           </DialogHeader>
           <div className="grid grid-cols-3 gap-2">
@@ -581,13 +607,19 @@ function TableGridPage() {
               <Button
                 key={t.id}
                 variant="outline"
+                className="h-auto flex-col gap-0.5 py-2"
                 onClick={() => {
                   if (!transferFrom?.orderId) return;
                   store.transferTable(transferFrom.orderId, t.id);
                   setTransferFrom(null);
                 }}
               >
-                <ArrowLeftRight className="size-4" /> {t.name}
+                <span className="flex items-center gap-1.5">
+                  <ArrowLeftRight className="size-4" /> {t.name}
+                </span>
+                <span className="text-[10px] font-normal text-muted-foreground">
+                  {categoryName(t.categoryId)}
+                </span>
               </Button>
             ))}
           </div>
@@ -606,12 +638,17 @@ function TableGridPage() {
                 const balance = Math.round((totals.grand - paid) * 100) / 100;
                 const collected = splitPaid(splits);
                 const due = Math.round((balance - collected) * 100) / 100;
+                void collected;
+                void due;
+                // Only cash may exceed the bill (owner rule) - see splitCheck.
+                const check = splitCheck(splits, balance);
                 return (
                   <>
                     <DialogHeader>
                       <DialogTitle>Settle bill · {settleTable.name}</DialogTitle>
                       <DialogDescription>
-                        Single or split payment. Amounts must add up to the bill total.
+                        Single or split payment. Only cash may be more than the bill - the
+                        extra is shown as change to return.
                       </DialogDescription>
                     </DialogHeader>
                     <PaymentSplitEditor
@@ -635,7 +672,7 @@ function TableGridPage() {
                     ) : null}
                     <DialogFooter>
                       <Button
-                        disabled={!order || Math.abs(due) > 0.5}
+                        disabled={!order || !splits.length || !!check.problem}
                         onClick={() => {
                           if (!order) return;
                           store.settleOrder(order.id, splits, tip || undefined);

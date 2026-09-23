@@ -268,6 +268,7 @@ function ManageTablesPage() {
                 <div className="space-y-1.5">
                   <Label required>Seats</Label>
                   <Input
+                    step={1}
                     {...form.fieldProps("seats")}
                     type="number"
                     min={1}
@@ -368,6 +369,7 @@ function ManageTablesPage() {
               <div className="space-y-1.5">
                 <Label required>Number of tables</Label>
                 <Input
+                  step={1}
                   type="number"
                   min={1}
                   value={bulkCount}
@@ -377,6 +379,7 @@ function ManageTablesPage() {
               <div className="space-y-1.5">
                 <Label required>Seats (each)</Label>
                 <Input
+                  step={1}
                   type="number"
                   min={1}
                   value={bulkSeats}
@@ -390,6 +393,7 @@ function ManageTablesPage() {
               <div className="space-y-1.5">
                 <Label>Starting number</Label>
                 <Input
+                  step={1}
                   type="number"
                   min={1}
                   value={bulkStart}

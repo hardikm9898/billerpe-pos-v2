@@ -43,7 +43,11 @@ function ReportsPage() {
       .then(({ posCollections: pc }) => {
         if (cancelled) return;
         const revenue =
-          Number(pc.cashTotal) + Number(pc.upiTotal) + Number(pc.cardTotal) + Number(pc.dueTotal);
+          Number(pc.cashTotal) +
+          Number(pc.upiTotal) +
+          Number(pc.cardTotal) +
+          Number(pc.dueTotal) +
+          Number(pc.otherTotal ?? 0);
         setTotals({ bills: pc.totalBills, revenue });
       })
       .catch((err) => {

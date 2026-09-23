@@ -12,6 +12,18 @@ import type { MenuItem } from "@/mock/types";
 // every SKU containing a 1), and the internal database id is never matched
 // at all (keyboard billing used to pick whichever item was record #12 when
 // someone typed the SKU 12).
+/**
+ * An item's short code, or undefined when it has none. The exe stores "all"
+ * as the default for an item saved without one (billerpe-local-exe/model/
+ * menu.js), so that is not a code anybody typed - showing it would put "ALL"
+ * on every row of the Menu Items list, and matching it would make typing
+ * "all" pull up the whole menu.
+ */
+export function itemShortCode(sku: string | null | undefined): string | undefined {
+  const v = (sku ?? "").trim();
+  return !v || v.toLowerCase() === "all" ? undefined : v;
+}
+
 export function searchMenuItems<T extends Pick<MenuItem, "name" | "sku" | "barcode">>(
   items: T[],
   query: string,
@@ -20,7 +32,7 @@ export function searchMenuItems<T extends Pick<MenuItem, "name" | "sku" | "barco
   if (!q) return items;
   const ranked: { item: T; rank: number; index: number }[] = [];
   items.forEach((item, index) => {
-    const sku = (item.sku ?? "").trim().toLowerCase();
+    const sku = (itemShortCode(item.sku) ?? "").toLowerCase();
     const barcode = (item.barcode ?? "").trim().toLowerCase();
     const name = item.name.toLowerCase();
     let rank = 0;

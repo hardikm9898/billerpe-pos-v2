@@ -415,6 +415,7 @@ function ReservationsPage() {
                 <div className="space-y-1.5">
                   <Label required>Party size</Label>
                   <Input
+                    step={1}
                     {...form.fieldProps("party")}
                     type="number"
                     min={1}

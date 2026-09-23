@@ -116,6 +116,7 @@ function TableCategoriesPage() {
               <div className="space-y-1.5">
                 <Label>Sort order</Label>
                 <Input
+                  step={1}
                   type="number"
                   value={draft.sortOrder}
                   onChange={(e) => setDraft({ ...draft, sortOrder: Number(e.target.value) })}

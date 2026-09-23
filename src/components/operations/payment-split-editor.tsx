@@ -9,9 +9,10 @@ import { cn } from "@/lib/utils";
 import { useStore } from "@/mock/store";
 import type { OpsOrderType, PaymentSplit } from "@/mock/types";
 
-export function splitPaid(splits: PaymentSplit[]) {
-  return splits.reduce((s, p) => s + p.amount, 0);
-}
+// The bill-splitting rules live in lib/payments.ts so the store can use them
+// too (this component imports the store, so it cannot be their home).
+export { splitCheck, splitPaid } from "@/lib/payments";
+import { splitCheck, splitPaid } from "@/lib/payments";
 
 // Mirrors uat-backend's own QR construction (controller/kto.js's
 // getHearderAndFooterData: pa left unencoded, pn/tn encoded, cu fixed to
@@ -68,9 +69,9 @@ export function PaymentSplitEditor({
   onChange: (splits: PaymentSplit[]) => void;
   total: number;
   /** Modes to hide from the picker - e.g. "Due" on the Due Bills settle
-   * dialog, where picking it just produces "isn't a payment mode the
-   * backend supports here" (settleDueBills only ever accepts Cash/UPI/
-   * Card - collecting against an existing due can't itself be "more due"). */
+   * dialog: collecting against an existing due can't itself be "more due"
+   * (settleDueBills refuses it; every other mode, the outlet's own too, is
+   * accepted). */
   excludeModes?: string[];
   /** Order Type Settings -> Default payment mode context - which default
    * to resolve when a new split row is added. Omit either (e.g. Due Bills'
@@ -83,6 +84,7 @@ export function PaymentSplitEditor({
   const activeModes = store.paymentModes.filter((m) => m.active && !excludeModes?.includes(m.name));
   const paid = splitPaid(splits);
   const due = Math.round((total - paid) * 100) / 100;
+  const check = splitCheck(splits, total);
   const upiAmount = splits.filter((p) => p.mode === "UPI").reduce((s, p) => s + p.amount, 0);
 
   return (
@@ -96,9 +98,18 @@ export function PaymentSplitEditor({
           <Money value={total} className="font-semibold" />
         </div>
         <div className="mt-1 flex items-center justify-between text-sm">
-          <span>Balance</span>
-          <Money value={due} className={cn("font-semibold", due !== 0 && "text-primary")} />
+          <span>{check.change > 0 ? "Return to customer" : "Balance"}</span>
+          <Money
+            value={check.change > 0 ? check.change : due}
+            className={cn(
+              "font-semibold",
+              check.change > 0 ? "text-success" : due !== 0 && "text-primary",
+            )}
+          />
         </div>
+        {check.problem ? (
+          <p className="mt-1.5 text-xs font-medium text-destructive">{check.problem}</p>
+        ) : null}
       </div>
 
       {splits.map((p, idx) => (

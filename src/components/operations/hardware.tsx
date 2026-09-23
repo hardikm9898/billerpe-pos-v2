@@ -609,6 +609,7 @@ export function PrinterSection() {
                   <Input
                     {...pForm.fieldProps("copies")}
                     type="number"
+                    step={1}
                     min={1}
                     value={draft.copies ?? 1}
                     onChange={(e) => setDraft({ ...draft, copies: Number(e.target.value) })}

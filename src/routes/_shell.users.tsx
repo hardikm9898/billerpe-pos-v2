@@ -225,6 +225,14 @@ function UsersPage() {
   const access = useAccess("users");
   const store = useStore();
   const [draft, setDraft] = useState<User | null>(null);
+  // THE owner's own login (the account registered as the outlet's owner) is
+  // locked: never turned off, never moved to another role, permissions never
+  // changed - by anyone (owner rule, 2026-09-22). Only the owner themselves
+  // can change their own name, mobile and password, so the form is read-only
+  // for everybody else. The exe refuses all of it too.
+  const draftIsOwner = Boolean(draft?.isOwner);
+  const editingSelf = draft?.id === store.currentUserId;
+  const ownerLockedForMe = draftIsOwner && !editingSelf;
   const form = useFormCheck();
   const formOpen = !!draft;
   const formReset = form.reset;
@@ -342,7 +350,20 @@ function UsersPage() {
                 </div>
               ),
             },
-            { key: "role", header: "Role", cell: (u) => u.role },
+            {
+              key: "role",
+              header: "Role",
+              cell: (u) => (
+                <span className="flex items-center gap-1.5">
+                  {u.role}
+                  {u.isOwner ? (
+                    <span className="rounded-lg bg-primary-soft px-2 py-0.5 text-[11px] font-medium text-primary">
+                      Owner account
+                    </span>
+                  ) : null}
+                </span>
+              ),
+            },
             {
               key: "mobile",
               header: "Mobile",
@@ -439,6 +460,7 @@ function UsersPage() {
                 <Input
                   {...form.fieldProps("name")}
                   value={draft.name}
+                  disabled={ownerLockedForMe}
                   onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                 />
                 <FieldError message={form.error("name")} />
@@ -451,6 +473,7 @@ function UsersPage() {
                     inputMode="numeric"
                     placeholder="10-digit mobile - used to log in"
                     value={draft.mobile}
+                    disabled={ownerLockedForMe}
                     onChange={(e) =>
                       setDraft({ ...draft, mobile: e.target.value.replace(/\D/g, "").slice(0, 10) })
                     }
@@ -463,7 +486,7 @@ function UsersPage() {
                     {...form.fieldProps("pin")}
                     value={draft.pin}
                     maxLength={6}
-                    disabled={!canEditUsers}
+                    disabled={!canEditUsers || ownerLockedForMe}
                     placeholder={draft.id ? "Leave blank to keep current" : undefined}
                     onChange={(e) => setDraft({ ...draft, pin: e.target.value.replace(/\D/g, "") })}
                   />
@@ -552,7 +575,7 @@ function UsersPage() {
                 <Label>Role</Label>
                 <Select
                   value={draft.role}
-                  disabled={!canEditPermissions}
+                  disabled={!canEditPermissions || draftIsOwner}
                   onValueChange={(v) => setDraft({ ...draft, role: v as Role })}
                 >
                   <SelectTrigger>
@@ -576,11 +599,19 @@ function UsersPage() {
                   <p className="text-xs text-muted-foreground">Inactive staff cannot log in.</p>
                 </div>
                 <Switch
-                  checked={draft.status === "Active"}
+                  checked={draft.status === "Active" || draftIsOwner}
+                  disabled={draftIsOwner}
                   onCheckedChange={(v) => setDraft({ ...draft, status: v ? "Active" : "Inactive" })}
                 />
               </div>
 
+              {draftIsOwner ? (
+                <p className="rounded-xl border border-warning/40 bg-warning-soft px-3 py-2.5 text-xs text-warning">
+                  This is the owner's account. It can't be turned off, moved to another role or have
+                  its permissions changed.
+                  {ownerLockedForMe ? " Only the owner can change their own details." : ""}
+                </p>
+              ) : null}
               {draft.role === "Owner" ? (
                 <p className="rounded-xl border border-border bg-surface-muted/60 px-3 py-2.5 text-xs text-muted-foreground">
                   Owner always has full access to every module and action — permission overrides
@@ -654,8 +685,14 @@ function UsersPage() {
               Cancel
             </Button>
             <Button
-              title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-              disabled={!(draft?.id ? access.edit : access.create)}
+              title={
+                ownerLockedForMe
+                  ? "Only the owner can change their own details"
+                  : !(draft?.id ? access.edit : access.create)
+                    ? READ_ONLY_NOTE
+                    : undefined
+              }
+              disabled={!(draft?.id ? access.edit : access.create) || ownerLockedForMe}
               onClick={async () => {
                 if (!draft) return;
                 const pw = resetPassword.trim();
