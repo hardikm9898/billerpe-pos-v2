@@ -260,6 +260,8 @@ export function computeBill(input: EngineInput): EngineTotals {
     rawGrand,
     grandAmount,
     roundOff,
-    items: lines.reduce((s, l) => s + (Number(l.qty) || 0), 0),
+    // Fractional quantities: 0.1 + 0.2 must count as 0.3 (kept inline - this
+    // engine stays self-contained).
+    items: Math.round(lines.reduce((s, l) => s + (Number(l.qty) || 0), 0) * 100) / 100,
   };
 }

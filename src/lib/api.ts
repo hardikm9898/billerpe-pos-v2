@@ -442,6 +442,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/generateKotPdf" },
     { method: "POST", test: (p) => p === "/generateInvoicePdf" },
     { method: "POST", test: (p) => p === "/printKotDirect" },
+    { method: "POST", test: (p) => p === "/reprintKot" },
     { method: "POST", test: (p) => p === "/printInvoiceDirect" },
     { method: "POST", test: (p) => p === "/testPrintDirect" },
     { method: "POST", test: (p) => p === "/userPermissionOverrides" },
@@ -1261,6 +1262,8 @@ export const hotelApi = {
   // headerLineN/footerLineN slot itself).
   updateIdentity: (params: {
     upiId?: string;
+    gst_no?: string;
+    fssai_no?: string;
     invoiceFormateHeaderText?: string;
     invoiceFormateBottomText?: string;
     invoiceFormateIncGst?: boolean;
@@ -1861,7 +1864,14 @@ export const userApi = {
 };
 
 export type KotCartItem = {
-  id: number;
+  /** Menu id - absent on a custom item, which goes as custom + item_name instead
+   * (billerpe-local-exe controller/kot.js files it under a hidden menu row). */
+  id?: number;
+  custom?: boolean;
+  item_name?: string;
+  /** A custom item's chosen KOT printer / KDS kitchen (exe ids). */
+  route_printer_id?: number;
+  route_kitchen_id?: number;
   qty: number;
   price: number;
   discount: number;
@@ -2350,6 +2360,8 @@ export type RawOrderHeader = {
 };
 
 export type RawOrderLine = {
+  route_printer_id?: number | null;
+  route_kitchen_id?: number | null;
   id: number;
   qty: number;
   price: number;
@@ -2506,6 +2518,9 @@ export type RawQrOrderItem = {
   variantName?: string;
   addonIds?: number[];
   addonNames?: string[];
+  /** Set once staff decide - shown to the customer per dish. */
+  decision?: "accepted" | "rejected";
+  rejectReason?: string;
 };
 export type RawPendingQrOrder = {
   id: number;
@@ -2522,8 +2537,12 @@ export type RawPendingQrOrder = {
 };
 export const qrOrderApi = {
   getPending: () => apiGet<{ qrOrders: RawPendingQrOrder[] }>("/qrOrder/pending"),
-  accept: (id: number) => apiPost<{ orderId: number }>(`/qrOrder/${id}/accept`, {}),
-  reject: (id: number) => apiPost<{ message: string }>(`/qrOrder/${id}/reject`, {}),
+  // decisions: one per item, in order - rejected ones need a reason the
+  // customer sees. All rejected = the round is rejected (no order).
+  accept: (id: number, decisions?: { accepted: boolean; reason?: string }[]) =>
+    apiPost<{ orderId?: number; rejected?: boolean }>(`/qrOrder/${id}/accept`, decisions ? { decisions } : {}),
+  reject: (id: number, reason: string) =>
+    apiPost<{ message: string }>(`/qrOrder/${id}/reject`, { reason }),
   regenerateTableQr: (tableId: number) =>
     apiPost<{ qr_version: number }>(`/table/${tableId}/qr-version`, {}),
 };
@@ -2687,7 +2706,10 @@ export const editSettledOrderApi = {
   edit: (params: {
     orderId: number;
     items: {
-      menuId: number;
+      /** Absent on a custom item added while editing - see KotCartItem. */
+      menuId?: number;
+      custom?: boolean;
+      item_name?: string;
       qty: number;
       price: number;
       totalDiscount?: number;
@@ -2960,6 +2982,17 @@ export const tokenApi = {
 };
 
 export const localPrintApi = {
+  // POST /reprintKot (billerpe-local-exe controller/print.js) - the exe
+  // prints a sent round from its own order with its one KOT renderer, so a
+  // reprint is identical to the ticket the kitchen got. No KOT printer:
+  // printed=false and the same ticket comes back as a PDF.
+  reprintKot: (params: { orderId: number; kotNumber: number }) =>
+    apiPost<{
+      printed: boolean;
+      reason?: string;
+      results?: { printer: string; ok: boolean; error?: string }[];
+      pdf?: { type: "Buffer"; data: number[] };
+    }>("/reprintKot", params),
   printKot: (params: {
     order_type: "dinin" | "pickup";
     order_id: string;

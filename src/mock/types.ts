@@ -224,6 +224,12 @@ export interface OrderLine {
   kotRound: number;
   originTable?: string;
   note?: string;
+  /** Added at billing, not on the menu ("Custom item"). */
+  custom?: boolean;
+  /** A custom item's chosen KOT printer / KDS kitchen (exe hms_printer_settings /
+   * hms_kitchen_settings id) - only asked when the outlet has more than one. */
+  routePrinterId?: number;
+  routeKitchenId?: number;
 }
 
 export interface PaymentSplit {

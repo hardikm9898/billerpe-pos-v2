@@ -61,6 +61,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { QtyInput } from "@/components/billing/qty-input";
+import {
+  CustomItemRouteFields,
+  customRouteProblem,
+  useCustomItemStations,
+  type CustomItemRoute,
+} from "@/components/billing/custom-item-route";
 import {
   Select,
   SelectContent,
@@ -297,6 +304,15 @@ function OrderCartPage() {
   // everything pending" behaviour.
   const [selectedLineIds, setSelectedLineIds] = useState<Set<string>>(new Set());
   const [customItemOpen, setCustomItemOpen] = useState(false);
+  const customStations = useCustomItemStations();
+  const [customRoute, setCustomRoute] = useState<CustomItemRoute>({});
+  const [customRouteError, setCustomRouteError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!customItemOpen) {
+      setCustomRoute({});
+      setCustomRouteError(null);
+    }
+  }, [customItemOpen]);
   const [customName, setCustomName] = useState("");
   const [customPrice, setCustomPrice] = useState(0);
   const [noteLineFor, setNoteLineFor] = useState<OrderLine | null>(null);
@@ -717,9 +733,21 @@ function OrderCartPage() {
                                 >
                                   <Minus className="size-3.5" />
                                 </IconButton>
-                                <span className="num w-6 text-center text-sm font-semibold">
-                                  {l.qty}
-                                </span>
+                                <QtyInput
+                                  value={l.qty}
+                                  disabled={settled}
+                                  label={`Quantity for ${l.name}`}
+                                  // Typed: 10 instead of ten taps, or 1.5. Same path
+                                  // as the buttons - 0 removes, with the same delete
+                                  // permission for an item already sent.
+                                  // Set as an absolute quantity - a difference from a
+                                  // stale on-screen qty could apply twice.
+                                  onCommit={(q) =>
+                                    q <= 0
+                                      ? changeQtyAndMaybeLeave(l, -l.qty)
+                                      : store.setLineQty(order.id, l.id, q, "biller")
+                                  }
+                                />
                                 <IconButton
                                   label="Increase quantity"
                                   variant="outline"
@@ -1015,16 +1043,24 @@ function OrderCartPage() {
                 <Label htmlFor="customQty" required>
                   Qty
                 </Label>
-                <Input
+                <QtyInput
                   id="customQty"
-                  type="number"
-                  min={1}
-                  className="num mt-1.5"
+                  className="mt-1.5 h-9 w-full text-left px-3"
                   value={customQty}
-                  onChange={(e) => setCustomQty(Math.max(1, Number(e.target.value) || 1))}
+                  allowZero={false}
+                  commitOnChange
+                  onCommit={setCustomQty}
                 />
               </div>
             </div>
+            <CustomItemRouteFields
+              route={customRoute}
+              onChange={(r) => {
+                setCustomRoute(r);
+                setCustomRouteError(null);
+              }}
+              error={customRouteError}
+            />
           </div>
           <DialogFooter>
             <Button
@@ -1039,8 +1075,10 @@ function OrderCartPage() {
                     message: "Price must be more than ₹0",
                   },
                 ]);
-                if (!valid) return;
-                store.addCustomLine(order.id, customName.trim(), customPrice, customQty);
+                const routeProblem = customRouteProblem(customStations, customRoute);
+                setCustomRouteError(routeProblem);
+                if (!valid || routeProblem) return;
+                store.addCustomLine(order.id, customName.trim(), customPrice, customQty, customRoute);
                 setCustomItemOpen(false);
               }}
             >

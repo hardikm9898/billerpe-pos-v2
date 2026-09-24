@@ -914,8 +914,21 @@ export function InvoiceFormatSection() {
                       </SelectTrigger>
                       <SelectContent>
                         {Object.entries(CONTENT_LABEL).map(([k, v]) => (
-                          <SelectItem key={k} value={k}>
+                          <SelectItem
+                            key={k}
+                            value={k}
+                            // One marketing message per side: it prints the
+                            // outlet's single header/footer marketing text.
+                            disabled={
+                              k === "marketing" &&
+                              fmt[slot].some((o) => o.id !== l.id && o.content === "marketing")
+                            }
+                          >
                             {v}
+                            {k === "marketing" &&
+                            fmt[slot].some((o) => o.id !== l.id && o.content === "marketing")
+                              ? " (already used - add Custom text)"
+                              : ""}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -1097,6 +1110,19 @@ export function InvoiceFormatSection() {
                     message: "Enter a UPI ID like name@bank, or leave it blank",
                   },
                 ]);
+                // A blank custom-text line has nothing to print and was
+                // dropped on reload, shifting every line under it.
+                const blankLine = (["header", "footer"] as const)
+                  .flatMap((slot) =>
+                    fmt[slot].map((l, i) => ({ slot, n: i + 1, blank: l.content === "text" && !l.text?.trim() })),
+                  )
+                  .find((x) => x.blank);
+                if (blankLine) {
+                  toast.error(
+                    `${blankLine.slot === "header" ? "Header" : "Footer"} line ${blankLine.n}: type the text to print, or remove the line`,
+                  );
+                  return;
+                }
                 if (valid) {
                   store.setInvoiceFormat(fmt);
                   setDirty(false);
@@ -1198,6 +1224,7 @@ const KOT_PREVIEW_CTX = {
   billNo: "1024",
   tokenNumber: 12,
   kotNumber: 1,
+  firedAt: "24/09/26, 6:09 pm",
 };
 
 export function KotFormatSection() {
@@ -1357,6 +1384,8 @@ export function KotFormatSection() {
               {lineText(l)}
             </p>
           ))}
+          {/* Every printed KOT carries the time it was fired, under the header. */}
+          <p className="text-[11px] leading-snug">{KOT_PREVIEW_CTX.firedAt}</p>
           <div className="my-3 border-t border-dashed border-border" />
           <table className="w-full text-left text-[11px]">
             <thead>
@@ -1381,6 +1410,13 @@ export function KotFormatSection() {
             </p>
           ))}
         </div>
+        {fmt.header.length &&
+        ![...fmt.header, ...fmt.footer].some((l) => l.content === "customer-details") ? (
+          <p className="mt-3 text-xs text-warning">
+            No "Customer / table details" line - the kitchen will not see which table or customer a
+            KOT is for.
+          </p>
+        ) : null}
         {!fmt.header.length ? (
           <p className="mt-3 text-xs text-warning">
             No header lines configured yet - real tickets print the plain default layout (outlet

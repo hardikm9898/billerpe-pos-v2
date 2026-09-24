@@ -1,3 +1,4 @@
+import { roundQty } from "@/lib/qty";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import {
@@ -35,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, qrOrderApi, type RawPendingQrOrder } from "@/lib/api";
 import { getQrInbox, removeFromQrInbox, subscribeQrInbox } from "@/lib/qrInbox";
+import { QrOrderCard, type QrItemDecision } from "@/components/qr/qr-order-card";
 import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom } from "@/mock/format";
@@ -223,12 +225,21 @@ function TableGridPage() {
     openBiller(store.startOrder(table.id));
   };
 
-  const acceptQrOrder = async (qrOrder: RawPendingQrOrder) => {
+  const acceptQrOrder = async (qrOrder: RawPendingQrOrder, decisions: QrItemDecision[]) => {
     setQrActionBusyId(qrOrder.id);
     try {
-      const { orderId } = await qrOrderApi.accept(qrOrder.id);
+      const { orderId, rejected } = await qrOrderApi.accept(qrOrder.id, decisions);
       removeFromQrInbox(qrOrder.id);
-      toast.success(`Order accepted for ${qrOrder.table_name ?? "table"}`);
+      if (rejected || orderId === undefined) {
+        toast.success("Order declined - the customer sees why");
+        return;
+      }
+      const dropped = decisions.filter((d) => !d.accepted).length;
+      toast.success(
+        dropped
+          ? `Accepted for ${qrOrder.table_name ?? "table"} - ${dropped} item${dropped === 1 ? "" : "s"} rejected`
+          : `Order accepted for ${qrOrder.table_name ?? "table"}`,
+      );
       // loadTablesFromServer alone was NOT enough here - confirmed live,
       // reported repeatedly: it only ever discovers an order this session
       // didn't know about yet (see its own comment), so accepting a 2nd+
@@ -251,10 +262,10 @@ function TableGridPage() {
     }
   };
 
-  const rejectQrOrder = async (qrOrder: RawPendingQrOrder) => {
+  const rejectQrOrder = async (qrOrder: RawPendingQrOrder, reason: string) => {
     setQrActionBusyId(qrOrder.id);
     try {
-      await qrOrderApi.reject(qrOrder.id);
+      await qrOrderApi.reject(qrOrder.id, reason);
       removeFromQrInbox(qrOrder.id);
       toast.success("Order declined");
     } catch (err) {
@@ -267,7 +278,7 @@ function TableGridPage() {
   };
 
   const itemCountOf = (order: Order | undefined) =>
-    order ? order.lines.reduce((s, l) => s + l.qty, 0) : 0;
+    order ? roundQty(order.lines.reduce((s, l) => s + l.qty, 0)) : 0;
 
   const handlePrintBill = (t: RestaurantTable) => {
     if (t.orderId) void store.printBill(t.orderId);
@@ -597,7 +608,9 @@ function TableGridPage() {
           <DialogHeader>
             <DialogTitle>
               Transfer{" "}
-              {transferFrom ? `${categoryName(transferFrom.categoryId)} · ${transferFrom.name}` : ""}{" "}
+              {transferFrom
+                ? `${categoryName(transferFrom.categoryId)} · ${transferFrom.name}`
+                : ""}{" "}
               to…
             </DialogTitle>
             <DialogDescription>Only free tables can receive a transfer.</DialogDescription>
@@ -647,8 +660,8 @@ function TableGridPage() {
                     <DialogHeader>
                       <DialogTitle>Settle bill · {settleTable.name}</DialogTitle>
                       <DialogDescription>
-                        Single or split payment. Only cash may be more than the bill - the
-                        extra is shown as change to return.
+                        Single or split payment. Only cash may be more than the bill - the extra is
+                        shown as change to return.
                       </DialogDescription>
                     </DialogHeader>
                     <PaymentSplitEditor
@@ -713,71 +726,49 @@ function TableGridPage() {
                 const suspicious = o.table_status !== null && o.table_status !== "R";
                 const busy = qrActionBusyId === o.id;
                 return (
-                  <div key={o.id} className="rounded-lg border border-border p-3">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-semibold">
-                          {o.table_name ?? `Table ${o.table_id}`}
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {o.customer_name || "Guest"} · {o.customer_mobile}
-                        </p>
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        {qrElapsed(o.submitted_at)} ago
-                      </span>
-                    </div>
-                    <ul className="mt-2 space-y-0.5 text-sm">
-                      {o.items.map((item, i) => (
-                        <li key={i} className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 truncate">
-                            {item.qty} × {item.itemName}
-                            {item.variantName ? ` (${item.variantName})` : ""}
-                            {item.addonNames?.length ? ` + ${item.addonNames.join(", ")}` : ""}
+                  <QrOrderCard
+                    key={o.id}
+                    order={o}
+                    busy={busy}
+                    onAccept={(decisions) => void acceptQrOrder(o, decisions)}
+                    onRejectAll={(reason) => void rejectQrOrder(o, reason)}
+                    header={
+                      <>
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold">
+                              {o.table_name ?? `Table ${o.table_id}`}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {o.customer_name || "Guest"} · {o.customer_mobile}
+                            </p>
+                          </div>
+                          <span className="text-xs text-muted-foreground">
+                            {qrElapsed(o.submitted_at)} ago
                           </span>
-                          {item.comment ? (
-                            <span className="shrink-0 truncate text-xs text-muted-foreground">
-                              {item.comment}
-                            </span>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ul>
-                    {suspicious ? (
-                      <p className="mt-2 text-xs text-amber-600">
-                        This table currently shows{" "}
-                        {o.table_status === "F"
-                          ? "Free"
-                          : o.table_status === "B"
-                            ? "Reserved"
-                            : o.table_status === "P"
-                              ? "Bill Generated"
-                              : o.table_status === "H"
-                                ? "Hold"
-                                : "occupied"}{" "}
-                        — double-check before accepting.
-                      </p>
-                    ) : null}
-                    <div className="mt-3 flex gap-2">
-                      <Button
-                        size="sm"
-                        className="flex-1"
-                        disabled={busy}
-                        onClick={() => void acceptQrOrder(o)}
-                      >
-                        Accept
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="flex-1"
-                        disabled={busy}
-                        onClick={() => void rejectQrOrder(o)}
-                      >
-                        Reject
-                      </Button>
-                    </div>
-                  </div>
+                        </div>
+                      </>
+                    }
+                    footer={
+                      <>
+                        {suspicious ? (
+                          <p className="mt-2 text-xs text-amber-600">
+                            This table currently shows{" "}
+                            {o.table_status === "F"
+                              ? "Free"
+                              : o.table_status === "B"
+                                ? "Reserved"
+                                : o.table_status === "P"
+                                  ? "Bill Generated"
+                                  : o.table_status === "H"
+                                    ? "Hold"
+                                    : "occupied"}{" "}
+                            — double-check before accepting.
+                          </p>
+                        ) : null}
+                      </>
+                    }
+                  />
                 );
               })}
             </div>

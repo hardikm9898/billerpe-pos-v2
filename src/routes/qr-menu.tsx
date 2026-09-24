@@ -121,8 +121,11 @@ function unitPrice(entry: Pick<CartEntry, "item" | "variant" | "addons">) {
     : Number(entry.item.price);
   return base + entry.addons.reduce((sum, a) => sum + Number(a.price), 0);
 }
+// A dish the restaurant did not accept is not charged.
 function roundTotal(items: QrCartItem[]) {
-  return items.reduce((sum, i) => sum + (Number(i.unitPrice) || 0) * i.qty, 0);
+  return items
+    .filter((i) => i.decision !== "rejected")
+    .reduce((sum, i) => sum + (Number(i.unitPrice) || 0) * i.qty, 0);
 }
 
 // What this phone remembers about its visit at this table. The visit itself
@@ -241,10 +244,15 @@ function QrMenuPage() {
     for (const r of view.rounds) {
       const before = lastStatuses.current.get(r.id);
       if (announce && before === "pending" && r.status !== "pending") {
-        if (r.status === "accepted")
+        const declined = r.items.filter((i) => i.decision === "rejected").length;
+        if (r.status === "accepted" && declined)
+          toast.warning(
+            `Your order was confirmed, but ${declined} item${declined === 1 ? " was" : "s were"} not accepted - see My order for why.`,
+          );
+        else if (r.status === "accepted")
           toast.success("Your order was confirmed and is being prepared.");
         else if (r.status === "rejected")
-          toast.error("The restaurant declined your last order. Please ask staff.");
+          toast.error("The restaurant declined your last order - see My order for why.");
         else toast.error("Your last order was not confirmed in time. Please ask staff.");
       }
       lastStatuses.current.set(r.id, r.status);
@@ -1238,11 +1246,29 @@ function QrMenuPage() {
                   </div>
                   <ul className="space-y-0.5 text-sm">
                     {r.items.map((item, i) => (
-                      <li key={i} className="flex items-center justify-between gap-2">
-                        <span className="min-w-0 truncate">
-                          {item.qty} × {item.itemName}
-                          {item.variantName ? ` (${item.variantName})` : ""}
-                        </span>
+                      <li key={i} data-qr-item-decision={item.decision ?? "pending"}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={
+                              item.decision === "rejected"
+                                ? "min-w-0 truncate text-muted-foreground line-through"
+                                : "min-w-0 truncate"
+                            }
+                          >
+                            {item.qty} × {item.itemName}
+                            {item.variantName ? ` (${item.variantName})` : ""}
+                          </span>
+                          {item.decision === "accepted" && r.status === "accepted" ? (
+                            <span className="shrink-0 text-xs text-success">Accepted</span>
+                          ) : item.decision === "rejected" ? (
+                            <span className="shrink-0 text-xs font-medium text-destructive">
+                              Not accepted
+                            </span>
+                          ) : null}
+                        </div>
+                        {item.decision === "rejected" && item.rejectReason ? (
+                          <p className="text-xs text-destructive">Reason: {item.rejectReason}</p>
+                        ) : null}
                       </li>
                     ))}
                   </ul>

@@ -52,6 +52,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { QtyInput } from "@/components/billing/qty-input";
+import { sanitizeQtyInput } from "@/lib/qty";
+import {
+  CustomItemRouteFields,
+  customRouteProblem,
+  useCustomItemStations,
+  type CustomItemRoute,
+} from "@/components/billing/custom-item-route";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
@@ -1345,9 +1353,24 @@ function CartGroup({
                   data-qty-row={i}
                   defaultValue={l.qty}
                   key={`${l.id}-${l.qty}`}
-                  inputMode="numeric"
+                  inputMode="decimal"
+                  // Digits and one point, up to 2 decimals (1.5, 0.25).
+                  onInput={(e) => {
+                    const el = e.currentTarget;
+                    const clean = sanitizeQtyInput(el.value);
+                    if (clean !== el.value) el.value = clean;
+                  }}
                   aria-label={`Quantity for ${l.name}`}
-                  onFocus={(e) => e.currentTarget.select()}
+                  // Select-all on click too: the mouseup after the focus
+                  // dropped the selection, so a typed qty was appended.
+                  onFocus={(e) => {
+                    e.currentTarget.dataset["justFocused"] = "1";
+                    e.currentTarget.select();
+                  }}
+                  onMouseUp={(e) => {
+                    if (e.currentTarget.dataset["justFocused"]) e.preventDefault();
+                    delete e.currentTarget.dataset["justFocused"];
+                  }}
                   onBlur={(e) => {
                     const v = Number(e.currentTarget.value);
                     if (Number.isFinite(v) && v !== l.qty)
@@ -2079,10 +2102,19 @@ function CustomItemDialog({
   const store = useStore();
   const form = useFormCheck();
   const formReset = form.reset;
+  const stations = useCustomItemStations();
+  const [route, setRoute] = useState<CustomItemRoute>({});
+  const [routeError, setRouteError] = useState<string | null>(null);
   useEffect(() => {
-    if (!open) formReset();
+    if (!open) {
+      formReset();
+      setRoute({});
+      setRouteError(null);
+    }
   }, [open, formReset]);
   const add = () => {
+    const problem = customRouteProblem(stations, route);
+    setRouteError(problem);
     const valid = form.check([
       { key: "kbCustomName", label: "Item name", value: name },
       {
@@ -2093,8 +2125,8 @@ function CustomItemDialog({
         message: "Price must be more than ₹0",
       },
     ]);
-    if (!valid) return;
-    store.addCustomLine(order.id, name.trim(), price, qty);
+    if (!valid || problem) return;
+    store.addCustomLine(order.id, name.trim(), price, qty, route);
     onOpenChange(false);
     onAdded();
   };
@@ -2133,15 +2165,23 @@ function CustomItemDialog({
             </div>
             <div className="space-y-1.5">
               <Label required>Qty</Label>
-              <Input
-                type="number"
-                min={1}
+              <QtyInput
                 value={qty}
-                onChange={(e) => setQty(Math.max(1, Number(e.target.value) || 1))}
-                className={cn("num", focusRing)}
+                allowZero={false}
+                commitOnChange
+                onCommit={setQty}
+                className={cn("h-9 w-full px-3 text-left", focusRing)}
               />
             </div>
           </div>
+          <CustomItemRouteFields
+            route={route}
+            onChange={(r) => {
+              setRoute(r);
+              setRouteError(null);
+            }}
+            error={routeError}
+          />
         </div>
         <DialogFooter>
           <Button onClick={add}>

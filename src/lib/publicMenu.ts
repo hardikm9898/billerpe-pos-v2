@@ -199,6 +199,9 @@ export type QrCartItem = {
   // Display only (the customer's own order history). The exe re-prices
   // every line from its own menu on accept and never reads this.
   unitPrice?: number;
+  /** Staff's decision for this dish, and why it was not accepted. */
+  decision?: "accepted" | "rejected";
+  rejectReason?: string;
 };
 
 type QrEnvelope<T> = { error?: boolean; code?: number; results?: T & { message?: string } };

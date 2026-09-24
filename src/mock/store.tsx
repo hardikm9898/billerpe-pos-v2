@@ -1,3 +1,4 @@
+import { roundQty } from "@/lib/qty";
 import {
   createContext,
   useCallback,
@@ -666,6 +667,24 @@ function discountPayload(o: Order, totals: BillTotals) {
 // order) and updateOrderTax (existing order) server-side - sending all
 // three covers either path without needing to fix that backend
 // inconsistency here.
+// How a line is identified to the exe. A custom item (added at billing, not
+// on the menu) has no menu id yet: it goes as custom + its name, and the exe
+// files it under a hidden menu row carrying that name (billerpe-local-exe
+// controller/kot.js) - which every screen, the KDS, the bill, reports and
+// the cloud then read. It used to go as id NaN: the name never left this
+// tab, so a reopened table, the order details and every other device
+// showed "Unknown item".
+function exeLineIdentity(l: OrderLine) {
+  const id = Number(l.itemId);
+  const route = {
+    ...(l.routePrinterId ? { route_printer_id: l.routePrinterId } : {}),
+    ...(l.routeKitchenId ? { route_kitchen_id: l.routeKitchenId } : {}),
+  };
+  return Number.isFinite(id) && id > 0
+    ? { id, ...route }
+    : { custom: true, item_name: l.name, ...route };
+}
+
 function buildCartTaxes(totals: BillTotals, taxRules: TaxRule[]) {
   return totals.taxLines.map((tx) => {
     const rule = taxRules.find((r) => r.id === tx.id);
@@ -1113,7 +1132,13 @@ interface Ctx extends State {
   setKeyboardOnly: (on: boolean) => void;
   setDefaultOrderType: (type: OrderType) => void;
   setGuestCount: (orderId: string, guests: number) => void;
-  addCustomLine: (orderId: string, name: string, price: number, qty: number) => void;
+  addCustomLine: (
+    orderId: string,
+    name: string,
+    price: number,
+    qty: number,
+    route?: { printerId?: number; kitchenId?: number },
+  ) => void;
   upsertCustomer: (customer: Customer) => Promise<boolean>;
   toggleCustomer: (id: string) => void;
   settleDueBills: (ids: string[], payments: PaymentSplit[]) => Promise<boolean>;
@@ -1336,7 +1361,16 @@ function mapRawInvoiceLines(raw: RawInvoiceFormate, slot: "header" | "footer"): 
 }
 
 function withMarketingText(lines: InvoiceLine[], text: string | null | undefined): InvoiceLine[] {
-  return lines.map((l) => (l.content === "marketing" ? { ...l, text: text ?? "" } : l));
+  const first = lines.findIndex((l) => l.content === "marketing");
+  return lines.map((l, i) =>
+    l.content !== "marketing"
+      ? l
+      : i === first
+        ? { ...l, text: text ?? "" }
+        : // Saved before one-marketing-line-per-side: it has always printed
+          // the shared text, so it becomes an editable custom line of it.
+          { ...l, content: "text", text: text ?? "" },
+  );
 }
 
 // The inverse of mapRawInvoiceLines - always emits all 10 slots per side
@@ -1357,9 +1391,15 @@ function toRawInvoiceFormatePayload(
     const fontPrefix = slot === "header" ? "fontH" : "fontF";
     for (let i = 1; i <= INVOICE_LINE_SLOTS; i++) {
       const line = lines[i - 1];
+      // The marketing keyword prints Hotel.invoiceFormateHeaderText/
+      // BottomText - ONE text per side. A second marketing line on the same
+      // side reloaded (and printed) with the first one's text, so any extra
+      // one is stored as the literal text it holds. The editor also stops a
+      // second one being picked; this covers formats saved before that.
+      const firstMarketing = lines.findIndex((l) => l.content === "marketing");
       const value = !line
         ? ""
-        : line.content === "text"
+        : line.content === "text" || (line.content === "marketing" && i - 1 !== firstMarketing)
           ? (line.text ?? "")
           : INVOICE_CONTENT_TO_KEYWORD[line.content];
       payload[`${linePrefix}${i}`] = value;
@@ -1371,13 +1411,10 @@ function toRawInvoiceFormatePayload(
 
 // Dynamic KOT format (Task 1) - same headerLineN/footerLineN slot
 // convention as invoice format (hms_kot_formate_mst, model/kotFormate.js),
-// but this keyword vocabulary is purely a frontend convention: unlike the
-// invoice side (where controller/kto.js's own getHearderAndFooterDataBillView
-// re-renders these keywords server-side for the e-bill webview), nothing on
-// the backend interprets a KOT line's stored keyword - the configured
-// format is only ever rendered client-side (renderKotHeaderFooter, near
-// doPrintKot) into ready HTML strings, same as the invoice's own bonus-fix
-// print path. Kept as a keyword→content mapping anyway (not raw content
+// and this keyword vocabulary must match the exe's, which renders every
+// printed KOT from it (billerpe-local-exe services/kotAutoPrint.js#
+// renderKotLines - auto-printed rounds, reprints and a bill's KOT alike).
+// Kept as a keyword→content mapping (not raw content
 // enums stored directly) so it round-trips through the same "unknown value
 // = literal custom text" fallback as the invoice mapping, for one
 // consistent convention across both format editors.
@@ -2016,6 +2053,8 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       id: `ol-${l.id}`,
       itemId: String(l.MenuId),
       name: l.hms_menu_mst?.item_name ?? "Unknown item",
+      ...(l.route_printer_id ? { routePrinterId: Number(l.route_printer_id) } : {}),
+      ...(l.route_kitchen_id ? { routeKitchenId: Number(l.route_kitchen_id) } : {}),
       qty: l.qty,
       price: l.price,
       variant: l.variant_name ?? undefined,
@@ -2260,6 +2299,8 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
       id: `ol-${l.id}`,
       itemId: String(l.MenuId),
       name: l.hms_menu_mst?.item_name ?? "Unknown item",
+      ...(l.route_printer_id ? { routePrinterId: Number(l.route_printer_id) } : {}),
+      ...(l.route_kitchen_id ? { routeKitchenId: Number(l.route_kitchen_id) } : {}),
       qty: l.qty,
       price: l.price,
       variant: l.variant_name ?? undefined,
@@ -2903,7 +2944,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const allMenuItems = o.lines.map((l) => {
       const mi = s.menuItems.find((m) => m.id === l.itemId);
       return {
-        id: Number(l.itemId),
+        ...exeLineIdentity(l),
         qty: l.qty,
         price: l.price,
         discount: 0,
@@ -3103,7 +3144,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             menuItems: lines.map((l) => {
               const mi = s.menuItems.find((m) => m.id === l.itemId);
               return {
-                id: Number(l.itemId),
+                ...exeLineIdentity(l),
                 qty: l.qty,
                 price: l.price,
                 discount: 0,
@@ -3215,7 +3256,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           tax_value: tx.amount,
         };
       });
-      const totalQty = o.lines.reduce((sum, l) => sum + l.qty, 0);
+      // Fractional quantities: 0.1 + 0.2 must print as 0.3.
+      const totalQty = roundQty(o.lines.reduce((sum, l) => sum + l.qty, 0));
 
       // Direct silent print first (billerpe-local-exe prints straight to
       // the configured Invoice printer, no browser dialog) - falls back to
@@ -3305,140 +3347,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Renders a configured KOT header/footer (store.kotFormat.header/footer)
-  // into the string[] of HTML fragments both KOT print paths expect -
-  // mirrors renderInvoiceHeaderFooter's convention (see doPrintBill above),
-  // but synchronous (no logo/QR content types on the KOT side).
-  const renderKotHeaderFooter = (
-    lines: KotLine[],
-    ctx: {
-      hotelName: string;
-      address: string;
-      orderType: string;
-      customerDetails: string;
-      billNo: string;
-      tokenNumber: number;
-      kotNumber: number;
-    },
-  ): string[] => {
-    const out: string[] = [];
-    for (const l of lines) {
-      switch (l.content) {
-        case "outlet-name":
-          out.push(`<p class="hotel-name">${ctx.hotelName}</p>`);
-          break;
-        case "address":
-          if (ctx.address) out.push(`<p>${ctx.address}</p>`);
-          break;
-        case "order-type":
-          out.push(`<p><strong>${ctx.orderType}</strong></p>`);
-          break;
-        case "customer-details":
-          out.push(`<p><strong>${ctx.customerDetails}</strong></p>`);
-          break;
-        case "bill-no":
-          out.push(`<p>KOT - ${ctx.billNo}</p>`);
-          break;
-        case "token-number":
-          if (ctx.tokenNumber > 0) {
-            out.push(`<p class="token"><strong>Token No.:${ctx.tokenNumber}</strong></p>`);
-          }
-          break;
-        case "kot-number":
-          out.push(`<p>KOT #${ctx.kotNumber}</p>`);
-          break;
-        case "billerpe-branding":
-          out.push(`<p>Powered by BillerPe</p>`);
-          break;
-        default:
-          if (l.text) out.push(`<p>${l.text}</p>`);
-          break;
-      }
-    }
-    return out;
-  };
-
-  // Reprint KOT - renders just one already-sent round's ticket (items/qty/
-  // note/addons only, no pricing), matching controller/kto.js#reprintkot's
-  // real KOT template. There's no "fetch this round back" endpoint, so this
-  // re-supplies the round's item list from local state, same as every other
-  // print helper here.
+  // "Print KOT" on a round already sent. The exe prints it from its own
+  // order with the same renderer as every auto-printed KOT (billerpe-local-
+  // exe services/kotAutoPrint.js) - this app used to rebuild the ticket
+  // itself, so a reprint had a different date style and could miss the
+  // latest KOT Format. With no KOT printer, the exe hands back the same
+  // ticket as a PDF to print from the browser.
   const doPrintKot = async (o: Order, round: number) => {
+    if (!o.backendId) {
+      toast.error("This KOT round hasn't been sent to the kitchen yet");
+      return;
+    }
     try {
-      const lines = o.lines.filter((l) => l.kotRound === round);
-      if (!lines.length) {
-        toast.error("No items found for this KOT round");
-        return;
-      }
-      const hotel = await hotelApi.getSettings();
-      const kot = s.kots.find((k) => k.orderId === o.id && k.round === round);
-      const userOrTableNo =
-        o.type === "Dine In"
-          ? o.tableLabel
-          : o.customerName
-            ? `Customer: ${o.customerName}`
-            : "Pickup";
-      const items = lines.map((l) => {
-        const mi = s.menuItems.find((m) => m.id === l.itemId);
-        return {
-          item_name: l.name,
-          qty: l.qty,
-          comment: l.note ?? "",
-          // Was hardcoded null - the EXE's own printer routing
-          // (helpers/kotPrinterRouting.js#arranPrintersForKotWithTheseItems)
-          // treats a null category as "matches every configured printer
-          // regardless of its own category assignment", which broke
-          // per-station KOT routing entirely: a printer set up for only
-          // Bar/Beverages (say) still received every item off every ticket
-          // instead of just its own. generateKot (a few hundred lines up)
-          // already computes this correctly for the same lines - matched
-          // here.
-          menu_categ_id: mi ? Number(mi.categoryId) : null,
-          variantData: l.variant ? { variants_name: l.variant } : null,
-          addons: buildAddonsPayload(l.addons),
-        };
-      });
-      const tokenNumber = o.token ?? 0;
-      // Uses the hotel's configured KOT Format (Settings > KOT Format) so
-      // the actual printed ticket matches what's configured there. Falls
-      // back to the same plain layout printed before this feature existed
-      // when the hotel hasn't configured a format yet (header comes back
-      // empty).
-      const kotCtx = {
-        hotelName: hotel.hotel_name,
-        address: [hotel.address1, hotel.address2].filter(Boolean).join(", "),
-        orderType: o.type === "Dine In" ? "Dine In" : "Pickup",
-        customerDetails: userOrTableNo,
-        billNo: String(o.orderNo),
-        tokenNumber,
-        kotNumber: round,
-      };
-      const [headerText, footerText] = s.kotFormat.header.length
-        ? [
-            renderKotHeaderFooter(s.kotFormat.header, kotCtx),
-            renderKotHeaderFooter(s.kotFormat.footer, kotCtx),
-          ]
-        : [[], []];
-
-      // Direct silent print first (billerpe-local-exe resolves the
-      // configured KOT printer(s) itself and prints straight to them, no
-      // browser dialog) - falls back to the old "open a PDF tab" flow only
-      // if that fails (e.g. no KOT printer configured yet, or the EXE
-      // can't be reached), so this never leaves the user with nothing.
-      try {
-        const { results } = await localPrintApi.printKot({
-          order_type: o.type === "Dine In" ? "dinin" : "pickup",
-          order_id: String(o.orderNo),
-          restaurantName: hotel.hotel_name,
-          userOrTableNo,
-          timeAndDate: kot?.createdAt ?? o.createdAt,
-          kotNumber: round,
-          token: tokenNumber,
-          table_id: o.tableId,
-          headerText,
-          footerText,
-          items,
-        });
+      const res = await localPrintApi.reprintKot({ orderId: o.backendId, kotNumber: round });
+      if (res.printed) {
+        const results = res.results ?? [];
         const failed = results.filter((r) => !r.ok);
         if (failed.length) {
           toast.error(`KOT failed to print on: ${failed.map((f) => f.printer).join(", ")}`);
@@ -3446,28 +3369,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           toast.success(`KOT sent to ${results.map((r) => r.printer).join(", ")}`);
         }
         return;
-      } catch {
-        // Fall through to the PDF-preview path below.
       }
-
-      const { pdf } = await orderApi.printKot({
-        order_type: o.type === "Dine In" ? "dinin" : "pickup",
-        order_id: String(o.orderNo),
-        restaurantName: hotel.hotel_name,
-        userOrTableNo,
-        timeAndDate: kot?.createdAt ?? o.createdAt,
-        printerSize: hotel.printerSize ?? "1",
-        kotNumber: round,
-        token: tokenNumber,
-        headerText,
-        footerText,
-        items,
-      });
-      const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
-      window.open(URL.createObjectURL(blob), "_blank");
-      toast.success("KOT ready to print (no local printer configured - opened as a PDF instead)");
+      if (res.pdf) {
+        const blob = new Blob([new Uint8Array(res.pdf.data)], { type: "application/pdf" });
+        window.open(URL.createObjectURL(blob), "_blank");
+        toast.success(
+          res.reason === "no-matching-printer"
+            ? "No KOT printer is set for these items - opened the KOT as a PDF instead"
+            : "KOT ready to print (no KOT printer configured - opened as a PDF instead)",
+        );
+      }
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Could not generate the KOT PDF");
+      toast.error(err instanceof ApiError ? err.message : "Could not print the KOT");
     }
   };
 
@@ -3898,7 +3811,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (
         line &&
         order &&
-        line.qty + delta <= 0 &&
+        roundQty(line.qty + delta) <= 0 &&
         line.kotRound <= order.kotRounds &&
         guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
       ) {
@@ -3911,14 +3824,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ? {
                 ...o,
                 lines: o.lines
-                  .map((l) => (l.id === lineId ? { ...l, qty: l.qty + delta } : l))
+                  .map((l) => (l.id === lineId ? { ...l, qty: roundQty(l.qty + delta) } : l))
                   .filter((l) => l.qty > 0),
               }
             : o,
         ),
       }));
       if (order && line) {
-        const newQty = line.qty + delta;
+        const newQty = roundQty(line.qty + delta);
         log(
           "Qty Changed",
           `Order #${order.orderNo}`,
@@ -3940,7 +3853,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (
         line &&
         order &&
-        Math.max(0, Math.round(qty)) <= 0 &&
+        Math.max(0, roundQty(qty)) <= 0 &&
         line.kotRound <= order.kotRounds &&
         guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
       ) {
@@ -3953,13 +3866,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ? {
                 ...o,
                 lines: o.lines
-                  .map((l) => (l.id === lineId ? { ...l, qty: Math.max(0, Math.round(qty)) } : l))
+                  // Up to 2 decimals (1.5 plates, 0.25 kg) - this used to
+                  // round to a whole number, so 2.5 typed became 3.
+                  .map((l) => (l.id === lineId ? { ...l, qty: Math.max(0, roundQty(qty)) } : l))
                   .filter((l) => l.qty > 0),
               }
             : o,
         ),
       }));
-      const newQty = Math.max(0, Math.round(qty));
+      const newQty = Math.max(0, roundQty(qty));
       if (order && line) {
         log(
           "Qty Changed",
@@ -4119,7 +4034,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const menuItemsPayload = pending.map((l) => {
         const mi = s.menuItems.find((m) => m.id === l.itemId);
         return {
-          id: Number(l.itemId),
+          ...exeLineIdentity(l),
           qty: l.qty,
           price: l.price,
           discount: 0,
@@ -4391,7 +4306,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const menuItemsPayload = pending.map((l) => {
         const mi = s.menuItems.find((m) => m.id === l.itemId);
         return {
-          id: Number(l.itemId),
+          ...exeLineIdentity(l),
           qty: l.qty,
           price: l.price,
           discount: 0,
@@ -4997,7 +4912,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const allMenuItems = target.lines.map((l) => {
               const mi = s.menuItems.find((m) => m.id === l.itemId);
               return {
-                id: Number(l.itemId),
+                ...exeLineIdentity(l),
                 qty: l.qty,
                 price: l.price,
                 discount: 0,
@@ -5294,7 +5209,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const mi = s.menuItems.find((m) => m.id === l.itemId);
         const variant = mi?.variants?.find((v) => v.name === l.variant);
         return {
-          menuId: Number(l.itemId),
+          ...(Number(l.itemId) > 0
+            ? { menuId: Number(l.itemId) }
+            : { custom: true, item_name: l.name }),
           qty: l.qty,
           price: l.price,
           ...(variant ? { variantId: Number(variant.id) } : {}),
@@ -8905,7 +8822,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       value.upsertTaxRule({ ...rule, active: !rule.active });
     },
     setInvoiceFormat: (fmt) => {
-      patch((p) => ({ ...p, invoiceFormat: fmt }));
+      patch((p) => ({
+        ...p,
+        invoiceFormat: fmt,
+        restaurant: p.restaurant ? { ...p.restaurant, gstin: fmt.gstNo.trim().toUpperCase() } : p.restaurant,
+      }));
       const run = async () => {
         try {
           // marketing_text lives on Hotel itself, not on
@@ -8917,6 +8838,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const [identity] = await Promise.all([
             hotelApi.updateIdentity({
               upiId: fmt.upiId,
+              // GSTIN/FSSAI were edited and validated on this screen but
+              // never sent, so they vanished on the next refresh and no
+              // bill ever printed them.
+              gst_no: fmt.gstNo.trim().toUpperCase(),
+              fssai_no: fmt.fssaiNo.replace(/s/g, ""),
               is_token_on: TOKEN_SCOPE_TO_CODE[fmt.tokens.tokenFor],
               bill_with_kot: TOKEN_SCOPE_TO_CODE[fmt.tokens.billWithKot],
               bill_with_token: TOKEN_SCOPE_TO_CODE[fmt.tokens.billWithToken],
@@ -9454,7 +9380,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         log("Guests Updated", `Order #${o.orderNo}`, `${o.guests}`, `${safe}`, undefined, { id: o.id, backendId: o.backendId });
       }
     },
-    addCustomLine: (orderId, name, price, qty) => {
+    addCustomLine: (orderId, name, price, qty, route) => {
       if (!name.trim() || qty <= 0) return;
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
@@ -9466,6 +9392,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         qty,
         price,
         kotRound: UNSENT_ROUND,
+        custom: true,
+        ...(route?.printerId ? { routePrinterId: route.printerId } : {}),
+        ...(route?.kitchenId ? { routeKitchenId: route.kitchenId } : {}),
       };
       patch((p) => ({
         ...p,
