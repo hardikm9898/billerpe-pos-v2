@@ -496,7 +496,7 @@ export function DataTable<T>({
 export function Money({ value, className }: { value: number; className?: string }) {
   return (
     <span className={cn("num", className)}>
-      ₹{value.toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+      {value < 0 ? "−" : ""}₹{Math.abs(value).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
     </span>
   );
 }

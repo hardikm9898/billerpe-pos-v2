@@ -536,6 +536,11 @@ export function SuppliersScreen() {
     store.purchaseOrders
       .filter((p) => p.supplierId === id && p.status !== "Cancelled")
       .reduce((s, p) => s + store.poTotals(p).grand, 0);
+  // What is still owed: each purchase's total less its recorded payments.
+  const dueOf = (id: string) =>
+    store.purchaseOrders
+      .filter((p) => p.supplierId === id && p.status !== "Cancelled")
+      .reduce((s, p) => s + Math.max(0, store.poTotals(p).grand - (p.paidAmount ?? 0)), 0);
 
   return (
     <>
@@ -543,7 +548,7 @@ export function SuppliersScreen() {
         <StatCard label="Suppliers" value={store.suppliers.length} icon={Truck} />
         <StatCard
           label="Total outstanding"
-          value={<Money value={store.suppliers.reduce((s, x) => s + x.outstanding, 0)} />}
+          value={<Money value={Math.round(store.suppliers.reduce((s, x) => s + dueOf(x.id), 0))} />}
           tone="warning"
         />
         <StatCard
@@ -609,8 +614,8 @@ export function SuppliersScreen() {
               header: "Outstanding",
               cell: (s) => (
                 <Money
-                  value={s.outstanding}
-                  className={s.outstanding ? "font-semibold text-primary" : "text-muted-foreground"}
+                  value={Math.round(dueOf(s.id))}
+                  className={dueOf(s.id) ? "font-semibold text-primary" : "text-muted-foreground"}
                 />
               ),
             },

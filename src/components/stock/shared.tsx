@@ -131,9 +131,13 @@ export function Toolbar({
 
 /* ------------- stock health ------------- */
 
-export type Health = "Out of stock" | "Critical" | "Low" | "Healthy";
+// "Negative stock": sales used more than was recorded in stock (owner rule,
+// 2026-09-25: a sale is never blocked) - someone should count it or record
+// the purchase.
+export type Health = "Negative stock" | "Out of stock" | "Critical" | "Low" | "Healthy";
 
 export function healthOf(stock: number, reorder: number): Health {
+  if (stock < -1e-9) return "Negative stock";
   if (stock <= 0) return "Out of stock";
   if (reorder <= 0) return "Healthy";
   if (stock <= reorder * 0.5) return "Critical";
@@ -142,6 +146,7 @@ export function healthOf(stock: number, reorder: number): Health {
 }
 
 const healthTone: Record<Health, string> = {
+  "Negative stock": "bg-destructive text-destructive-foreground",
   "Out of stock": "bg-primary-soft text-primary-soft-foreground",
   Critical: "bg-primary-soft text-primary-soft-foreground",
   Low: "bg-warning-soft text-warning",
@@ -149,6 +154,7 @@ const healthTone: Record<Health, string> = {
 };
 
 const healthBar: Record<Health, string> = {
+  "Negative stock": "bg-destructive",
   "Out of stock": "bg-primary",
   Critical: "bg-primary",
   Low: "bg-warning",

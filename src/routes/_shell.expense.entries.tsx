@@ -209,6 +209,13 @@ function ExpenseEntriesPage() {
   };
 
   const openEditDialog = (e: Expense) => {
+    // The exe refuses to change these here; say where to do it instead.
+    if (e.fromPurchase) {
+      toast.info("This expense is a supplier payment", {
+        description: "Change or delete the payment on its purchase order in Stock › Purchases.",
+      });
+      return;
+    }
     setDraftDateTime(toDatetimeLocalValue(parseExpenseDateTime(e.date, e.time)));
     setDraft({ ...e });
   };

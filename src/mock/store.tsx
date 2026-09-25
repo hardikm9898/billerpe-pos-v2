@@ -15,7 +15,7 @@ import { splitCheck } from "@/lib/payments";
 import QRCode from "qrcode";
 
 import { OFFLINE_SETTINGS, ROLE_PERMISSION_DEFAULTS, ROLE_SPECIAL_DEFAULTS } from "./data";
-import { nowStamp, realToday, isoToDMY } from "./format";
+import { nowStamp, realToday, isoToDMY, dmyToIso } from "./format";
 import {
   ApiError,
   API_BASE_URL,
@@ -1045,8 +1045,12 @@ interface Ctx extends State {
   upsertUnit: (u: StockUnit) => Promise<boolean>;
   /** Resolves true once saved (and, when receiving, confirmed by the exe). */
   savePurchase: (po: PurchaseOrder, opts?: { receive?: boolean }) => Promise<boolean>;
-  payPurchaseOrder: (id: string, amount: number) => void;
-  cancelPurchaseOrder: (id: string) => void;
+  payPurchaseOrder: (
+    id: string,
+    pay: { amount: number; mode: string; date: string; ref?: string; fromDrawer?: boolean },
+  ) => Promise<boolean>;
+  deletePurchasePayment: (poId: string, paymentId: number) => Promise<boolean>;
+  cancelPurchaseOrder: (id: string) => Promise<boolean>;
   poTotals: (po: PurchaseOrder) => {
     subtotal: number;
     tax: number;
@@ -1838,12 +1842,35 @@ function mapRecipeDetail(
   detail: RawRecipeDetail,
   previous?: { yieldQty: number; yieldUnit: string },
 ): Recipe {
+  const toLines = (ings: RawRecipeDetail["variants"][number]["raw_materials"]): RecipeLine[] =>
+    ings.map((ing) => ({
+      type: ing.ingredient_type === "raw_material" ? "raw" : "semi",
+      refId: String(ing.raw_material_id ?? ing.semi_finished_item_id),
+      qty: ing.consumption_qty,
+    }));
   const base = detail.variants.find((v) => v.variant_id === null);
-  const lines: RecipeLine[] = (base?.raw_materials ?? []).map((ing) => ({
-    type: ing.ingredient_type === "raw_material" ? "raw" : "semi",
-    refId: String(ing.raw_material_id ?? ing.semi_finished_item_id),
-    qty: ing.consumption_qty,
-  }));
+  const lines = toLines(base?.raw_materials ?? []);
+  // Variant and addon groups come back too (they were never saved before).
+  const extra: RecipeGroup[] = [
+    ...detail.variants
+      .filter((v) => v.variant_id !== null)
+      .map((v) => ({
+        key: `variant-${v.variant_id}`,
+        label: v.variant_name ?? "Variant",
+        kind: "variant" as const,
+        refId: String(v.variant_id),
+        lines: toLines(v.raw_materials),
+      })),
+    ...detail.variants.flatMap((v) =>
+      (v.addons ?? []).map((a) => ({
+        key: `addon-${a.addon_id}`,
+        label: a.addon_name ?? "Addon",
+        kind: "addon" as const,
+        refId: String(a.addon_id),
+        lines: toLines(a.raw_materials),
+      })),
+    ),
+  ];
   return {
     id: `recipe-${detail.menu_id}`,
     itemName: detail.item_name,
@@ -1855,7 +1882,7 @@ function mapRecipeDetail(
     components: lines
       .filter((l) => l.type === "raw")
       .map((l) => ({ materialId: l.refId, qty: l.qty })),
-    groups: [{ key: "base", label: "Base recipe", kind: "base", lines }],
+    groups: [{ key: "base", label: "Base recipe", kind: "base", lines }, ...extra],
   };
 }
 
@@ -1892,6 +1919,7 @@ function mapRawExpenseEntry(e: RawExpenseEntry): Expense {
     time: `${`${hh}`.padStart(2, "0")}:${mm} ${ap}`,
     mode: e.paymentMode === "Cash" || e.paymentMode === "UPI" ? e.paymentMode : "Bank",
     note: e.reason,
+    ...(e.purchase_payment_id ? { fromPurchase: true } : {}),
     // Was write-only before (user_id was saved but this endpoint never
     // joined it back out) - now surfaces the real staff name, falling
     // back to "Staff" only for a genuinely missing/deleted user.
@@ -2425,14 +2453,36 @@ function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): Pur
   });
   // No plain "payments: number" field exists on the real response - see
   // RawPurchaseOrder's own comment - sum the actual payment rows instead.
-  const paid = o.hms_purchase_payments
-    .filter((p) => !p.deleted_status)
-    .reduce((sum, p) => sum + p.amount, 0);
+  const live = o.hms_purchase_payments.filter((p) => !p.deleted_status);
+  const paid = Math.round(live.reduce((sum, p) => sum + Number(p.amount), 0) * 100) / 100;
+  // A local calendar date (the exe stores these as UTC timestamps).
+  const localDay = (v?: string | null) => {
+    if (!v) return "";
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) return "";
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+  };
+  const LEGACY_MODE: Record<string, string> = { cash: "Cash", card: "Card", cheque: "Cheque", online: "Online", other: "Other" };
+  const payments = live
+    .map((p) => ({
+      id: p.id,
+      amount: Number(p.amount),
+      mode: LEGACY_MODE[p.payment_mode] ?? p.payment_mode ?? "—",
+      date: localDay(p.date ?? p.paymentDate ?? p.createdAt),
+      ...(p.payment_ref_no ? { ref: p.payment_ref_no } : {}),
+      ...(p.hms_hotelUser_master?.name ? { by: p.hms_hotelUser_master.name } : {}),
+      asExpense: !!p.expense_entry_id,
+      at: new Date(p.date ?? p.paymentDate ?? p.createdAt).getTime() || 0,
+    }))
+    .sort((a, b) => a.at - b.at || a.id - b.id)
+    .map(({ at: _at, ...p }) => p);
   return {
     id: previous?.id ?? `po-${o.id}`,
     poNo: `PO-2026-${String(o.Po_no).padStart(3, "0")}`,
     supplierId: o.hms_supplier ? String(o.hms_supplier.id) : (previous?.supplierId ?? ""),
-    date: previous?.date ?? realToday(),
+    // The invoice date the PO was entered with. It used to show today's
+    // date for every PO after a reload.
+    date: localDay(o.invoice_date) || (o.business_date ? isoToDMY(o.business_date) : "") || previous?.date || realToday(),
     // No status column at all server-side (confirmed by reading the
     // model - the list endpoint's own response literally references
     // order.status/order.paymentStatus, which come back undefined since
@@ -2448,6 +2498,7 @@ function mapRawPurchaseOrder(o: RawPurchaseOrder, previous?: PurchaseOrder): Pur
     paymentStatus:
       paid >= o.grandAmount && o.grandAmount > 0 ? "Paid" : paid > 0 ? "Partial" : "Unpaid",
     paidAmount: paid,
+    payments,
     discountType: o.discount_type === "pr" ? "percent" : "flat",
     discountValue: o.discount_value,
     requisitionId: previous?.requisitionId,
@@ -7850,12 +7901,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         discount_value: record.discountValue ?? 0,
         sub_total: totals.subtotal,
         rawMaterialData,
+        invoice_date: /^\d{2}\/\d{2}\/\d{4}$/.test(record.date) ? dmyToIso(record.date) : undefined,
       };
       const backendId = record.backendId;
       const previousBackendIds = new Set(
         s.purchaseOrders.filter((p) => p.backendId).map((p) => p.backendId),
       );
-      const paidAmount = record.paidAmount ?? 0;
+      // Only a NEW purchase carries a payment here (its first one). An edit
+      // used to send the PO's whole paid amount again as a new payment on
+      // every save, doubling what the supplier was shown as paid.
+      const firstPaid = backendId ? 0 : (record.paidAmount ?? 0);
+      const first = record.firstPayment;
       const runSync = async () => {
         try {
           let realId = backendId;
@@ -7863,9 +7919,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             // createPurchaseOrder doesn't return the new row's id -
             // finding it by diffing the id set before/after, same
             // pattern as Kitchens/Printers.
-            await purchaseOrderApi.create(payload);
+            const res = await purchaseOrderApi.create({
+              ...payload,
+              ...(firstPaid > 0
+                ? {
+                    paidAmount: firstPaid,
+                    payment_mode: first?.mode || "Cash",
+                    payment_ref_no: first?.ref ?? "",
+                    paymentDate: first?.date || new Date().toISOString().slice(0, 10),
+                    from_drawer: first?.fromDrawer ?? true,
+                  }
+                : {}),
+            });
             const { purchaseOrders } = await purchaseOrderApi.getAll("2000-01-01", "2100-01-01");
-            const created = purchaseOrders.find((o) => !previousBackendIds.has(o.id));
+            const created = res?.id
+              ? purchaseOrders.find((o) => o.id === res.id)
+              : purchaseOrders.find((o) => !previousBackendIds.has(o.id));
             if (!created) {
               toast.error("The purchase was sent but couldn't be confirmed on the server", {
                 description: "Reload the Purchase Orders screen to check.",
@@ -7875,19 +7944,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             realId = created.id;
           } else {
             await purchaseOrderApi.update({ id: realId, ...payload });
-          }
-          if (paidAmount > 0) {
-            // paidAmount sent at create time only actually persists when
-            // payment_type is exactly "paid" (confirmed live) - always
-            // recorded through the separate payment endpoint instead, for
-            // both the first receipt and any later edit.
-            await purchaseOrderApi.payment({
-              id: realId,
-              payment_mode: "cash",
-              payment_ref_no: "",
-              payment_date: new Date().toISOString().slice(0, 10),
-              paidAmount,
-            });
           }
           applyLocal();
           await Promise.all([
@@ -7912,80 +7968,89 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       return runSync();
     },
-    payPurchaseOrder: (id, amount) => {
+    // Supplier payments are saved on the exe first and then shown - they
+    // used to be shown straight away and sent as "cash, today" whatever
+    // was actually used, with a failure only as a toast afterwards.
+    payPurchaseOrder: async (id, pay) => {
       const po = s.purchaseOrders.find((x) => x.id === id);
-      if (!po) return;
-      const grand = poTotals(po).grand;
-      const paid = Math.min(grand, (po.paidAmount ?? 0) + amount);
-      patch((p) => ({
-        ...p,
-        purchaseOrders: p.purchaseOrders.map((x) =>
-          x.id === id
-            ? {
-                ...x,
-                paidAmount: paid,
-                paymentStatus: paid >= grand ? "Paid" : paid > 0 ? "Partial" : "Unpaid",
-              }
-            : x,
-        ),
-        suppliers: p.suppliers.map((sup) =>
-          sup.id === po.supplierId
-            ? { ...sup, outstanding: Math.max(0, sup.outstanding - amount) }
-            : sup,
-        ),
-      }));
-      toast.success("Payment recorded", { description: `${po.poNo} · ₹${amount}` });
-
-      if (!po.backendId) return;
-      const run = async () => {
-        try {
-          await purchaseOrderApi.payment({
-            id: po.backendId!,
-            payment_mode: "cash",
-            payment_ref_no: "",
-            payment_date: new Date().toISOString().slice(0, 10),
-            paidAmount: amount,
-          });
-          await value.loadPurchaseOrdersFromServer();
-        } catch (err) {
-          toast.error(
-            err instanceof ApiError ? err.message : "Payment saved locally but couldn't be synced",
-          );
-        }
-      };
-      void run();
+      if (!po?.backendId) {
+        toast.error("Receive this purchase order first, then record its payment");
+        return false;
+      }
+      try {
+        const res = await purchaseOrderApi.payment({
+          id: po.backendId,
+          payment_mode: pay.mode,
+          payment_ref_no: pay.ref ?? "",
+          payment_date: pay.date,
+          paidAmount: pay.amount,
+          from_drawer: pay.fromDrawer ?? true,
+        });
+        await Promise.all([value.loadPurchaseOrdersFromServer(), value.loadSuppliersFromServer()]);
+        const notes = [
+          `${po.poNo} · ₹${pay.amount.toLocaleString("en-IN")} · ${pay.mode}`,
+          res?.fromDrawer ? "taken from the cash drawer" : "",
+          res?.expenseId ? "added to expenses" : "",
+        ].filter(Boolean);
+        toast.success("Payment recorded", { description: notes.join(" · ") });
+        log("Purchase Payment", po.poNo, "—", `₹${pay.amount} ${pay.mode}`);
+        return true;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not record the payment");
+        return false;
+      }
     },
-    cancelPurchaseOrder: (id) => {
+    deletePurchasePayment: async (poId, paymentId) => {
+      const po = s.purchaseOrders.find((x) => x.id === poId);
+      try {
+        await purchaseOrderApi.deletePayment(paymentId);
+        await Promise.all([value.loadPurchaseOrdersFromServer(), value.loadSuppliersFromServer()]);
+        toast.success("Payment deleted", { description: po?.poNo });
+        if (po) log("Purchase Payment Deleted", po.poNo, "—", String(paymentId));
+        return true;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not delete the payment");
+        return false;
+      }
+    },
+    cancelPurchaseOrder: async (id) => {
       const po = s.purchaseOrders.find((x) => x.id === id);
-      if (!po) return;
+      if (!po) return false;
       const due = Math.max(0, poTotals(po).grand - (po.paidAmount ?? 0));
-      patch((p) => ({
-        ...p,
-        purchaseOrders: p.purchaseOrders.map((x) =>
-          x.id === id ? { ...x, status: "Cancelled" } : x,
-        ),
-        suppliers: p.suppliers.map((sup) =>
-          sup.id === po.supplierId
-            ? { ...sup, outstanding: Math.max(0, sup.outstanding - due) }
-            : sup,
-        ),
-      }));
-      toast.success(`${po.poNo} cancelled`);
-
-      if (!po.backendId) return;
-      const run = async () => {
-        try {
-          await purchaseOrderApi.remove(po.backendId!);
-          await value.loadPurchaseOrdersFromServer();
-        } catch (err) {
-          toast.error(
-            err instanceof ApiError
-              ? err.message
-              : "Cancelled locally but the backend reversal failed",
-          );
-        }
-      };
-      void run();
+      const applyLocal = () =>
+        patch((p) => ({
+          ...p,
+          purchaseOrders: p.purchaseOrders.map((x) =>
+            x.id === id ? { ...x, status: "Cancelled" } : x,
+          ),
+          suppliers: p.suppliers.map((sup) =>
+            sup.id === po.supplierId
+              ? { ...sup, outstanding: Math.max(0, sup.outstanding - due) }
+              : sup,
+          ),
+        }));
+      // A local draft has nothing on the exe.
+      if (!po.backendId) {
+        applyLocal();
+        toast.success(`${po.poNo} cancelled`);
+        return true;
+      }
+      try {
+        await purchaseOrderApi.remove(po.backendId);
+        applyLocal();
+        await Promise.all([
+          value.loadPurchaseOrdersFromServer(),
+          value.loadRawMaterialsFromServer(),
+          value.loadSuppliersFromServer(),
+        ]);
+        toast.success(`${po.poNo} cancelled`, {
+          description: "Its stock was taken back out and its payments removed.",
+        });
+        return true;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not cancel the purchase order");
+        return false;
+      }
     },
     saveStockCount: (rows, note) => {
       const who = currentUser.name;
@@ -8063,11 +8128,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 raw_material_id: Number(materialId),
                 qty: purchaseQty,
                 price: m.rate * (m.conversion || 1),
+                count: true,
               });
             } else {
               await stockInHandApi.stockOut({
                 raw_material_id: Number(materialId),
                 qty: purchaseQty,
+                count: true,
               });
             }
           }
@@ -8298,37 +8365,38 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Select a menu item for this recipe");
         return Promise.resolve(false);
       }
-      const base = (r.groups ?? []).find((g) => g.kind === "base");
-      const rawMaterialData = (base?.lines ?? []).map((l) =>
-        l.type === "raw"
-          ? { raw_material_id: Number(l.refId), consumption_qty: l.qty }
-          : { semi_finished_item_id: Number(l.refId), consumption_qty: l.qty },
-      );
-      if (!rawMaterialData.length) {
+      const toData = (lines: RecipeLine[]) =>
+        lines
+          .filter((l) => l.refId && l.qty > 0)
+          .map((l) =>
+            l.type === "raw"
+              ? { raw_material_id: Number(l.refId), consumption_qty: l.qty }
+              : { semi_finished_item_id: Number(l.refId), consumption_qty: l.qty },
+          );
+      // Every group is saved - the base plus one per variant and addon. Only
+      // the base used to be; variant and addon groups were dropped.
+      const groups = (r.groups ?? [])
+        .filter((g) => g.lines.length)
+        .map((g) => ({
+          ...(g.kind === "variant" && g.refId ? { variant_id: Number(g.refId) } : {}),
+          ...(g.kind === "addon" && g.refId ? { addon_id: Number(g.refId) } : {}),
+          raw_material_data: toData(g.lines),
+        }))
+        .filter((g) => g.raw_material_data.length);
+      if (!groups.length) {
         toast.error("Add at least one ingredient to the recipe");
         return Promise.resolve(false);
       }
-      // Variant/addon groups have no backend equivalent yet (no real
-      // Variant/Addon picker in this editor) - only the base group is
-      // synced, so anything in the other groups is silently dropped on
-      // the next reload. Warn rather than pretend it was saved.
-      const hasExtraGroups = (r.groups ?? []).some((g) => g.kind !== "base" && g.lines.length);
+      if ((r.groups ?? []).some((g) => g.kind !== "base" && g.lines.length && !g.refId)) {
+        toast.error("Choose which variant or addon each extra group is for");
+        return Promise.resolve(false);
+      }
       const menuId = Number(r.menuItemId);
-      const isNew = !s.recipes.some((x) => x.id === `recipe-${menuId}`);
       const run = async () => {
         try {
-          if (isNew) {
-            await recipeApi.add({ menu_id: menuId, raw_material_data: rawMaterialData });
-          } else {
-            await recipeApi.edit({ menu_id: menuId, raw_material_data: rawMaterialData });
-          }
+          await recipeApi.save({ menu_id: menuId, groups });
           await value.loadRecipesFromServer();
-          toast.success(
-            hasExtraGroups
-              ? "Recipe saved (variant/addon groups aren't synced to the backend)"
-              : "Recipe saved",
-            { description: r.itemName },
-          );
+          toast.success("Recipe saved", { description: r.itemName });
           return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not save recipe");

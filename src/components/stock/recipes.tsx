@@ -225,6 +225,14 @@ function RecipeEditor({
   const store = useStore();
   const form = useFormCheck();
   const groups = draft.groups ?? [];
+  // The dish's own variants and addons - a group is saved against one of them.
+  const dish = store.menuItems.find((m) => m.id === draft?.menuItemId);
+  const groupOptions = (kind: RecipeGroup["kind"]) =>
+    kind === "variant"
+      ? (dish?.variants ?? []).map((v) => ({ id: String(v.id), name: v.name }))
+      : store.addonGroups
+          .filter((ag) => (dish?.addonGroupIds ?? []).includes(ag.id))
+          .flatMap((ag) => ag.options.map((o) => ({ id: String(o.id), name: o.name })));
 
   const setGroup = (key: string, patch: Partial<RecipeGroup>) =>
     setDraft({
@@ -313,12 +321,54 @@ function RecipeEditor({
                   <span className="rounded-full bg-surface-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
                     {g.kind}
                   </span>
-                  <Input
-                    aria-label="Group name"
-                    value={g.label}
-                    onChange={(e) => setGroup(g.key, { label: e.target.value })}
-                    className="h-8 w-48"
-                  />
+                  {g.kind === "base" ? (
+                    <Input
+                      aria-label="Group name"
+                      value={g.label}
+                      onChange={(e) => setGroup(g.key, { label: e.target.value })}
+                      className="h-8 w-48"
+                    />
+                  ) : (
+                    // Which variant / addon of this dish the group is for: its
+                    // ingredients deduct when that variant or addon is sold.
+                    <Select
+                      value={g.refId ?? ""}
+                      onValueChange={(v) => {
+                        const opt = groupOptions(g.kind).find((o) => o.id === v);
+                        setGroup(g.key, { refId: v, label: opt?.name ?? g.label });
+                      }}
+                    >
+                      <SelectTrigger
+                        className="h-8 w-48"
+                        aria-label={g.kind === "variant" ? "Variant" : "Addon"}
+                      >
+                        <SelectValue
+                          placeholder={g.kind === "variant" ? "Choose variant" : "Choose addon"}
+                        />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {groupOptions(g.kind).length ? (
+                          groupOptions(g.kind).map((o) => (
+                            <SelectItem
+                              key={o.id}
+                              value={o.id}
+                              disabled={groups.some(
+                                (x) => x.key !== g.key && x.kind === g.kind && x.refId === o.id,
+                              )}
+                            >
+                              {o.name}
+                            </SelectItem>
+                          ))
+                        ) : (
+                          <SelectItem value="none" disabled>
+                            {g.kind === "variant"
+                              ? "This dish has no variants"
+                              : "This dish has no addons"}
+                          </SelectItem>
+                        )}
+                      </SelectContent>
+                    </Select>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Money value={store.recipeGroupCost(g)} className="text-sm font-semibold" />
@@ -448,7 +498,7 @@ function RecipeEditor({
               variant="outline"
               size="sm"
               onClick={() =>
-                setDraft({ ...draft, groups: [...groups, emptyGroup("variant", "Full plate")] })
+                setDraft({ ...draft, groups: [...groups, emptyGroup("variant", "Variant")] })
               }
             >
               <Plus className="size-4" /> Variant group
@@ -457,7 +507,7 @@ function RecipeEditor({
               variant="outline"
               size="sm"
               onClick={() =>
-                setDraft({ ...draft, groups: [...groups, emptyGroup("addon", "Extra gravy")] })
+                setDraft({ ...draft, groups: [...groups, emptyGroup("addon", "Addon")] })
               }
             >
               <Plus className="size-4" /> Addon group

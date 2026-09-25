@@ -13,6 +13,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import { toast } from "sonner";
 import { useMemo, useState, useEffect } from "react";
 
 import {
@@ -35,7 +36,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -48,9 +51,239 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { dmyToIso, isoToDMY, realToday } from "@/mock/format";
 import { useStore } from "@/mock/store";
-import type { PurchaseOrder, PurchaseLine } from "@/mock/types";
+import type { PurchaseOrder, PurchaseLine, PurchasePayment } from "@/mock/types";
+import { purchaseOrderApi } from "@/lib/api";
 
 /* ==================== Purchase Orders ==================== */
+
+// A supplier is paid with one of the outlet's own payment modes (not "Due")
+// or by cheque / bank transfer.
+function useSupplierPayModes(): string[] {
+  const store = useStore();
+  const own = store.paymentModes
+    .filter((m) => m.active && m.name.trim().toLowerCase() !== "due")
+    .map((m) => m.name);
+  const base = own.length ? own : ["Cash", "UPI", "Card"];
+  return [
+    ...base,
+    ...["Cheque", "Bank transfer"].filter(
+      (x) => !base.some((b) => b.toLowerCase() === x.toLowerCase()),
+    ),
+  ];
+}
+const todayIso = () => dmyToIso(realToday());
+const inr = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN")}`;
+const isCashMode = (m: string) => m.trim().toLowerCase() === "cash";
+
+type PayDraft = { mode: string; date: string; ref: string; fromDrawer: boolean };
+
+/** Mode, date, reference no. and "from the drawer" of one supplier payment. */
+function PaymentFields({
+  value,
+  onChange,
+  asExpense,
+  dateError,
+}: {
+  value: PayDraft;
+  onChange: (v: PayDraft) => void;
+  asExpense: boolean | null;
+  dateError?: string;
+}) {
+  const modes = useSupplierPayModes();
+  const refLabel =
+    value.mode === "Cheque"
+      ? "Cheque no."
+      : value.mode === "Bank transfer"
+        ? "UTR / transaction no."
+        : "Reference no.";
+  return (
+    <div className="space-y-3" data-pay-fields>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <FieldRow label="Paid by" required>
+          <Select value={value.mode} onValueChange={(v) => onChange({ ...value, mode: v })}>
+            <SelectTrigger aria-label="Payment mode">
+              <SelectValue placeholder="Choose mode" />
+            </SelectTrigger>
+            <SelectContent>
+              {modes.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FieldRow>
+        <FieldRow label="Payment date" required error={dateError}>
+          <Input
+            type="date"
+            aria-label="Payment date"
+            max={todayIso()}
+            value={value.date}
+            onChange={(e) => onChange({ ...value, date: e.target.value })}
+          />
+        </FieldRow>
+      </div>
+      <FieldRow label={refLabel} hint="Optional">
+        <Input
+          aria-label="Reference no."
+          placeholder={value.mode === "Cheque" ? "e.g. 004512" : "e.g. UTR / transaction id"}
+          value={value.ref}
+          maxLength={100}
+          onChange={(e) => onChange({ ...value, ref: e.target.value })}
+        />
+      </FieldRow>
+      {isCashMode(value.mode) ? (
+        <label className="flex items-start gap-2 text-sm">
+          <Checkbox
+            aria-label="Take from cash drawer"
+            checked={value.fromDrawer}
+            onCheckedChange={(c) => onChange({ ...value, fromDrawer: c === true })}
+          />
+          <span>
+            Take from cash drawer
+            <span className="block text-xs text-muted-foreground">
+              When a cash session is open the cash comes out of it. Untick if you paid from
+              somewhere else.
+            </span>
+          </span>
+        </label>
+      ) : null}
+      {asExpense !== null ? (
+        <p className="text-xs text-muted-foreground" data-pay-expense-note>
+          {asExpense
+            ? "Also recorded in Expenses under “Supplier payment”."
+            : "Not added to Expenses (turned off in Purchase settings)."}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** "Record supplier payments as expenses", read from and saved to the exe. */
+function usePurchaseSettings() {
+  const [asExpense, setAsExpense] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    purchaseOrderApi
+      .settings()
+      .then((r) => !cancelled && setAsExpense(r.supplier_payment_expense))
+      .catch(() => !cancelled && setAsExpense(null));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const save = async (v: boolean) => {
+    const before = asExpense;
+    setAsExpense(v);
+    try {
+      await purchaseOrderApi.saveSettings(v);
+      toast.success(
+        v
+          ? "Supplier payments will be added to Expenses"
+          : "Supplier payments won't be added to Expenses",
+      );
+    } catch {
+      setAsExpense(before);
+      toast.error("Could not save the purchase setting");
+    }
+  };
+  return { asExpense, save };
+}
+
+/** Payments of one PO, oldest first, each deletable. */
+function PaymentHistory({ po, canDelete }: { po: PurchaseOrder; canDelete: boolean }) {
+  const store = useStore();
+  const [confirm, setConfirm] = useState<PurchasePayment | null>(null);
+  const [busy, setBusy] = useState(false);
+  const list = po.payments ?? [];
+  return (
+    <div className="rounded-xl border border-border" data-po-payments>
+      <p className="border-b border-border px-3 py-2 text-sm font-semibold">Payments</p>
+      {list.length === 0 ? (
+        <p className="px-3 py-3 text-sm text-muted-foreground">No payment recorded yet.</p>
+      ) : (
+        <ul className="divide-y divide-border">
+          {list.map((p) => (
+            <li
+              key={p.id}
+              className="flex items-center gap-3 px-3 py-2 text-sm"
+              data-po-payment={p.id}
+            >
+              <div className="min-w-0 flex-1">
+                <p className="font-medium">
+                  {p.mode}
+                  {p.ref ? <span className="text-muted-foreground"> · {p.ref}</span> : null}
+                </p>
+                <p className="text-[11px] text-muted-foreground">
+                  {p.date}
+                  {p.by ? ` · ${p.by}` : ""}
+                  {p.asExpense ? " · in Expenses" : ""}
+                </p>
+              </div>
+              <Money value={p.amount} className="font-semibold" />
+              {canDelete ? (
+                <IconButton label="Delete payment" onClick={() => setConfirm(p)}>
+                  <Trash2 className="size-4" />
+                </IconButton>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+      <Dialog open={!!confirm} onOpenChange={(o) => !o && setConfirm(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete this payment?</DialogTitle>
+          </DialogHeader>
+          {confirm ? (
+            <p className="text-sm text-muted-foreground">
+              {inr(confirm.amount)} by {confirm.mode} on {confirm.date} will be removed from{" "}
+              {po.poNo}
+              {confirm.asExpense ? " and from Expenses" : ""}. A cash payment from a cash session
+              that is still open goes back into the drawer.
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirm(null)}>
+              Keep it
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={busy}
+              onClick={async () => {
+                if (!confirm) return;
+                setBusy(true);
+                const ok = await store.deletePurchasePayment(po.id, confirm.id);
+                setBusy(false);
+                if (ok) setConfirm(null);
+              }}
+            >
+              Delete payment
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/** Materials whose stock would drop below zero if these quantities (purchase units) came out. */
+function stockShortfalls(
+  store: ReturnType<typeof useStore>,
+  out: { materialId: string; qty: number }[],
+): string[] {
+  const byMaterial = new Map<string, number>();
+  for (const o of out) byMaterial.set(o.materialId, (byMaterial.get(o.materialId) ?? 0) + o.qty);
+  const lines: string[] = [];
+  for (const [id, qty] of byMaterial) {
+    const m = store.rawMaterials.find((x) => x.id === id);
+    if (!m || qty <= 0) continue;
+    const after = m.stock - qty * m.conversion;
+    if (after < -1e-9)
+      lines.push(`${m.name}: ${fmtQty(m.stock)} ${m.unit} in stock → ${fmtQty(after)} ${m.unit}`);
+  }
+  return lines;
+}
 
 export function PurchaseOrdersScreen() {
   const access = useAccess("stock-transactions");
@@ -59,13 +292,8 @@ export function PurchaseOrdersScreen() {
   const [draft, setDraft] = useState<PurchaseOrder | null>(null);
   const [viewId, setViewId] = useState<string | null>(null);
   const [payFor, setPayFor] = useState<PurchaseOrder | null>(null);
-  const [payAmount, setPayAmount] = useState(0);
-  const payForm = useFormCheck();
-  const payFormOpen = !!payFor;
-  const payFormReset = payForm.reset;
-  useEffect(() => {
-    if (!payFormOpen) payFormReset();
-  }, [payFormOpen, payFormReset]);
+  const [cancelFor, setCancelFor] = useState<PurchaseOrder | null>(null);
+  const settings = usePurchaseSettings();
 
   const supplierName = (id: string) => store.suppliers.find((s) => s.id === id)?.name ?? "—";
   const rows = store.purchaseOrders.filter((p) =>
@@ -135,6 +363,23 @@ export function PurchaseOrdersScreen() {
           <ArrowRight className="size-3" /> Supplier outstanding <ArrowRight className="size-3" />{" "}
           Purchase report <ArrowRight className="size-3" /> Dashboard
         </span>
+      </div>
+
+      <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-border bg-surface px-3 py-2">
+        <div>
+          <p className="text-sm font-medium">Record supplier payments as expenses</p>
+          <p className="text-xs text-muted-foreground">
+            Every payment to a supplier also appears in Expenses under “Supplier payment”, with the
+            PO no. and mode.
+          </p>
+        </div>
+        <Switch
+          aria-label="Record supplier payments as expenses"
+          data-setting="supplier-payment-expense"
+          checked={settings.asExpense ?? true}
+          disabled={settings.asExpense === null || !access.edit}
+          onCheckedChange={(v) => void settings.save(v)}
+        />
       </div>
 
       <SectionCard
@@ -292,6 +537,8 @@ export function PurchaseOrdersScreen() {
 
                 <TotalsPanel po={view} />
 
+                {view.backendId ? <PaymentHistory po={view} canDelete={access.delete} /> : null}
+
                 <div className="flex flex-wrap gap-2">
                   {view.status !== "Received" && view.status !== "Cancelled" ? (
                     <Button onClick={() => store.savePurchase(view, { receive: true })}>
@@ -301,15 +548,13 @@ export function PurchaseOrdersScreen() {
                   <Button variant="outline" onClick={() => setDraft({ ...view })}>
                     Edit order
                   </Button>
-                  {Math.max(0, store.poTotals(view).grand - (view.paidAmount ?? 0)) > 0 ? (
+                  {view.backendId &&
+                  view.status !== "Cancelled" &&
+                  store.poTotals(view).grand - (view.paidAmount ?? 0) > 0.004 ? (
                     <Button
                       variant="outline"
-                      onClick={() => {
-                        setPayFor(view);
-                        setPayAmount(
-                          Math.round(store.poTotals(view).grand - (view.paidAmount ?? 0)),
-                        );
-                      }}
+                      hidden={!access.create}
+                      onClick={() => setPayFor(view)}
                     >
                       Record payment
                     </Button>
@@ -317,10 +562,8 @@ export function PurchaseOrdersScreen() {
                   {view.status !== "Cancelled" ? (
                     <Button
                       variant="ghost"
-                      onClick={() => {
-                        store.cancelPurchaseOrder(view.id);
-                        setViewId(null);
-                      }}
+                      hidden={!access.delete}
+                      onClick={() => setCancelFor(view)}
                     >
                       Cancel order
                     </Button>
@@ -334,52 +577,200 @@ export function PurchaseOrdersScreen() {
 
       <PurchaseEditor draft={draft} setDraft={setDraft} />
 
-      <Dialog open={!!payFor} onOpenChange={(o) => !o && setPayFor(null)}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Record payment</DialogTitle>
-          </DialogHeader>
-          <FieldRow label="Amount (₹)" required error={payForm.error("payAmount")}>
-            <Input
-              {...payForm.fieldProps("payAmount")}
-              type="number"
-              min={0}
-              value={payAmount}
-              onChange={(e) => setPayAmount(Number(e.target.value || 0))}
-            />
-          </FieldRow>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPayFor(null)}>
-              Cancel
-            </Button>
-            <Button
-              hidden={!access.create}
-              onClick={() => {
-                if (!payFor) return;
-                const due = Math.max(0, store.poTotals(payFor).grand - (payFor.paidAmount ?? 0));
-                const valid = payForm.check([
-                  {
-                    key: "payAmount",
-                    label: "Amount",
-                    value: payAmount,
-                    valid: (v) => typeof v === "number" && v > 0 && v <= due,
-                    message:
-                      payAmount > due
-                        ? `Amount can't be more than the ₹${due.toLocaleString("en-IN")} due`
-                        : "Enter an amount more than ₹0",
-                  },
-                ]);
-                if (!valid) return;
-                store.payPurchaseOrder(payFor.id, payAmount);
-                setPayFor(null);
-              }}
-            >
-              Save payment
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <RecordPaymentDialog
+        po={payFor}
+        asExpense={settings.asExpense}
+        onClose={() => setPayFor(null)}
+      />
+      <CancelPurchaseDialog
+        po={cancelFor}
+        onClose={() => setCancelFor(null)}
+        onCancelled={() => {
+          setCancelFor(null);
+          setViewId(null);
+        }}
+      />
     </>
+  );
+}
+
+function RecordPaymentDialog({
+  po,
+  asExpense,
+  onClose,
+}: {
+  po: PurchaseOrder | null;
+  asExpense: boolean | null;
+  onClose: () => void;
+}) {
+  const store = useStore();
+  const form = useFormCheck();
+  const [amount, setAmount] = useState(0);
+  const [pay, setPay] = useState<PayDraft>({
+    mode: "Cash",
+    date: todayIso(),
+    ref: "",
+    fromDrawer: true,
+  });
+  const [busy, setBusy] = useState(false);
+  const due = po
+    ? Math.round(Math.max(0, store.poTotals(po).grand - (po.paidAmount ?? 0)) * 100) / 100
+    : 0;
+  const poId = po?.id;
+  const formReset = form.reset;
+  useEffect(() => {
+    if (!poId) return;
+    formReset();
+    setAmount(due);
+    setPay({ mode: "Cash", date: todayIso(), ref: "", fromDrawer: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poId]);
+
+  return (
+    <Dialog open={!!po} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md" data-pay-dialog>
+        <DialogHeader>
+          <DialogTitle>Record payment{po ? ` · ${po.poNo}` : ""}</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">
+          Due <span className="font-semibold text-foreground">{inr(due)}</span>
+          {po?.paidAmount ? ` · ${inr(po.paidAmount)} paid so far` : ""}
+        </p>
+        <FieldRow label="Amount (₹)" required error={form.error("payAmount")}>
+          <Input
+            {...form.fieldProps("payAmount")}
+            type="number"
+            min={0}
+            step="0.01"
+            aria-label="Payment amount"
+            value={amount}
+            onChange={(e) => setAmount(Number(e.target.value || 0))}
+          />
+        </FieldRow>
+        <PaymentFields
+          value={pay}
+          onChange={setPay}
+          asExpense={asExpense}
+          dateError={form.error("payDate")}
+        />
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            disabled={busy}
+            onClick={async () => {
+              if (!po) return;
+              const valid = form.check([
+                {
+                  key: "payAmount",
+                  label: "Amount",
+                  value: amount,
+                  valid: (v) => typeof v === "number" && v > 0 && v <= due + 0.004,
+                  message:
+                    amount > due
+                      ? `Amount can't be more than the ${inr(due)} due`
+                      : "Enter an amount more than ₹0",
+                },
+                {
+                  key: "payDate",
+                  label: "Payment date",
+                  value: pay.date,
+                  valid: (v) =>
+                    /^\d{4}-\d{2}-\d{2}$/.test(String(v ?? "")) && String(v) <= todayIso(),
+                  message: "Pick a payment date (not in the future)",
+                },
+              ]);
+              if (!valid) return;
+              setBusy(true);
+              const ok = await store.payPurchaseOrder(po.id, {
+                amount: Math.round(amount * 100) / 100,
+                mode: pay.mode,
+                date: pay.date,
+                ref: pay.ref.trim(),
+                fromDrawer: pay.fromDrawer,
+              });
+              setBusy(false);
+              if (ok) onClose();
+            }}
+          >
+            Save payment
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CancelPurchaseDialog({
+  po,
+  onClose,
+  onCancelled,
+}: {
+  po: PurchaseOrder | null;
+  onClose: () => void;
+  onCancelled: () => void;
+}) {
+  const store = useStore();
+  const [busy, setBusy] = useState(false);
+  const received = po?.status === "Received" && !!po.backendId;
+  // Stock this PO added comes back out; some of it may already be used.
+  const short = po && received ? stockShortfalls(store, po.lines) : [];
+  const paid = po?.payments?.length ?? 0;
+  return (
+    <Dialog open={!!po} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md" data-cancel-po-dialog>
+        <DialogHeader>
+          <DialogTitle>Cancel {po?.poNo}?</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-2 text-sm text-muted-foreground">
+          {received ? <p>The stock this purchase added is taken back out.</p> : null}
+          {paid ? (
+            <p>
+              Its {paid} payment{paid > 1 ? "s are" : " is"} deleted too, with{" "}
+              {paid > 1 ? "their" : "its"} expense entries; cash from a cash session that is still
+              open goes back into the drawer.
+            </p>
+          ) : null}
+          {short.length ? (
+            <div
+              className="rounded-lg border border-warning/40 bg-warning/10 p-2 text-foreground"
+              data-stock-warning
+            >
+              <p className="flex items-center gap-1 font-medium">
+                <TriangleAlert className="size-4" /> Some of this stock is already used
+              </p>
+              <ul className="mt-1 list-disc pl-5 text-xs">
+                {short.map((l) => (
+                  <li key={l}>{l}</li>
+                ))}
+              </ul>
+              <p className="mt-1 text-xs">
+                Stock goes negative until you correct it with a stock count.
+              </p>
+            </div>
+          ) : null}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Keep order
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={busy}
+            onClick={async () => {
+              if (!po) return;
+              setBusy(true);
+              const ok = await store.cancelPurchaseOrder(po.id);
+              setBusy(false);
+              if (ok) onCancelled();
+            }}
+          >
+            Cancel order
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -429,10 +820,51 @@ function PurchaseEditor({
   const poForm = useFormCheck();
   const poOpen = !!draft;
   const poReset = poForm.reset;
+  const [warn, setWarn] = useState<{ lines: string[]; receive: boolean } | null>(null);
+  const [asExpense, setAsExpense] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!poOpen) poReset();
+    if (!poOpen) {
+      poReset();
+      setWarn(null);
+      return;
+    }
+    purchaseOrderApi
+      .settings()
+      .then((r) => setAsExpense(r.supplier_payment_expense))
+      .catch(() => setAsExpense(null));
   }, [poOpen, poReset]);
   if (!draft) return null;
+  const isSaved = !!draft.backendId;
+  const first: PayDraft = {
+    mode: draft.firstPayment?.mode ?? "Cash",
+    date: draft.firstPayment?.date ?? todayIso(),
+    ref: draft.firstPayment?.ref ?? "",
+    fromDrawer: draft.firstPayment?.fromDrawer ?? true,
+  };
+
+  // Lowering a received PO takes stock back out - warn when some of it is
+  // already used (stock would go negative), then save anyway if confirmed.
+  const shortfallsOfEdit = () => {
+    const before = store.purchaseOrders.find((p) => p.id === draft.id);
+    if (!before || before.status !== "Received" || !before.backendId) return [];
+    const qtyOf = (lines: PurchaseLine[], id: string) =>
+      lines.filter((l) => l.materialId === id).reduce((s, l) => s + l.qty, 0);
+    const ids = new Set([...before.lines, ...draft.lines].map((l) => l.materialId));
+    return stockShortfalls(
+      store,
+      [...ids].map((id) => ({
+        materialId: id,
+        qty: qtyOf(before.lines, id) - qtyOf(draft.lines, id),
+      })),
+    );
+  };
+
+  const commit = async (receive: boolean) => {
+    const ok = receive
+      ? await store.savePurchase(draft, { receive: true })
+      : await store.savePurchase({ ...draft, status: "Ordered" });
+    if (ok) setDraft(null);
+  };
 
   const save = async (receive: boolean) => {
     const grand = store.poTotals(draft).grand;
@@ -501,15 +933,34 @@ function PurchaseEditor({
         key: "paid",
         label: "Amount paid",
         value: draft.paidAmount ?? 0,
-        valid: (v) => typeof v === "number" && v >= 0 && v <= grand,
-        message: `Amount paid must be between ₹0 and the ₹${grand.toLocaleString("en-IN")} total`,
+        valid: (v) => isSaved || (typeof v === "number" && v >= 0 && v <= grand + 0.004),
+        message: `Amount paid must be between ₹0 and the ${inr(grand)} total`,
+      },
+      {
+        key: "payDate",
+        label: "Payment date",
+        value: first.date,
+        valid: (v) =>
+          isSaved ||
+          !(draft.paidAmount ?? 0) ||
+          (/^\d{4}-\d{2}-\d{2}$/.test(String(v ?? "")) && String(v) <= todayIso()),
+        message: "Pick a payment date (not in the future)",
+      },
+      {
+        key: "grandVsPaid",
+        label: "Grand total",
+        value: grand,
+        valid: () => !isSaved || grand + 0.004 >= (draft.paidAmount ?? 0),
+        message: `${inr(draft.paidAmount ?? 0)} is already paid - more than the new ${inr(grand)} total. Delete a payment first.`,
       },
     ]);
     if (!valid) return;
-    const ok = receive
-      ? await store.savePurchase(draft, { receive: true })
-      : await store.savePurchase({ ...draft, status: "Ordered" });
-    if (ok) setDraft(null);
+    const short = receive && isSaved ? shortfallsOfEdit() : [];
+    if (short.length) {
+      setWarn({ lines: short, receive });
+      return;
+    }
+    await commit(receive);
   };
 
   const setLine = (i: number, patch: Partial<PurchaseLine>) =>
@@ -774,28 +1225,54 @@ function PurchaseEditor({
                 />
               </div>
             </FieldRow>
-            <FieldRow
-              label="Amount paid now (₹)"
-              hint="Leave 0 if the bill is unpaid; the rest is owed to the supplier"
-              error={poForm.error("paid")}
-            >
-              <Input
-                {...poForm.fieldProps("paid")}
-                type="number"
-                min={0}
-                value={draft.paidAmount ?? 0}
-                onChange={(e) => {
-                  const paid = Number(e.target.value || 0);
-                  const grand = store.poTotals(draft).grand;
-                  setDraft({
-                    ...draft,
-                    paidAmount: paid,
-                    paymentStatus: paid <= 0 ? "Unpaid" : paid >= grand ? "Paid" : "Partial",
-                  });
-                }}
-              />
-            </FieldRow>
+            {isSaved ? (
+              // A saved PO's payments are recorded / deleted one by one from
+              // the order view - this box used to re-send the whole paid
+              // amount as a new payment on every edit.
+              <FieldRow label="Paid so far" error={poForm.error("grandVsPaid")}>
+                <p className="num py-2 text-sm" data-paid-so-far>
+                  {inr(draft.paidAmount ?? 0)}
+                  <span className="block text-xs text-muted-foreground">
+                    Record or delete payments from the order view.
+                  </span>
+                </p>
+              </FieldRow>
+            ) : (
+              <FieldRow
+                label="Amount paid now (₹)"
+                hint="Leave 0 if the bill is unpaid; the rest is owed to the supplier"
+                error={poForm.error("paid")}
+              >
+                <Input
+                  {...poForm.fieldProps("paid")}
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  aria-label="Amount paid now"
+                  value={draft.paidAmount ?? 0}
+                  onChange={(e) => {
+                    const paid = Number(e.target.value || 0);
+                    const grand = store.poTotals(draft).grand;
+                    setDraft({
+                      ...draft,
+                      paidAmount: paid,
+                      paymentStatus: paid <= 0 ? "Unpaid" : paid >= grand ? "Paid" : "Partial",
+                    });
+                  }}
+                />
+              </FieldRow>
+            )}
           </div>
+          {!isSaved && (draft.paidAmount ?? 0) > 0 ? (
+            <div className="rounded-xl border border-border p-3">
+              <PaymentFields
+                value={first}
+                onChange={(v) => setDraft({ ...draft, firstPayment: v })}
+                asExpense={asExpense}
+                dateError={poForm.error("payDate")}
+              />
+            </div>
+          ) : null}
 
           <TotalsPanel po={draft} />
         </div>
@@ -822,6 +1299,36 @@ function PurchaseEditor({
             Save & receive
           </Button>
         </div>
+        <Dialog open={!!warn} onOpenChange={(o) => !o && setWarn(null)}>
+          <DialogContent className="max-w-md" data-edit-stock-warning>
+            <DialogHeader>
+              <DialogTitle>Some of this stock is already used</DialogTitle>
+            </DialogHeader>
+            <p className="text-sm text-muted-foreground">
+              Lowering this purchase takes stock back out. These go below zero:
+            </p>
+            <ul className="list-disc pl-5 text-sm">
+              {warn?.lines.map((l) => (
+                <li key={l}>{l}</li>
+              ))}
+            </ul>
+            <p className="text-xs text-muted-foreground">Correct it later with a stock count.</p>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setWarn(null)}>
+                Go back
+              </Button>
+              <Button
+                onClick={async () => {
+                  const w = warn;
+                  setWarn(null);
+                  if (w) await commit(w.receive);
+                }}
+              >
+                Save anyway
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </SheetContent>
     </Sheet>
   );

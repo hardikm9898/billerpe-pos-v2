@@ -18,6 +18,7 @@ import {
   PurchaseReport,
   SupplierReport,
 } from "@/components/stock/reports";
+import { StockLedgerReport } from "@/components/stock/ledger";
 import { StockNav } from "@/components/stock/shared";
 import { useStore } from "@/mock/store";
 import {
@@ -28,6 +29,35 @@ import {
 } from "@/components/stock/transactions";
 import { Button } from "@/components/ui/button";
 import { PENDING_DECISIONS, resolveSection } from "@/mock/stock-sections";
+
+// Owner rule (2026-09-25): a sale is never blocked or shortened by stock -
+// stock may go below zero, and those materials are listed here so someone
+// counts them or records the missing purchase.
+function NegativeStockNote() {
+  const store = useStore();
+  const negative = store.rawMaterials.filter((m) => m.stock < -1e-9);
+  return (
+    <div
+      className={
+        negative.length
+          ? "mb-4 rounded-xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm"
+          : "mb-4 rounded-xl border border-border bg-surface-muted/50 px-4 py-3 text-sm"
+      }
+      data-negative-stock={negative.length}
+    >
+      <p className="font-medium">
+        {negative.length
+          ? `${negative.length} material${negative.length === 1 ? "" : "s"} below zero`
+          : "Sales never stop for stock"}
+      </p>
+      <p className="text-xs text-muted-foreground">
+        {negative.length
+          ? `${negative.map((m) => `${m.name} (${Math.round(m.stock * 100) / 100} ${m.unit})`).join(", ")} - orders used more than was recorded. Enter the physical count below, or record the purchase.`
+          : "When orders use more than is in stock, stock goes below zero and the material shows here in red until it is counted or purchased."}
+      </p>
+    </div>
+  );
+}
 
 export const Route = createFileRoute("/_shell/stock/$section")({
   head: () => ({
@@ -58,6 +88,7 @@ const SCREENS: Record<string, ComponentType> = {
   "franchise-requisitions": RequisitionsScreen,
   recipes: RecipesScreen,
   production: ProductionScreen,
+  "report-stock-ledger": StockLedgerReport,
   "report-current-stock": CurrentStockReport,
   "report-consumption": ConsumptionReport,
   "report-purchase": PurchaseReport,
@@ -73,14 +104,20 @@ const SCREENS: Record<string, ComponentType> = {
 // grid/billing session - it used to fire unconditionally on every login
 // via AppShell's eager effects, confirmed live as visible console/toast
 // noise on the core POS flow that never even visits this screen.
-const SECTION_LOADERS: Record<string, keyof ReturnType<typeof useStore>> = {
-  suppliers: "loadSuppliersFromServer",
-  "semi-finished": "loadSemiFinishedFromServer",
-  production: "loadSemiFinishedFromServer",
-  "purchase-orders": "loadPurchaseOrdersFromServer",
-  "franchise-requisitions": "loadRequisitionsFromServer",
-  wastage: "loadWastageFromServer",
-  recipes: "loadRecipesFromServer",
+// A section can need more than one list: supplier outstanding comes from
+// the purchase orders and their payments (it used to be a number kept only
+// in this browser tab, back to ₹0 after every refresh).
+type Loader = keyof ReturnType<typeof useStore>;
+const SECTION_LOADERS: Record<string, Loader[]> = {
+  suppliers: ["loadSuppliersFromServer", "loadPurchaseOrdersFromServer"],
+  "semi-finished": ["loadSemiFinishedFromServer"],
+  production: ["loadSemiFinishedFromServer"],
+  "purchase-orders": ["loadPurchaseOrdersFromServer", "loadSuppliersFromServer"],
+  "franchise-requisitions": ["loadRequisitionsFromServer"],
+  wastage: ["loadWastageFromServer"],
+  recipes: ["loadRecipesFromServer"],
+  "report-purchase": ["loadPurchaseOrdersFromServer"],
+  "report-supplier": ["loadPurchaseOrdersFromServer", "loadSuppliersFromServer"],
 };
 
 function StockSectionPage() {
@@ -89,10 +126,10 @@ function StockSectionPage() {
   const store = useStore();
 
   useEffect(() => {
-    const loaderKey = meta ? SECTION_LOADERS[meta.slug] : undefined;
-    if (!loaderKey) return;
-    const loader = store[loaderKey];
-    if (typeof loader === "function") void (loader as () => Promise<void>)();
+    for (const loaderKey of meta ? (SECTION_LOADERS[meta.slug] ?? []) : []) {
+      const loader = store[loaderKey];
+      if (typeof loader === "function") void (loader as () => Promise<void>)();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [meta?.slug]);
 
@@ -115,11 +152,9 @@ function StockSectionPage() {
 
   const Screen = SCREENS[meta.slug];
   const pending =
-    meta.slug === "stock-in-hand"
-      ? PENDING_DECISIONS.find((d) => d.title.startsWith("Negative"))
-      : meta.slug === "franchise-requisitions"
-        ? PENDING_DECISIONS.find((d) => d.title.startsWith("Warehouse"))
-        : undefined;
+    meta.slug === "franchise-requisitions"
+      ? PENDING_DECISIONS.find((d) => d.title.startsWith("Warehouse"))
+      : undefined;
 
   return (
     <Page>
@@ -137,6 +172,7 @@ function StockSectionPage() {
       />
       <StockNav active={meta.slug} />
       {pending ? <PendingDecision title={pending.title} note={pending.note} /> : null}
+      {meta.slug === "stock-in-hand" ? <NegativeStockNote /> : null}
       {Screen ? <Screen /> : null}
     </Page>
   );

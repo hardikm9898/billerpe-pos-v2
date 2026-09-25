@@ -1,5 +1,5 @@
 import { BarChart3, Download, ChevronDown, ReceiptText, Truck } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   DataTable,
@@ -14,14 +14,31 @@ import { DualQty, HealthPill, Toolbar, fmtQty, healthOf } from "@/components/sto
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useStore } from "@/mock/store";
+import { PeriodBar, useLedger, usePeriod } from "@/components/stock/ledger";
+import { downloadTextFile, toCsv } from "@/lib/csv";
+import { stockLedgerApi, type RawOrderConsumption } from "@/lib/api";
 
-function ExportBar({ label }: { label: string }) {
+// The Export button used to do nothing at all (no handler) on every
+// stock report.
+function ExportBar({
+  label,
+  file,
+  rows,
+}: {
+  label: string;
+  file: string;
+  rows: () => (string | number)[][];
+}) {
   return (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-dashed border-border bg-surface-muted/50 px-3 py-2">
       <p className="text-xs text-muted-foreground">
         {label} · read-only report, nothing here writes stock
       </p>
-      <Button size="sm" variant="outline">
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => downloadTextFile(`${file}.csv`, toCsv(rows()))}
+      >
         <Download className="size-4" /> Export CSV
       </Button>
     </div>
@@ -62,7 +79,21 @@ export function CurrentStockReport() {
           tone="warning"
         />
       </div>
-      <ExportBar label="Point-in-time valuation" />
+      <ExportBar
+        label="Point-in-time valuation"
+        file="current-stock"
+        rows={() => [
+          ["Material", "Stock", "Unit", "Rate", "Value", "Status"],
+          ...rows.map((m) => [
+            m.name,
+            fmtQty(m.stock),
+            m.unit,
+            Math.round(m.rate * 100) / 100,
+            Math.round(m.stock * m.rate),
+            healthOf(m.stock, m.reorderLevel),
+          ]),
+        ]}
+      />
       <SectionCard title="Raw materials" bodyClassName="p-3 sm:p-4">
         <Toolbar value={q} onChange={setQ} placeholder="Search material…" />
         <DataTable
@@ -163,52 +194,70 @@ export function CurrentStockReport() {
 
 /* ---------- Consumption ---------- */
 
+// What orders, production and wastage actually used in the period, from
+// the exe's stock journal. It used to add up a list kept in this browser
+// tab only - empty after every refresh, and it never held any sale.
 export function ConsumptionReport() {
   const store = useStore();
-
-  const rows = useMemo(() => {
-    const map = new Map<string, { qty: number; value: number; kinds: Record<string, number> }>();
-    store.stockMovements
-      .filter((mv) => mv.qty < 0)
-      .forEach((mv) => {
-        const cur = map.get(mv.refId) ?? { qty: 0, value: 0, kinds: {} };
-        cur.qty += Math.abs(mv.qty);
-        cur.value += Math.abs(mv.value);
-        cur.kinds[mv.kind] = (cur.kinds[mv.kind] ?? 0) + Math.abs(mv.qty);
-        map.set(mv.refId, cur);
-      });
-    return [...map.entries()]
-      .map(([id, v]) => {
-        const m = store.rawMaterials.find((x) => x.id === id);
-        const sf = store.semiFinished.find((x) => x.id === id);
-        return {
-          id,
-          name: m?.name ?? sf?.name ?? "—",
-          unit: m?.unit ?? sf?.unit ?? "",
-          ...v,
-        };
-      })
-      .sort((a, b) => b.value - a.value);
-  }, [store.stockMovements, store.rawMaterials, store.semiFinished]);
+  const period = usePeriod("month");
+  const { data, loading, failed } = useLedger(period.start, period.end);
+  const unitOf = (id: number) =>
+    store.rawMaterials.find((m) => m.id === String(id))?.purchaseUnit ?? "";
+  const rows = useMemo(
+    () =>
+      (data?.rows ?? [])
+        .map((r) => ({
+          id: r.raw_material_id,
+          name: r.raw_material_name,
+          unit: unitOf(r.raw_material_id),
+          usedQty: Math.max(0, -r.used_qty),
+          usedValue: Math.max(0, -r.used_value),
+          wastageQty: Math.max(0, -r.wastage_qty),
+          wastageValue: Math.max(0, -r.wastage_value),
+        }))
+        .filter((r) => r.usedQty || r.wastageQty)
+        .sort((a, b) => b.usedValue + b.wastageValue - (a.usedValue + a.wastageValue)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, store.rawMaterials],
+  );
   const paged = usePagedRows(rows, 10);
+  const used = rows.reduce((s, r) => s + r.usedValue, 0);
+  const wasted = rows.reduce((s, r) => s + r.wastageValue, 0);
 
   return (
     <>
+      <PeriodBar period={period} />
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
         <StatCard
-          label="Consumption value"
-          value={<Money value={Math.round(rows.reduce((s, r) => s + r.value, 0))} />}
+          label="Used in orders & production"
+          value={<Money value={Math.round(used)} />}
           tone="primary"
         />
-        <StatCard label="Materials moved" value={rows.length} icon={BarChart3} />
+        <StatCard label="Wastage" value={<Money value={Math.round(wasted)} />} icon={BarChart3} />
         <StatCard label="Top consumed" value={rows[0]?.name ?? "—"} />
       </div>
-      <ExportBar label="Consumption by material" />
+      <ExportBar
+        label="Consumption by material"
+        file={`consumption-${period.start}-to-${period.end}`}
+        rows={() => [
+          ["Material", "Unit", "Used qty", "Used cost", "Wastage qty", "Wastage cost"],
+          ...rows.map((r) => [
+            r.name,
+            r.unit,
+            r.usedQty,
+            Math.round(r.usedValue * 100) / 100,
+            r.wastageQty,
+            Math.round(r.wastageValue * 100) / 100,
+          ]),
+        ]}
+      />
       <SectionCard title="Consumption" bodyClassName="p-3 sm:p-4">
+        {loading ? <p className="mb-2 text-xs text-muted-foreground">Loading…</p> : null}
+        {failed ? <p className="mb-2 text-sm text-destructive">{failed}</p> : null}
         <DataTable
           rows={paged.pageRows}
-          keyFn={(r) => r.id}
-          empty={<EmptyState icon={BarChart3} title="No consumption recorded" compact />}
+          keyFn={(r) => String(r.id)}
+          empty={<EmptyState icon={BarChart3} title="Nothing used in this period" compact />}
           columns={[
             {
               key: "name",
@@ -216,34 +265,32 @@ export function ConsumptionReport() {
               cell: (r) => <span className="font-medium">{r.name}</span>,
             },
             {
-              key: "qty",
-              header: "Quantity out",
+              key: "used",
+              header: "Used",
               cell: (r) => (
                 <span className="num">
-                  {fmtQty(r.qty)} {r.unit}
+                  {fmtQty(r.usedQty)} {r.unit}
                 </span>
               ),
             },
             {
-              key: "split",
-              header: "Breakdown",
+              key: "usedValue",
+              header: "Used cost",
+              cell: (r) => <Money value={Math.round(r.usedValue)} className="font-semibold" />,
+            },
+            {
+              key: "wastage",
+              header: "Wastage",
               cell: (r) => (
-                <div className="flex flex-wrap gap-1">
-                  {Object.entries(r.kinds).map(([k, v]) => (
-                    <span
-                      key={k}
-                      className="rounded-full bg-surface-muted px-2 py-0.5 text-[10px] text-muted-foreground"
-                    >
-                      {k} {fmtQty(v)}
-                    </span>
-                  ))}
-                </div>
+                <span className="num">
+                  {r.wastageQty ? `${fmtQty(r.wastageQty)} ${r.unit}` : "–"}
+                </span>
               ),
             },
             {
-              key: "value",
-              header: "Cost",
-              cell: (r) => <Money value={Math.round(r.value)} className="font-semibold" />,
+              key: "wastageValue",
+              header: "Wastage cost",
+              cell: (r) => (r.wastageValue ? <Money value={Math.round(r.wastageValue)} /> : "–"),
             },
           ]}
         />
@@ -290,7 +337,25 @@ export function PurchaseReport() {
 
   return (
     <>
-      <ExportBar label="Material-wise purchase summary" />
+      <ExportBar
+        label="Material-wise purchase summary"
+        file="purchases-by-material"
+        rows={() => [
+          ["Material", "Qty", "Unit", "Value", "PO", "Date", "Line qty", "Rate"],
+          ...rows.flatMap((r) =>
+            r.lines.map((l) => [
+              r.name,
+              r.qty,
+              r.unit,
+              Math.round(r.value),
+              l.po,
+              l.date,
+              l.qty,
+              l.rate,
+            ]),
+          ),
+        ]}
+      />
       <SectionCard title="Purchases by material" bodyClassName="p-3 sm:p-4">
         <div className="space-y-2">
           {paged.pageRows.map((r) => (
@@ -372,7 +437,20 @@ export function SupplierReport() {
           tone="warning"
         />
       </div>
-      <ExportBar label="Supplier ledger summary" />
+      <ExportBar
+        label="Supplier ledger summary"
+        file="supplier-summary"
+        rows={() => [
+          ["Supplier", "Orders", "Purchased", "Paid", "Outstanding"],
+          ...rows.map((r) => [
+            r.name,
+            r.orders,
+            Math.round(r.purchased),
+            Math.round(r.paid),
+            Math.round(r.due),
+          ]),
+        ]}
+      />
       <SectionCard title="Supplier-wise purchase" bodyClassName="p-3 sm:p-4">
         <DataTable
           rows={paged.pageRows}
@@ -416,100 +494,103 @@ export function SupplierReport() {
 
 /* ---------- Order-wise consumption ---------- */
 
+// Every settled bill of the period with what its ingredients really cost
+// when it was sold (exe: GET /stock/orderConsumption). It used to estimate
+// this by matching recipe names for the last 30 bills this tab had loaded.
 export function OrderConsumptionReport() {
-  const store = useStore();
-
-  const rows = useMemo(() => {
-    const recipeFor = (name: string) =>
-      store.recipes.find((r) => r.itemName === name) ??
-      store.recipes.find(
-        (r) => r.menuItemId && store.menuItems.find((m) => m.id === r.menuItemId)?.name === name,
-      );
-    return store.orders
-      .filter((o) => o.status === "Settled" && o.itemised)
-      .slice(0, 30)
-      .map((o) => {
-        let cost = 0;
-        let costed = 0;
-        o.lines.forEach((l) => {
-          const r = recipeFor(l.name);
-          if (!r) return;
-          costed += 1;
-          const base = (r.groups ?? []).filter((g) => g.kind === "base");
-          const unit = base.length
-            ? base.reduce((s, g) => s + store.recipeGroupCost(g), 0)
-            : r.components.reduce((s, c) => {
-                const m = store.rawMaterials.find((x) => x.id === c.materialId);
-                return s + (m ? m.rate * c.qty : 0);
-              }, 0);
-          cost += unit * l.qty;
-        });
-        const revenue = o.lines.reduce((s, l) => s + l.price * l.qty, 0);
-        return {
-          id: o.id,
-          orderNo: o.orderNo,
-          table: o.tableLabel,
-          date: o.businessDate,
-          items: o.lines.length,
-          costed,
-          revenue,
-          cost,
-          margin: revenue ? Math.round(((revenue - cost) / revenue) * 100) : 0,
-        };
-      });
-  }, [store.orders, store.recipes, store.rawMaterials, store.menuItems]);
+  const period = usePeriod("today");
+  const [rows, setRows] = useState<RawOrderConsumption[]>([]);
+  const [failed, setFailed] = useState<string | null>(null);
+  useEffect(() => {
+    if (period.start > period.end) return;
+    let cancelled = false;
+    stockLedgerApi
+      .orderConsumption(period.start, period.end)
+      .then((d) => !cancelled && (setRows(d.rows), setFailed(null)))
+      .catch(() => !cancelled && setFailed("Could not load order-wise consumption"));
+    return () => {
+      cancelled = true;
+    };
+  }, [period.start, period.end]);
   const paged = usePagedRows(rows, 10);
+  const revenue = rows.reduce((s, r) => s + r.revenue, 0);
+  const cost = rows.reduce((s, r) => s + r.cost, 0);
 
   return (
     <>
-      <ExportBar label="Per-bill ingredient cost" />
+      <PeriodBar period={period} />
+      <div className="mb-4 grid gap-3 sm:grid-cols-3">
+        <StatCard label="Sales (before tax)" value={<Money value={Math.round(revenue)} />} />
+        <StatCard
+          label="Ingredient cost"
+          value={<Money value={Math.round(cost)} />}
+          tone="primary"
+        />
+        <StatCard
+          label="Food cost %"
+          value={revenue ? `${Math.round((cost / revenue) * 1000) / 10}%` : "—"}
+        />
+      </div>
+      <ExportBar
+        label="Per-bill ingredient cost"
+        file={`order-consumption-${period.start}-to-${period.end}`}
+        rows={() => [
+          ["Bill", "Date", "Table", "Sales", "Ingredient cost", "Margin %"],
+          ...rows.map((r) => [
+            r.bill_no ?? r.order_id,
+            r.business_date,
+            r.table ?? r.order_type,
+            r.revenue,
+            r.cost,
+            r.margin ?? "",
+          ]),
+        ]}
+      />
       <SectionCard
         title="Order-wise consumption"
-        description="Cost is derived from the base recipe of each sold item"
+        description="Actual ingredient cost of each settled bill, from its recipes at the time of sale"
         bodyClassName="p-3 sm:p-4"
       >
+        {failed ? <p className="mb-2 text-sm text-destructive">{failed}</p> : null}
         <DataTable
           rows={paged.pageRows}
-          keyFn={(r) => r.id}
-          empty={<EmptyState icon={BarChart3} title="No settled itemised orders" compact />}
+          keyFn={(r) => String(r.order_id)}
+          empty={<EmptyState icon={BarChart3} title="No settled bills in this period" compact />}
           columns={[
             {
-              key: "order",
+              key: "bill",
               header: "Bill",
-              cell: (r) => (
-                <div>
-                  <p className="num font-medium">#{r.orderNo}</p>
-                  <p className="num text-[11px] text-muted-foreground">
-                    {r.table} · {r.date}
-                  </p>
-                </div>
-              ),
+              cell: (r) => <span className="font-medium">#{r.bill_no ?? r.order_id}</span>,
             },
             {
-              key: "items",
-              header: "Items",
-              cell: (r) => (
-                <span className="num text-xs text-muted-foreground">
-                  {r.costed}/{r.items} costed
-                </span>
-              ),
+              key: "table",
+              header: "Table",
+              cell: (r) => r.table ?? (r.order_type === "pickup" ? "Pickup" : "—"),
             },
-            { key: "rev", header: "Revenue", cell: (r) => <Money value={Math.round(r.revenue)} /> },
+            {
+              key: "revenue",
+              header: "Sales",
+              cell: (r) => <Money value={Math.round(r.revenue)} />,
+            },
             {
               key: "cost",
               header: "Ingredient cost",
-              cell: (r) => <Money value={Math.round(r.cost)} />,
+              cell: (r) =>
+                r.costed ? (
+                  <Money value={Math.round(r.cost)} />
+                ) : (
+                  <span className="text-xs text-muted-foreground">No recipes</span>
+                ),
             },
             {
               key: "margin",
               header: "Margin",
-              cell: (r) => (
-                <span
-                  className={`num font-semibold ${r.margin < 50 ? "text-warning" : "text-success"}`}
-                >
-                  {r.margin}%
-                </span>
-              ),
+              cell: (r) =>
+                r.costed && r.margin != null ? (
+                  <span className="num font-semibold">{r.margin}%</span>
+                ) : (
+                  "–"
+                ),
             },
           ]}
         />

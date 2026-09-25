@@ -30,6 +30,7 @@ export const STOCK_SECTIONS: StockSection[] = [
   { slug: "recipes", name: "Recipes / Menu BOM", short: "Recipes", group: "recipes", desc: "Base, variant and addon ingredients that deduct on sale" },
   { slug: "production", name: "Semi-Finished Production", short: "Production", group: "recipes", desc: "Production runs that consume raw materials and create prep stock" },
 
+  { slug: "report-stock-ledger", name: "Stock Ledger", short: "Ledger", group: "reports", desc: "Opening, purchased, used, wastage and closing stock for any period, with every movement" },
   { slug: "report-current-stock", name: "Current Stock", short: "Current Stock", group: "reports", desc: "Point-in-time valuation with editable average cost" },
   { slug: "report-consumption", name: "Consumption", short: "Consumption", group: "reports", desc: "Quantity and cost consumed per raw material" },
   { slug: "report-purchase", name: "Purchase", short: "Purchase", group: "reports", desc: "Material-wise purchase summary expanding to invoice lines" },
@@ -48,10 +49,6 @@ export const STOCK_ALIASES: Record<string, string> = {
 };
 
 export const PENDING_DECISIONS = [
-  {
-    title: "Negative stock policy",
-    note: "Behaviour when a sale or production consumes more than the tracked stock is not confirmed. The prototype clamps at zero and flags the row rather than inventing a rule.",
-  },
   {
     title: "Warehouse / outlet stock transfer",
     note: "No transfer workflow exists in the source module. Franchise Requisition is a procurement request to the parent merchant, not a transfer, and is not being repurposed as one.",

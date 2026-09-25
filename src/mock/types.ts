@@ -460,6 +460,9 @@ export interface RecipeGroup {
   label: string;
   kind: "base" | "variant" | "addon";
   lines: RecipeLine[];
+  /** The variant id (kind "variant") or addon id (kind "addon") this group is for -
+   * the same ids a KOT line carries, so the sale deducts this group. */
+  refId?: string;
 }
 
 export interface Recipe {
@@ -516,6 +519,18 @@ export interface PurchaseLine {
   backendLineId?: number;
 }
 
+export interface PurchasePayment {
+  id: number;
+  amount: number;
+  mode: string;
+  /** DD/MM/YYYY */
+  date: string;
+  ref?: string;
+  by?: string;
+  /** Also recorded as a "Supplier payment" expense. */
+  asExpense: boolean;
+}
+
 export interface PurchaseOrder {
   id: string;
   poNo: string;
@@ -527,6 +542,10 @@ export interface PurchaseOrder {
   gstin?: string;
   paymentStatus?: "Unpaid" | "Partial" | "Paid";
   paidAmount?: number;
+  /** Payments recorded on the exe, oldest first. */
+  payments?: PurchasePayment[];
+  /** How the amount paid when the bill is entered was paid (new POs only). */
+  firstPayment?: { mode: string; date: string; ref?: string; fromDrawer?: boolean };
   discountType?: "flat" | "percent";
   discountValue?: number;
   requisitionId?: string;
@@ -624,6 +643,8 @@ export interface Expense {
   /** Real HotelUser id who recorded this, when known - lets the entries
    * screen filter "entered by" without re-deriving it from createdBy text. */
   createdByUserId?: string;
+  /** Recorded from a supplier payment on a purchase order - changed there, not here. */
+  fromPurchase?: boolean;
 }
 
 export interface CashMovement {

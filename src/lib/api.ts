@@ -290,6 +290,8 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/stock/addRowMaterial" },
     { method: "PUT", test: (p) => p === "/stock/editRowMaterial" },
     { method: "GET", test: (p) => p === "/stock/stockInHand" },
+    { method: "GET", test: (p) => p.startsWith("/stock/ledger") },
+    { method: "GET", test: (p) => p.startsWith("/stock/orderConsumption") },
     { method: "POST", test: (p) => p === "/stock/stockIn" },
     { method: "POST", test: (p) => p === "/stock/stockOut" },
     { method: "GET", test: (p) => p === "/stock/stockHistory" },
@@ -330,6 +332,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // billerpe-local-exe/controller/{recipes,semiFinishedItems}.js.
     { method: "POST", test: (p) => p === "/recipes/addRecipe" },
     { method: "PUT", test: (p) => p === "/recipes/editRecipe" },
+    { method: "PUT", test: (p) => p === "/recipes/saveRecipe" },
     { method: "DELETE", test: (p) => p === "/recipes/deleteRecipe" },
     { method: "GET", test: (p) => p === "/recipes/getAllRecipes" },
     { method: "GET", test: (p) => p === "/recipes/getAllRecipesForMenu" },
@@ -418,6 +421,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "PUT", test: (p) => p === "/stock/supplier" },
     { method: "GET", test: (p) => p === "/stock/maxPo" },
     { method: "POST", test: (p) => p === "/stock/payment" },
+    { method: "DELETE", test: (p) => p === "/stock/payment" },
+    { method: "GET", test: (p) => p === "/stock/purchaseSettings" },
+    { method: "PUT", test: (p) => p === "/stock/purchaseSettings" },
     { method: "POST", test: (p) => p === "/stock/purchaseOrder" },
     { method: "GET", test: (p) => p.startsWith("/stock/purchaseOrder") },
     { method: "PUT", test: (p) => p === "/stock/purchaseOrder" },
@@ -3203,10 +3209,16 @@ export type RawPurchaseOrderLine = {
 export type RawPurchaseOrderPayment = {
   id: number;
   amount: number;
+  date?: string | null;
   paymentDate: string;
+  /** The outlet's mode name (Cash, UPI, a custom one, Cheque, Bank transfer);
+   * older rows hold "cash" / "card" / "cheque" / "online" / "other". */
   payment_mode: string;
   payment_ref_no: string;
   deleted_status: boolean;
+  /** Set when the payment was also recorded as an expense. */
+  expense_entry_id?: number | null;
+  hms_hotelUser_master?: { name: string } | null;
   createdAt: string;
 };
 
@@ -3230,6 +3242,8 @@ export type RawPurchaseOrder = {
   invoice_date: string | null;
   invoice_number: string;
   Po_no: number;
+  business_date?: string;
+  update_inventory?: boolean;
   grandAmount: number;
   GSTNo: string;
   deleted_status: boolean;
@@ -3316,12 +3330,19 @@ export const purchaseOrderApi = {
       igst: number;
       unit_id: number;
     }[];
+    /** Paid when the bill is entered - recorded as the PO's first payment
+     * (the exe now keeps a part payment too). */
+    paidAmount?: number;
+    payment_mode?: string;
+    payment_ref_no?: string;
+    paymentDate?: string;
+    from_drawer?: boolean;
   }) =>
-    apiPost<{ message?: string }>("/stock/purchaseOrder", {
-      ...params,
+    apiPost<{ message?: string; id?: number }>("/stock/purchaseOrder", {
       payment_type: "unpaid",
-      payment_mode: "cash",
+      payment_mode: "Cash",
       payment_ref_no: "",
+      ...params,
     }),
 
   // rawMaterialData[].id is matched by editPurchaseOrder against this
@@ -3377,13 +3398,27 @@ export const purchaseOrderApi = {
 
   remove: (id: number) => apiDelete<{ message?: string }>("/stock/purchaseOrder", { id }),
 
+  // One supplier payment. Also an expense when the outlet's setting says
+  // so; Cash comes out of an open cash drawer unless from_drawer is false.
   payment: (params: {
     id: number;
-    payment_mode: "cash" | "card" | "online" | "cheque" | "other";
+    payment_mode: string;
     payment_ref_no: string;
     payment_date: string;
     paidAmount: number;
-  }) => apiPost<{ message?: string }>("/stock/payment", params),
+    from_drawer?: boolean;
+  }) =>
+    apiPost<{ message?: string; paymentId: number; expenseId: number | null; fromDrawer: boolean }>(
+      "/stock/payment",
+      params,
+    ),
+
+  // Deletes a payment, its expense, and gives its cash back to a still-open drawer.
+  deletePayment: (id: number) => apiDelete<{ message?: string }>("/stock/payment", { id }),
+
+  settings: () => apiGet<{ supplier_payment_expense: boolean }>("/stock/purchaseSettings"),
+  saveSettings: (supplier_payment_expense: boolean) =>
+    apiPut<{ message?: string }>("/stock/purchaseSettings", { supplier_payment_expense }),
 };
 
 export type RawRequisitionItem = {
@@ -3480,11 +3515,66 @@ export type RawStockInHand = {
 // purchase units (matching StockInHand.qty); consumption-unit quantity
 // is available_stock_Consiompsion_qty, already converted server-side.
 // stockOut has no price field - only stockIn does.
+// Stock Ledger (billerpe-local-exe services/stockLedger.js): opening / in /
+// out / closing per raw material for a period of business dates, from the
+// stock journal every stock change is written to. Quantities are in the
+// material's PURCHASE unit; values in rupees.
+export type RawStockLedgerRow = {
+  raw_material_id: number;
+  raw_material_name: string;
+  unit_id: number | null;
+  consumption_unit: number | null;
+  conversion_qty: number;
+  opening_qty: number; opening_value: number;
+  purchased_qty: number; purchased_value: number;
+  used_qty: number; used_value: number;
+  wastage_qty: number; wastage_value: number;
+  manual_qty: number; manual_value: number;
+  closing_qty: number; closing_value: number;
+};
+export type RawStockLedger = {
+  startDate: string;
+  endDate: string;
+  rows: RawStockLedgerRow[];
+  totals: Record<"opening_value" | "purchased_value" | "used_value" | "wastage_value" | "manual_value" | "closing_value", number>;
+};
+export type RawStockLedgerMove = {
+  id: number;
+  business_date: string;
+  createdAt: string;
+  type: string;
+  qty: number;
+  unit_cost: number;
+  value: number;
+  balance: number;
+  ref_type: string | null;
+  ref_id: number | null;
+  note: string;
+  user: string | null;
+  /** "Bill #42", "PO #7", "Wastage entry" */
+  ref_label: string | null;
+};
+export type RawOrderConsumption = {
+  order_id: number; bill_no: string | null; business_date: string; order_type: string; table: string | null;
+  revenue: number; cost: number; costed: boolean; margin: number | null;
+};
+export const stockLedgerApi = {
+  orderConsumption: (startDate: string, endDate: string) =>
+    apiGet<{ rows: RawOrderConsumption[] }>(`/stock/orderConsumption?startDate=${startDate}&endDate=${endDate}`),
+  summary: (startDate: string, endDate: string) =>
+    apiGet<RawStockLedger>(`/stock/ledger?startDate=${startDate}&endDate=${endDate}`),
+  detail: (rawMaterialId: number, startDate: string, endDate: string) =>
+    apiGet<{ raw_material_id: number; raw_material_name: string; opening_qty: number; closing_qty: number; rows: RawStockLedgerMove[] }>(
+      `/stock/ledger/${rawMaterialId}?startDate=${startDate}&endDate=${endDate}`,
+    ),
+};
+
 export const stockInHandApi = {
   getAll: () => apiGet<{ stockInHand: RawStockInHand[] }>("/stock/stockInHand"),
-  stockIn: (params: { raw_material_id: number; qty: number; price: number }) =>
+  // count: a physical-count correction - recorded as "Stock count" in the ledger.
+  stockIn: (params: { raw_material_id: number; qty: number; price: number; count?: boolean }) =>
     apiPost<{ message?: string }>("/stock/stockIn", params),
-  stockOut: (params: { raw_material_id: number; qty: number }) =>
+  stockOut: (params: { raw_material_id: number; qty: number; count?: boolean }) =>
     apiPost<{ message?: string }>("/stock/stockOut", params),
 };
 
@@ -3619,7 +3709,12 @@ export type RawRecipeIngredient = {
 export type RawRecipeDetail = {
   menu_id: number;
   item_name: string;
-  variants: { variant_id: number | null; raw_materials: RawRecipeIngredient[] }[];
+  variants: {
+    variant_id: number | null;
+    variant_name?: string | null;
+    raw_materials: RawRecipeIngredient[];
+    addons?: { addon_id: number; addon_name?: string | null; raw_materials: RawRecipeIngredient[] }[];
+  }[];
 };
 
 export type RawRecipeSummary = { menu_id: number };
@@ -3633,13 +3728,19 @@ export type RawRecipeSummary = { menu_id: number };
 // diffing by line id - the full current ingredient list is always sent,
 // never a partial one, confirmed live.
 //
-// This app's RecipeEditor has no way to pick which real Variant/Addon a
-// "variant group"/"addon group" corresponds to at all (its group `key`
-// is a random local string, `label` is free text) - only the base group
-// (variant_id: null, addon_id: null) is an unambiguous, addressable
-// combination, so only that one is wired here (store.tsx's upsertRecipe
-// warns rather than silently drops if a variant/addon group has content).
+// The editor saves a dish's whole recipe at once through `save` (base +
+// one group per real variant / addon, picked in the editor).
 export const recipeApi = {
+  // A dish's whole recipe (base + per-variant + per-addon groups) in one save
+  // (billerpe-local-exe controller/recipes.js#saveRecipe).
+  save: (params: {
+    menu_id: number;
+    groups: {
+      variant_id?: number;
+      addon_id?: number;
+      raw_material_data: ({ raw_material_id: number; consumption_qty: number } | { semi_finished_item_id: number; consumption_qty: number })[];
+    }[];
+  }) => apiPut<{ message?: string }>("/recipes/saveRecipe", params),
   getAllLinked: () => apiGet<{ recipes: RawRecipeSummary[] }>("/recipes/getAllRecipes"),
   getSingle: (menuId: number) =>
     apiGet<RawRecipeDetail>(`/recipes/getSingleRecipes?menu_id=${menuId}`),
@@ -3698,6 +3799,8 @@ export type RawExpenseEntry = {
   // (DATEONLY) - what the entries screen's "date & time" column reads.
   createdAt: string;
   hms_expense_head_mst?: { expense_head_name?: string };
+  /** Recorded from a supplier payment on a purchase order. */
+  purchase_payment_id?: number | null;
   // Was write-only before (user_id was always saved but never joined back
   // out) - controller/expense.js's allEntry now includes HotelUser, model/
   // index.js now has the reverse belongsTo that join needs.
