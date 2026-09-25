@@ -1281,15 +1281,8 @@ function PurchaseEditor({
           <Button variant="outline" className="flex-1" onClick={() => setDraft(null)}>
             Cancel
           </Button>
-          <Button
-            disabled={!(draft?.id ? access.edit : access.create)}
-            title={!(draft?.id ? access.edit : access.create) ? READ_ONLY_NOTE : undefined}
-            variant="outline"
-            className="flex-1"
-            onClick={() => void save(false)}
-          >
-            Save as ordered
-          </Button>
+          {/* "Save as ordered" was removed (owner, 2026-09-25): it kept the
+              order only in this browser tab, lost on the next refresh. */}
           <Button
             className="flex-1"
             disabled={!(draft?.id ? access.edit : access.create)}
