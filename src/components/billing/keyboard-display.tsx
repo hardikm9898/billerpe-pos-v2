@@ -1,5 +1,7 @@
 import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
 import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
+import { isSellable, sellableItem } from "@/lib/sellable";
+import { TablePicker } from "@/components/billing/table-picker";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { splitCheck } from "@/lib/payments";
 import { CustomerHistoryPanel } from "@/components/billing/customer-history";
@@ -62,9 +64,10 @@ import {
 } from "@/components/billing/custom-item-route";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { elapsedFrom, elapsedMinutes } from "@/mock/format";
+import { addonLabel, elapsedFrom, elapsedMinutes } from "@/mock/format";
 import { lineTotal, orderTotals, serviceIsManual, useStore } from "@/mock/store";
 import type { AddonGroup, MenuItem, Order, OrderLine, PaymentSplit } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 /* ------------------------------------------------------------------ */
 /* primitives                                                          */
@@ -117,7 +120,7 @@ const focusRing =
 function Amount({ value, className }: { value: number; className?: string }) {
   return (
     <span className={cn("num tabular-nums", className)}>
-      ₹{value.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+      {cs()}{value.toLocaleString(numLocale(), { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
     </span>
   );
 }
@@ -194,12 +197,17 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
     const q = query.trim();
     if (!q) return [];
     const menuId = order?.menuId ?? store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id;
-    const menuOfCategory = new Map(store.menuCategories.map((c) => [c.id, c.menuId]));
-    const onMenu = store.menuItems.filter(
-      (i) => i.active && (!menuId || menuOfCategory.get(i.categoryId) === menuId),
-    );
+    const categoriesById = new Map(store.menuCategories.map((c) => [c.id, c]));
+    // Only what can be sold (lib/sellable.ts).
+    const onMenu = store.menuItems
+      .filter(
+        (i) =>
+          isSellable(i, categoriesById) &&
+          (!menuId || categoriesById.get(i.categoryId)?.menuId === menuId),
+      )
+      .map((i) => sellableItem(i, store.addonGroups));
     return searchMenuItems(onMenu, q).slice(0, 8);
-  }, [store.menuItems, store.menuCategories, store.menus, order?.menuId, query]);
+  }, [store.menuItems, store.menuCategories, store.addonGroups, store.menus, order?.menuId, query]);
 
   useEffect(() => setHighlight(0), [query]);
 
@@ -280,6 +288,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
         const item = store.menuItems.find(
           (i) =>
             i.active &&
+            store.menuCategories.find((c) => c.id === i.categoryId)?.active !== false &&
             (i.id.toLowerCase() === code.toLowerCase() ||
               i.name.toLowerCase() === code.toLowerCase()),
         );
@@ -773,7 +782,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
                                 {m.name}
                               </span>
                             </span>
-                            <span className="num text-xs font-semibold">₹{m.price}</span>
+                            <span className="num text-xs font-semibold">{cs()}{m.price}</span>
                           </button>
                         </li>
                       ))}
@@ -1074,7 +1083,7 @@ export function KeyboardDisplay({ orderId }: { orderId: string }) {
             </DialogDescription>
           </DialogHeader>
           <div>
-            <Label htmlFor="kbPackaging">Packaging (₹)</Label>
+            <Label htmlFor="kbPackaging">Packaging ({cs()})</Label>
             <Input
               id="kbPackaging"
               type="number"
@@ -1312,7 +1321,7 @@ function CartGroup({
               <p className="num flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                 {editable ? (
                   <span className="inline-flex items-center gap-0.5">
-                    ₹
+                    {cs()}
                     <input
                       defaultValue={l.price}
                       key={`${l.id}-price-${l.price}`}
@@ -1334,9 +1343,9 @@ function CartGroup({
                     />
                   </span>
                 ) : (
-                  `₹${l.price}`
+                  `${cs()}${l.price}`
                 )}
-                {l.addons?.length ? ` · + ${l.addons.map((a) => a.name).join(", ")}` : ""}
+                {l.addons?.length ? ` · + ${l.addons.map(addonLabel).join(", ")}` : ""}
                 {l.originTable ? ` · from ${l.originTable}` : ""}
               </p>
               {l.note ? (
@@ -1373,15 +1382,25 @@ function CartGroup({
                   }}
                   onBlur={(e) => {
                     const v = Number(e.currentTarget.value);
-                    if (Number.isFinite(v) && v !== l.qty)
-                      store.setLineQty(order.id, l.id, v, "keyboard-billing");
+                    // false: the line kept its qty (a sent line's extra
+                    // became a new line) - show the real qty again
+                    if (
+                      Number.isFinite(v) &&
+                      v !== l.qty &&
+                      !store.setLineQty(order.id, l.id, v, "keyboard-billing")
+                    )
+                      e.currentTarget.value = String(l.qty);
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === "ArrowDown" || e.key === "ArrowUp") {
                       e.preventDefault();
                       const v = Number(e.currentTarget.value);
-                      if (Number.isFinite(v) && v !== l.qty)
-                        store.setLineQty(order.id, l.id, v, "keyboard-billing");
+                      if (
+                        Number.isFinite(v) &&
+                        v !== l.qty &&
+                        !store.setLineQty(order.id, l.id, v, "keyboard-billing")
+                      )
+                        e.currentTarget.value = String(l.qty);
                       const next = e.key === "ArrowUp" ? i - 1 : i + 1;
                       const el = document.querySelector<HTMLInputElement>(
                         `[data-qty-row="${next}"]`,
@@ -1405,7 +1424,10 @@ function CartGroup({
 
               {editable ? (
                 <div className="flex items-center gap-1">
-                  {store.menuItems.find((m) => m.id === l.itemId)?.addonGroupIds?.length ? (
+                  {(() => {
+                    const mi = store.menuItems.find((m) => m.id === l.itemId);
+                    return mi ? sellableItem(mi, store.addonGroups) : undefined;
+                  })()?.addonGroupIds?.length ? (
                     <IconButton label="Edit addons" className="size-8" onClick={() => onAddon(l)}>
                       <Tags className="size-3.5" />
                     </IconButton>
@@ -1506,7 +1528,7 @@ function VariantPopup({
                 )}
               >
                 {v.name}
-                <span className="num ml-1.5 text-[11px] opacity-80">₹{v.price}</span>
+                <span className="num ml-1.5 text-[11px] opacity-80">{cs()}{v.price}</span>
               </button>
             ))}
           </div>
@@ -1577,12 +1599,12 @@ function DiscountDialog({
               className="flex-1"
               onClick={() => setMode(m)}
             >
-              {m === "percent" ? "Percentage" : "Flat ₹"}
+              {m === "percent" ? "Percentage" : `Flat ${cs()}`}
             </Button>
           ))}
         </div>
         <div className="space-y-1.5">
-          <Label required>{mode === "percent" ? "Percent off" : "Amount off (₹)"}</Label>
+          <Label required>{mode === "percent" ? "Percent off" : `Amount off (${cs()})`}</Label>
           <Input
             autoFocus
             type="number"
@@ -1690,7 +1712,7 @@ function MoveTableDialog({
   const free = store.tables.filter((t) => t.status === "Free");
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[90vh] sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>{order.tableId ? "Move table" : "Assign table"}</DialogTitle>
           <DialogDescription>
@@ -1699,28 +1721,17 @@ function MoveTableDialog({
               : `Order #${order.orderNo} has no table yet. Pick a free table to seat it.`}
           </DialogDescription>
         </DialogHeader>
-        <div className="grid max-h-72 grid-cols-3 gap-2 overflow-y-auto scrollbar-slim">
-          {free.map((t) => (
-            <Button
-              key={t.id}
-              variant="outline"
-              className="h-14 flex-col"
-              onClick={() => {
-                store.transferTable(order.id, t.id);
-                onOpenChange(false);
-              }}
-            >
-              <span className="num text-sm font-semibold">{t.name}</span>
-              {/* the section it belongs to (owner report, 2026-09-22) */}
-              <span className="text-[10px] text-muted-foreground">
-                {categoryNameOf(store, t.categoryId)} · {t.seats} seats
-              </span>
-            </Button>
-          ))}
-          {free.length === 0 ? (
-            <p className="col-span-3 text-sm text-muted-foreground">No free tables right now.</p>
-          ) : null}
-        </div>
+        {/* The section shows under each table (owner report, 2026-09-22). */}
+        <TablePicker
+          tables={free}
+          sectionOf={(t) => categoryNameOf(store, t.categoryId)}
+          detail={(t) => `${categoryNameOf(store, t.categoryId)} · ${t.seats} seats`}
+          emptyText="No free tables right now."
+          onPick={(t) => {
+            store.transferTable(order.id, t.id);
+            onOpenChange(false);
+          }}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -1739,7 +1750,7 @@ export function MoveKotDialog({
   const free = store.tables.filter((t) => t.status === "Free" && t.id !== order.tableId);
   return (
     <Dialog open={round !== null} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="max-h-[90vh] sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>Move KOT round {round}</DialogTitle>
           <DialogDescription>
@@ -1747,27 +1758,16 @@ export function MoveKotDialog({
             {order.orderNo} stays on {order.tableLabel}.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid max-h-72 grid-cols-3 gap-2 overflow-y-auto scrollbar-slim">
-          {free.map((t) => (
-            <Button
-              key={t.id}
-              variant="outline"
-              className="h-14 flex-col"
-              onClick={() => {
-                if (round !== null) void store.moveKot(order.id, round, t.id);
-                onClose();
-              }}
-            >
-              <span className="num text-sm font-semibold">{t.name}</span>
-              <span className="text-[10px] text-muted-foreground">
-                {categoryNameOf(store, t.categoryId)} · {t.seats} seats
-              </span>
-            </Button>
-          ))}
-          {free.length === 0 ? (
-            <p className="col-span-3 text-sm text-muted-foreground">No free tables right now.</p>
-          ) : null}
-        </div>
+        <TablePicker
+          tables={free}
+          sectionOf={(t) => categoryNameOf(store, t.categoryId)}
+          detail={(t) => `${categoryNameOf(store, t.categoryId)} · ${t.seats} seats`}
+          emptyText="No free tables right now."
+          onPick={(t) => {
+            if (round !== null) void store.moveKot(order.id, round, t.id);
+            onClose();
+          }}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -1914,7 +1914,7 @@ export function AddonPicker({
                     }}
                   >
                     {o.name}
-                    {o.price ? <span className="num"> +₹{o.price}</span> : null}
+                    {o.price ? <span className="num"> +{cs()}{o.price}</span> : null}
                   </button>
                   {selected ? (
                     <div className="flex items-center gap-1.5">
@@ -1972,7 +1972,7 @@ export function AddonDialog({
   const item = line ? store.menuItems.find((m) => m.id === line.itemId) : undefined;
   const groups = (item?.addonGroupIds ?? [])
     .map((gid) => store.addonGroups.find((g) => g.id === gid))
-    .filter((g): g is AddonGroup => !!g);
+    .filter((g): g is AddonGroup => !!g && g.active !== false);
 
   return (
     <Dialog open={!!line} onOpenChange={(v) => !v && onClose()}>
@@ -2122,7 +2122,7 @@ function CustomItemDialog({
         label: "Price",
         value: price,
         valid: (v) => typeof v === "number" && v > 0,
-        message: "Price must be more than ₹0",
+        message: `Price must be more than ${cs()}0`,
       },
     ]);
     if (!valid || problem) return;
@@ -2152,7 +2152,7 @@ function CustomItemDialog({
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label required>Price (₹)</Label>
+              <Label required>Price ({cs()})</Label>
               <Input
                 {...form.fieldProps("kbCustomPrice")}
                 type="number"
@@ -2236,7 +2236,7 @@ function PaymentPanel({
             disabled={settled}
             onClick={() => setPaid(String(v))}
           >
-            ₹{v}
+            {cs()}{v}
           </Button>
         ))}
       </div>

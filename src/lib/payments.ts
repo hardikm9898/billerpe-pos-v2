@@ -1,4 +1,5 @@
 import type { PaymentSplit } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 export function splitPaid(splits: PaymentSplit[]) {
   return splits.reduce((s, p) => s + p.amount, 0);
@@ -29,11 +30,11 @@ export function splitCheck(splits: PaymentSplit[], total: number) {
   if (bill < 0) return { bill, collected, nonCash, cash, balance, change: 0, problem: undefined };
   if (splits.some((p) => p.amount < 0)) problem = "A payment can't be negative.";
   else if (nonCash > bill + 0.009) {
-    problem = `Only cash can be more than the bill. The other modes add up to more than ₹${bill}.`;
+    problem = `Only cash can be more than the bill. The other modes add up to more than ${cs()}${bill}.`;
   } else if (cash > 0.009 && nonCash >= bill - 0.009) {
     // The bill is already paid by the other modes, so this cash is a typo -
     // exactly the reported case: the bill total typed into two modes at once.
-    problem = `The other modes already cover ₹${bill}. Remove the cash amount.`;
-  } else if (balance > 0.009) problem = `₹${balance} still to pay.`;
+    problem = `The other modes already cover ${cs()}${bill}. Remove the cash amount.`;
+  } else if (balance > 0.009) problem = `${cs()}${balance} still to pay.`;
   return { bill, collected, nonCash, cash, balance, change, problem };
 }

@@ -30,9 +30,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Textarea } from "@/components/ui/textarea";
+import { itemShortCode } from "@/lib/menuSearch";
 import { useStore } from "@/mock/store";
 import type { Recipe, RecipeGroup, RecipeLine } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 const emptyGroup = (kind: RecipeGroup["kind"], label: string): RecipeGroup => ({
   key: `${kind}-${Math.random().toString(36).slice(2, 7)}`,
@@ -227,6 +230,31 @@ function RecipeEditor({
   const groups = draft.groups ?? [];
   // The dish's own variants and addons - a group is saved against one of them.
   const dish = store.menuItems.find((m) => m.id === draft?.menuItemId);
+  // Every dish on every menu (inactive ones too - a recipe can be set up
+  // before the dish goes on sale), told apart by menu and category.
+  const dishOptions = useMemo(() => {
+    const categories = new Map(store.menuCategories.map((c) => [c.id, c]));
+    const menus = new Map(store.menus.map((m) => [m.id, m.name]));
+    return [...store.menuItems]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((m) => {
+        const cat = categories.get(m.categoryId);
+        const code = itemShortCode(m.sku)?.toUpperCase();
+        return {
+          value: m.id,
+          label: m.name,
+          hint: [
+            store.menus.length > 1 ? menus.get(cat?.menuId ?? "") : undefined,
+            cat?.name,
+            code,
+            m.active ? undefined : "inactive",
+          ]
+            .filter(Boolean)
+            .join(" · "),
+          keywords: code ? [code] : [],
+        };
+      });
+  }, [store.menuItems, store.menuCategories, store.menus]);
   const groupOptions = (kind: RecipeGroup["kind"]) =>
     kind === "variant"
       ? (dish?.variants ?? []).map((v) => ({ id: String(v.id), name: v.name }))
@@ -271,28 +299,26 @@ function RecipeEditor({
         <div className="space-y-4 px-4 pb-24">
           <div className="grid gap-3 sm:grid-cols-2">
             <FieldRow label="Menu item" required error={form.error("menuItemId")}>
-              <Select
+              {/* Type any part of the name, the short code, the category
+                  or the menu (owner report, 2026-09-28: the plain dropdown
+                  could not be searched and cut long names). */}
+              <SearchableSelect
                 value={draft.menuItemId ?? ""}
-                onValueChange={(v) => {
+                onChange={(v) => {
                   const mi = store.menuItems.find((m) => m.id === v);
                   setDraft({ ...draft, menuItemId: v, itemName: mi?.name ?? draft.itemName });
                   form.clearError("menuItemId");
                 }}
-              >
-                <SelectTrigger
-                  data-field="menuItemId"
-                  aria-invalid={!!form.error("menuItemId") || undefined}
-                >
-                  <SelectValue placeholder="Link a dish" />
-                </SelectTrigger>
-                <SelectContent>
-                  {store.menuItems.map((m) => (
-                    <SelectItem key={m.id} value={m.id}>
-                      {m.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={dishOptions}
+                placeholder="Link a dish"
+                searchPlaceholder="Search dish, short code, category…"
+                emptyText="No dish matches"
+                triggerProps={{
+                  "data-field": "menuItemId",
+                  "aria-label": "Menu item",
+                  "aria-invalid": form.error("menuItemId") ? true : undefined,
+                }}
+              />
             </FieldRow>
             <FieldRow label="Yield" required error={form.error("yieldQty")}>
               <div className="flex gap-2">
@@ -423,30 +449,26 @@ function RecipeEditor({
                         <SelectItem value="semi">Semi</SelectItem>
                       </SelectContent>
                     </Select>
-                    <Select
+                    <SearchableSelect
                       value={l.refId}
-                      onValueChange={(v) => {
+                      onChange={(v) => {
                         setGroup(g.key, {
                           lines: g.lines.map((x, j) => (j === i ? { ...x, refId: v } : x)),
                         });
                         form.clearError(`ref-${g.key}-${i}`);
                       }}
-                    >
-                      <SelectTrigger
-                        aria-label="Ingredient"
-                        data-field={`ref-${g.key}-${i}`}
-                        aria-invalid={!!form.error(`ref-${g.key}-${i}`) || undefined}
-                      >
-                        <SelectValue placeholder="Choose ingredient" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {(l.type === "raw" ? store.rawMaterials : store.semiFinished).map((o) => (
-                          <SelectItem key={o.id} value={o.id}>
-                            {o.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      options={(l.type === "raw" ? store.rawMaterials : store.semiFinished).map(
+                        (o) => ({ value: o.id, label: o.name, hint: o.unit }),
+                      )}
+                      placeholder="Choose ingredient"
+                      searchPlaceholder="Search ingredient…"
+                      emptyText="No ingredient matches"
+                      triggerProps={{
+                        "aria-label": "Ingredient",
+                        "data-field": `ref-${g.key}-${i}`,
+                        "aria-invalid": form.error(`ref-${g.key}-${i}`) ? true : undefined,
+                      }}
+                    />
                     <div className="flex items-center gap-1">
                       <Input
                         {...form.fieldProps(`qty-${g.key}-${i}`)}
@@ -692,7 +714,7 @@ export function ProductionScreen() {
                   <div>
                     <p className="font-semibold">{s.name}</p>
                     <p className="num text-xs text-muted-foreground">
-                      {fmtQty(s.stock)} {s.unit} in stock · ₹{Math.round(store.semiUnitCost(s.id))}/
+                      {fmtQty(s.stock)} {s.unit} in stock · {cs()}{Math.round(store.semiUnitCost(s.id))}/
                       {s.unit}
                     </p>
                   </div>

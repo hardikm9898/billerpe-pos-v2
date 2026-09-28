@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -24,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { useStore } from "@/mock/store";
 import type { AddonGroup } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/menu/addons")({
   head: () => ({
@@ -127,6 +129,14 @@ function MenuAddonsPage() {
               bodyClassName="p-3 sm:p-4"
               actions={
                 <div className="flex items-center gap-1">
+                  {/* Inactive = listed here, not offered in billing. */}
+                  <Switch
+                    checked={g.active !== false}
+                    disabled={!access.edit}
+                    aria-label={`${g.name} active`}
+                    title={g.active !== false ? "Active" : "Inactive"}
+                    onCheckedChange={(on) => store.setAddonGroupActive(g.id, on)}
+                  />
                   <Button size="sm" variant="ghost" onClick={() => setDraft({ ...g })}>
                     <Pencil className="size-4" />
                   </Button>
@@ -276,7 +286,7 @@ function MenuAddonsPage() {
                       <Input
                         type="number"
                         value={o.price}
-                        placeholder="₹"
+                        placeholder={`${cs()}`}
                         onChange={(e) =>
                           setDraft({
                             ...draft,
@@ -326,7 +336,7 @@ function MenuAddonsPage() {
                         (o: { name: string; price: number }) => o.name.trim() && o.price >= 0,
                       ),
                     message: draft.options.length
-                      ? "Every option needs a name and a price of ₹0 or more"
+                      ? `Every option needs a name and a price of ${cs()}0 or more`
                       : "Add at least one option",
                   },
                   {

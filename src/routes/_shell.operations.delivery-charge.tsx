@@ -18,6 +18,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { useStore } from "@/mock/store";
 import type { BillChargeRule, OpsOrderType } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/operations/delivery-charge")({
   head: () => ({
@@ -38,7 +39,7 @@ const ORDER_TYPES: OpsOrderType[] = ["Dine-in", "Pickup"];
 
 function summarize(rule: BillChargeRule) {
   if (!rule.active) return "Off";
-  return rule.type === "percent" ? `${rule.value}%` : `₹${rule.value}`;
+  return rule.type === "percent" ? `${rule.value}%` : `${cs()}${rule.value}`;
 }
 
 function DeliveryChargePage() {
@@ -116,7 +117,7 @@ function RuleEditor({
         </div>
         <div className="space-y-1.5">
           <Label required={rule.active}>
-            {rule.type === "percent" ? "Percentage (%)" : "Amount (₹)"}
+            {rule.type === "percent" ? "Percentage (%)" : `Amount (${cs()})`}
           </Label>
           <Input
             {...form.fieldProps("value")}
@@ -160,7 +161,7 @@ function RuleEditor({
         </div>
         {rule.condition !== "always" ? (
           <div className="space-y-1.5">
-            <Label required>Threshold (₹)</Label>
+            <Label required>Threshold ({cs()})</Label>
             <Input
               {...form.fieldProps("threshold")}
               type="number"
@@ -218,7 +219,7 @@ function RuleEditor({
                 message:
                   rule.type === "percent"
                     ? "Enter a percentage between 0 and 100"
-                    : "Enter an amount more than ₹0",
+                    : `Enter an amount more than ${cs()}0`,
               },
               ...(rule.condition !== "always"
                 ? [

@@ -221,6 +221,22 @@ function SpecialPermissionsList({
   );
 }
 
+// A password / PIN can't be shown (stored hashed) - only whether one is set,
+// with the box next to it to reset it (owner decision, 2026-09-28).
+function SecretState({ set, what }: { set?: boolean; what: string }) {
+  return (
+    <span
+      data-secret-state={what}
+      className={cn(
+        "rounded-full px-2 py-0.5 text-[11px] font-medium",
+        set ? "bg-success/15 text-success" : "bg-surface-muted text-muted-foreground",
+      )}
+    >
+      {set ? `${what} set` : `No ${what.toLowerCase()} yet`}
+    </span>
+  );
+}
+
 function UsersPage() {
   const access = useAccess("users");
   const store = useStore();
@@ -345,8 +361,23 @@ function UsersPage() {
               header: "Name",
               cell: (u) => (
                 <div>
-                  <p className="font-medium">{u.name}</p>
-                  <p className="text-xs text-muted-foreground">{u.email}</p>
+                  <p className="flex items-center gap-1.5 font-medium">
+                    {u.name}
+                    {/* The BillerPe server refused this login - it works on
+                        this outlet but isn't online (owner, 2026-09-28). */}
+                    {u.syncProblem ? (
+                      <span
+                        data-not-synced
+                        title={u.syncProblem}
+                        className="rounded-lg bg-destructive/10 px-2 py-0.5 text-[11px] font-medium text-destructive"
+                      >
+                        Not synced
+                      </span>
+                    ) : null}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {u.syncProblem ? u.syncProblem : u.email}
+                  </p>
                 </div>
               ),
             },
@@ -481,7 +512,10 @@ function UsersPage() {
                   <FieldError message={form.error("mobile")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>{draft.id ? "Reset PIN" : "Login PIN"}</Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label>{draft.id ? "Reset PIN" : "Login PIN"}</Label>
+                    {draft.id ? <SecretState set={draft.hasPin} what="PIN" /> : null}
+                  </div>
                   <PasswordInput
                     {...form.fieldProps("pin")}
                     value={draft.pin}
@@ -496,7 +530,10 @@ function UsersPage() {
               {draft.id ? (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label>Reset password</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label>Reset password</Label>
+                      <SecretState set={draft.hasPassword} what="Password" />
+                    </div>
                     <PasswordInput
                       {...form.fieldProps("password")}
                       value={resetPassword}

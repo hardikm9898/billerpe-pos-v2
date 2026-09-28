@@ -5,6 +5,7 @@ import { Money, SectionCard, StatCard } from "@/components/kit";
 import { BILL_FLOW, FlowStrip, Notice } from "@/components/operations/shared";
 import { OPS_GROUPS, OPS_SECTIONS, OPS_UNCONFIRMED } from "@/mock/ops-sections";
 import { useStore } from "@/mock/store";
+import { cs } from "@/lib/currency";
 
 export function OperationsLanding() {
   const store = useStore();
@@ -40,7 +41,7 @@ export function OperationsLanding() {
             store.serviceCharge.active
               ? store.serviceCharge.type === "percent"
                 ? `${store.serviceCharge.value}%`
-                : `₹${store.serviceCharge.value}`
+                : `${cs()}${store.serviceCharge.value}`
               : "Off"
           }
           hint={store.serviceCharge.autoApply.join(", ") || "Manual only"}

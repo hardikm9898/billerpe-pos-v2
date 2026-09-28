@@ -45,6 +45,7 @@ import type {
   TaxRule,
   TokenScope,
 } from "@/mock/types";
+import { CURRENCIES, cs } from "@/lib/currency";
 
 // Same shape orderTotals expects for a real order - two sample lines is
 // enough to exercise every part of the calculation (subtotal, discount-free
@@ -146,7 +147,7 @@ export function CalculationSection() {
             </div>
             <div className="space-y-1.5">
               <Label required={rule.active}>
-                {rule.type === "percent" ? "Percentage (%)" : "Amount (₹)"}
+                {rule.type === "percent" ? "Percentage (%)" : `Amount (${cs()})`}
               </Label>
               <Input
                 {...scForm.fieldProps("value")}
@@ -194,7 +195,7 @@ export function CalculationSection() {
             </div>
             {rule.condition !== "always" ? (
               <div className="space-y-1.5">
-                <Label required>Threshold (₹)</Label>
+                <Label required>Threshold ({cs()})</Label>
                 <Input
                   {...scForm.fieldProps("threshold")}
                   type="number"
@@ -251,7 +252,7 @@ export function CalculationSection() {
                     message:
                       rule.type === "percent"
                         ? "Enter a percentage between 0 and 100"
-                        : "Enter an amount more than ₹0",
+                        : `Enter an amount more than ${cs()}0`,
                   },
                   ...(rule.condition !== "always"
                     ? [
@@ -275,7 +276,7 @@ export function CalculationSection() {
 
         <SectionCard
           title="Live bill preview"
-          description="Sample ₹1,200 dine-in bill"
+          description={`Sample ${cs()}1,200 dine-in bill`}
           bodyClassName="p-3 sm:p-4"
         >
           <dl className="space-y-2 text-sm">
@@ -449,7 +450,7 @@ export function TaxSection() {
               <div>
                 <p className="font-medium">{t.name}</p>
                 <p className="text-xs text-muted-foreground">
-                  {t.type === "percent" ? `${t.value}%` : `₹${t.value}`} · {t.orderTypes.join(", ")}
+                  {t.type === "percent" ? `${t.value}%` : `${cs()}${t.value}`} · {t.orderTypes.join(", ")}
                 </p>
               </div>
               <StatusBadge status={t.active ? "Active" : "Inactive"} />
@@ -482,7 +483,7 @@ export function TaxSection() {
                   <FieldError message={taxForm.error("name")} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label required>{draft.type === "percent" ? "Value (%)" : "Value (₹)"}</Label>
+                  <Label required>{draft.type === "percent" ? "Value (%)" : `Value (${cs()})`}</Label>
                   <Input
                     {...taxForm.fieldProps("value")}
                     type="number"
@@ -569,7 +570,7 @@ export function TaxSection() {
                     message:
                       draft.type === "percent"
                         ? "Enter a percentage between 0 and 100"
-                        : "Enter an amount more than ₹0",
+                        : `Enter an amount more than ${cs()}0`,
                   },
                 ]);
                 if (!valid) return;
@@ -865,15 +866,48 @@ export function InvoiceFormatSection() {
                 />
                 <FieldError message={fmtForm.error("upiId")} />
               </div>
-              <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-3">
-                <div>
-                  <p className="text-sm font-medium">Multi-language bill</p>
-                  <p className="text-xs text-muted-foreground">Print item names bilingually.</p>
+              {/* Outlet currency (owner decision, 2026-09-28): every amount on
+                  the POS, Captain App, printed bill, e-bill and QR menu. */}
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_140px]">
+                <div className="space-y-1.5">
+                  <Label>Currency</Label>
+                  <Select
+                    value={fmt.currencyCode}
+                    onValueChange={(code) => {
+                      const c = CURRENCIES.find((x) => x.code === code);
+                      update({ currencyCode: code, currencySymbol: c?.symbol ?? "" });
+                      fmtForm.clearError("currencySymbol");
+                    }}
+                  >
+                    <SelectTrigger aria-label="Currency">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CURRENCIES.map((c) => (
+                        <SelectItem key={c.code} value={c.code}>
+                          {c.code === "OTHER" ? c.name : `${c.symbol} · ${c.name} (${c.code})`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    {fmt.currencyCode === "INR"
+                      ? "Amounts group the Indian way: 1,00,000."
+                      : "Amounts group the international way: 100,000."}
+                  </p>
                 </div>
-                <Switch
-                  checked={fmt.multiLanguage}
-                  onCheckedChange={(v) => update({ multiLanguage: v })}
-                />
+                <div className="space-y-1.5">
+                  <Label required={fmt.currencyCode === "OTHER"}>Symbol</Label>
+                  <Input
+                    {...fmtForm.fieldProps("currencySymbol")}
+                    aria-label="Currency symbol"
+                    maxLength={6}
+                    value={fmt.currencySymbol}
+                    placeholder="e.g. ₹"
+                    onChange={(e) => update({ currencySymbol: e.target.value })}
+                  />
+                  <FieldError message={fmtForm.error("currencySymbol")} />
+                </div>
               </div>
               <div className="flex items-center justify-between gap-4 rounded-xl border border-border p-3">
                 <div>
@@ -1088,6 +1122,13 @@ export function InvoiceFormatSection() {
                 const blankOr = (re: RegExp) => (v: unknown) =>
                   !String(v ?? "").trim() || re.test(String(v).trim());
                 const valid = fmtForm.check([
+                  {
+                    key: "currencySymbol",
+                    label: "Currency symbol",
+                    value: fmt.currencySymbol,
+                    valid: (v) => String(v ?? "").trim().length > 0,
+                    message: "Type the currency symbol to print (e.g. ₹, $, AED)",
+                  },
                   {
                     key: "gstNo",
                     label: "GST number",
@@ -1493,7 +1534,7 @@ export function PromoSection() {
                   <p className="mt-1 font-mono text-xs uppercase text-muted-foreground">{p.code}</p>
                 </div>
                 <span className="rounded-lg bg-primary-soft px-2 py-1 text-sm font-semibold text-primary">
-                  {p.type === "percent" ? `${p.value}%` : `₹${p.value}`}
+                  {p.type === "percent" ? `${p.value}%` : `${cs()}${p.value}`}
                 </span>
               </div>
               <div className="mt-4 flex items-center justify-between gap-2">
@@ -1551,12 +1592,12 @@ export function PromoSection() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="percent">Percentage</SelectItem>
-                      <SelectItem value="fixed">Flat ₹</SelectItem>
+                      <SelectItem value="fixed">Flat {cs()}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-1.5">
-                  <Label required>{draft.type === "percent" ? "Value (%)" : "Value (₹)"}</Label>
+                  <Label required>{draft.type === "percent" ? "Value (%)" : `Value (${cs()})`}</Label>
                   <Input
                     {...promoForm.fieldProps("value")}
                     type="number"
@@ -1594,7 +1635,7 @@ export function PromoSection() {
                     message:
                       draft.type === "percent"
                         ? "Enter a percentage between 0 and 100"
-                        : "Enter an amount more than ₹0",
+                        : `Enter an amount more than ${cs()}0`,
                   },
                 ]);
                 if (!valid) return;

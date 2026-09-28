@@ -115,10 +115,18 @@ const SECTION_LOADERS: Record<string, Loader[]> = {
   "purchase-orders": ["loadPurchaseOrdersFromServer", "loadSuppliersFromServer"],
   "franchise-requisitions": ["loadRequisitionsFromServer"],
   wastage: ["loadWastageFromServer"],
-  recipes: ["loadRecipesFromServer"],
+  // A recipe line can be a semi-finished item - the picker was empty until
+  // the Semi-Finished screen had been opened once (owner report, 2026-09-28).
+  recipes: ["loadRecipesFromServer", "loadSemiFinishedFromServer"],
+  "report-current-stock": ["loadSemiFinishedFromServer"],
   "report-purchase": ["loadPurchaseOrdersFromServer"],
   "report-supplier": ["loadPurchaseOrdersFromServer", "loadSuppliersFromServer"],
 };
+// Stock moves all day (every settled bill deducts its recipe), but it was
+// read once at login - a stock screen showed the morning's figures until a
+// full page refresh (owner report, 2026-09-28). Every stock screen re-reads
+// it when opened.
+const ALWAYS_LOADERS: Loader[] = ["loadRawMaterialsFromServer"];
 
 function StockSectionPage() {
   const { section } = useParams({ from: "/_shell/stock/$section" });
@@ -126,7 +134,7 @@ function StockSectionPage() {
   const store = useStore();
 
   useEffect(() => {
-    for (const loaderKey of meta ? (SECTION_LOADERS[meta.slug] ?? []) : []) {
+    for (const loaderKey of meta ? [...ALWAYS_LOADERS, ...(SECTION_LOADERS[meta.slug] ?? [])] : []) {
       const loader = store[loaderKey];
       if (typeof loader === "function") void (loader as () => Promise<void>)();
     }

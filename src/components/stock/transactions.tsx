@@ -53,6 +53,7 @@ import { dmyToIso, isoToDMY, realToday } from "@/mock/format";
 import { useStore } from "@/mock/store";
 import type { PurchaseOrder, PurchaseLine, PurchasePayment } from "@/mock/types";
 import { purchaseOrderApi } from "@/lib/api";
+import { cs, numLocale } from "@/lib/currency";
 
 /* ==================== Purchase Orders ==================== */
 
@@ -72,7 +73,7 @@ function useSupplierPayModes(): string[] {
   ];
 }
 const todayIso = () => dmyToIso(realToday());
-const inr = (n: number) => `₹${(Math.round(n * 100) / 100).toLocaleString("en-IN")}`;
+const inr = (n: number) => `${cs()}${(Math.round(n * 100) / 100).toLocaleString(numLocale())}`;
 const isCashMode = (m: string) => m.trim().toLowerCase() === "cash";
 
 type PayDraft = { mode: string; date: string; ref: string; fromDrawer: boolean };
@@ -524,9 +525,9 @@ export function PurchaseOrdersScreen() {
                             <td className="num px-3 py-2">
                               {l.qty} {m?.purchaseUnit}
                             </td>
-                            <td className="num px-3 py-2">₹{l.rate}</td>
+                            <td className="num px-3 py-2">{cs()}{l.rate}</td>
                             <td className="num px-3 py-2 text-right">
-                              ₹{(l.qty * l.rate).toLocaleString("en-IN")}
+                              {cs()}{(l.qty * l.rate).toLocaleString(numLocale())}
                             </td>
                           </tr>
                         );
@@ -636,7 +637,7 @@ function RecordPaymentDialog({
           Due <span className="font-semibold text-foreground">{inr(due)}</span>
           {po?.paidAmount ? ` · ${inr(po.paidAmount)} paid so far` : ""}
         </p>
-        <FieldRow label="Amount (₹)" required error={form.error("payAmount")}>
+        <FieldRow label={`Amount (${cs()})`} required error={form.error("payAmount")}>
           <Input
             {...form.fieldProps("payAmount")}
             type="number"
@@ -670,7 +671,7 @@ function RecordPaymentDialog({
                   message:
                     amount > due
                       ? `Amount can't be more than the ${inr(due)} due`
-                      : "Enter an amount more than ₹0",
+                      : `Enter an amount more than ${cs()}0`,
                 },
                 {
                   key: "payDate",
@@ -789,10 +790,10 @@ function TotalsPanel({ po }: { po: PurchaseOrder }) {
       </div>
       <div className="mt-2 flex items-center justify-between text-xs">
         <span className="text-muted-foreground">
-          Paid ₹{(po.paidAmount ?? 0).toLocaleString("en-IN")}
+          Paid {cs()}{(po.paidAmount ?? 0).toLocaleString(numLocale())}
         </span>
         <span className={due ? "font-semibold text-primary" : "text-success"}>
-          {due ? `Due ₹${due.toLocaleString("en-IN")}` : "Fully paid"}
+          {due ? `Due ${cs()}${due.toLocaleString(numLocale())}` : "Fully paid"}
         </span>
       </div>
     </div>
@@ -934,7 +935,7 @@ function PurchaseEditor({
         label: "Amount paid",
         value: draft.paidAmount ?? 0,
         valid: (v) => isSaved || (typeof v === "number" && v >= 0 && v <= grand + 0.004),
-        message: `Amount paid must be between ₹0 and the ${inr(grand)} total`,
+        message: `Amount paid must be between ${cs()}0 and the ${inr(grand)} total`,
       },
       {
         key: "payDate",
@@ -1126,7 +1127,7 @@ function PurchaseEditor({
                         />
                       </FieldRow>
                       <FieldRow
-                        label={`Rate ₹${m?.purchaseUnit ? ` / ${m.purchaseUnit}` : ""}`}
+                        label={`Rate ${cs()}${m?.purchaseUnit ? ` / ${m.purchaseUnit}` : ""}`}
                         required
                         error={poForm.error(`rate-${i}`)}
                       >
@@ -1170,8 +1171,8 @@ function PurchaseEditor({
                     </div>
                     {m ? (
                       <p className="num mt-1 px-1 text-[11px] text-muted-foreground">
-                        Adds {fmtQty(l.qty * m.conversion)} {m.unit} to stock · line ₹
-                        {(l.qty * l.rate).toLocaleString("en-IN")}
+                        Adds {fmtQty(l.qty * m.conversion)} {m.unit} to stock · line {cs()}
+                        {(l.qty * l.rate).toLocaleString(numLocale())}
                       </p>
                     ) : null}
                   </div>
@@ -1194,7 +1195,7 @@ function PurchaseEditor({
           <div className="grid gap-3 sm:grid-cols-2">
             <FieldRow
               label="Discount on the bill"
-              hint="Flat ₹ or a percent of the subtotal"
+              hint={`Flat ${cs()} or a percent of the subtotal`}
               error={poForm.error("discount")}
             >
               <div className="flex gap-2">
@@ -1208,7 +1209,7 @@ function PurchaseEditor({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="flat">Flat ₹</SelectItem>
+                    <SelectItem value="flat">Flat {cs()}</SelectItem>
                     <SelectItem value="percent">Percent</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1239,7 +1240,7 @@ function PurchaseEditor({
               </FieldRow>
             ) : (
               <FieldRow
-                label="Amount paid now (₹)"
+                label={`Amount paid now (${cs()})`}
                 hint="Leave 0 if the bill is unpaid; the rest is owed to the supplier"
                 error={poForm.error("paid")}
               >
@@ -1518,7 +1519,7 @@ export function StockInHandScreen() {
               <p className="text-xs text-muted-foreground">
                 Net stock value change{" "}
                 <span className={varianceValue < 0 ? "text-primary" : "text-success"}>
-                  ₹{Math.round(varianceValue).toLocaleString("en-IN")}
+                  {cs()}{Math.round(varianceValue).toLocaleString(numLocale())}
                 </span>
               </p>
             </div>
@@ -1789,7 +1790,7 @@ export function WastageScreen() {
                   </div>
                   {m ? (
                     <p className="num mt-2 text-[11px] text-muted-foreground">
-                      Stock after posting: {fmtQty(Math.max(0, m.stock - r.qty))} {m.unit} · cost ₹
+                      Stock after posting: {fmtQty(Math.max(0, m.stock - r.qty))} {m.unit} · cost {cs()}
                       {Math.round(r.qty * m.rate)}
                     </p>
                   ) : null}
@@ -2066,7 +2067,7 @@ export function RequisitionsScreen() {
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{m.name}</p>
                         <p className="num text-[11px] text-muted-foreground">
-                          ₹{Math.round(m.rate * m.conversion)} / {m.purchaseUnit} · on hand{" "}
+                          {cs()}{Math.round(m.rate * m.conversion)} / {m.purchaseUnit} · on hand{" "}
                           {fmtQty(m.stock)} {m.unit}
                         </p>
                         <HealthBar stock={m.stock} reorder={m.reorderLevel} />

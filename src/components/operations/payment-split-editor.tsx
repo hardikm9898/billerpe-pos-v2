@@ -13,6 +13,7 @@ import type { OpsOrderType, PaymentSplit } from "@/mock/types";
 // too (this component imports the store, so it cannot be their home).
 export { splitCheck, splitPaid } from "@/lib/payments";
 import { splitCheck, splitPaid } from "@/lib/payments";
+import { cs } from "@/lib/currency";
 
 // Mirrors uat-backend's own QR construction (controller/kto.js's
 // getHearderAndFooterData: pa left unencoded, pn/tn encoded, cu fixed to
@@ -51,7 +52,7 @@ export function UpiQrPanel({ upiId, amount }: { upiId: string; amount: number })
   return (
     <div className="flex flex-col items-center gap-2 rounded-xl border border-border p-3">
       <img src={dataUrl} alt="UPI payment QR code" className="size-40" />
-      <p className="num text-xs text-muted-foreground">Scan to pay ₹{amount} via UPI</p>
+      <p className="num text-xs text-muted-foreground">Scan to pay {cs()}{amount} via UPI</p>
     </div>
   );
 }

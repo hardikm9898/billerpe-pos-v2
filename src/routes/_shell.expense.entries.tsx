@@ -48,6 +48,7 @@ import { cn } from "@/lib/utils";
 import { RANGE_OPTIONS, dmyToIso, realToday, resolveRange, type RangeKey } from "@/mock/format";
 import { useStore } from "@/mock/store";
 import type { Expense } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/expense/entries")({
   head: () => ({
@@ -115,6 +116,22 @@ function ExpenseEntriesPage() {
   const [userFilter, setUserFilter] = useState("all");
   const [page, setPage] = useState(1);
 
+  // The outlet's own payment modes (Settings > Payment modes), never Due -
+  // an expense is money paid out now (owner decision, 2026-09-28). Only Cash
+  // moves the cash drawer. "Bank" stays as a filter for older entries.
+  const expenseModes = (() => {
+    const own = store.paymentModes
+      .filter((m) => m.active && m.name.trim().toLowerCase() !== "due")
+      .map((m) => m.name);
+    return own.length ? own : ["Cash", "UPI", "Card"];
+  })();
+  const filterModes = expenseModes.some((m) => m.toLowerCase() === "bank")
+    ? expenseModes
+    : [...expenseModes, "Bank"];
+  // An older entry's mode that is no longer offered still shows when edited.
+  const draftModes =
+    draft && !expenseModes.includes(draft.mode) ? [...expenseModes, draft.mode] : expenseModes;
+
   const { from, to } = resolveRange(rangeKey, customFrom, customTo);
   const isoFrom = dmyToIso(from);
   const isoTo = dmyToIso(to);
@@ -145,7 +162,7 @@ function ExpenseEntriesPage() {
       page,
       limit: PAGE_SIZE,
       expenseHeadId: headFilter !== "all" ? headFilter : undefined,
-      paymentMode: modeFilter !== "all" ? (modeFilter as Expense["mode"]) : undefined,
+      paymentMode: modeFilter !== "all" ? modeFilter : undefined,
       userId: userFilter !== "all" ? userFilter : undefined,
     });
 
@@ -167,7 +184,7 @@ function ExpenseEntriesPage() {
         from: isoFrom,
         to: isoTo,
         expenseHeadId: headFilter !== "all" ? headFilter : undefined,
-        paymentMode: modeFilter !== "all" ? (modeFilter as Expense["mode"]) : undefined,
+        paymentMode: modeFilter !== "all" ? modeFilter : undefined,
         userId: userFilter !== "all" ? userFilter : undefined,
       });
       if (!rows.length) {
@@ -305,9 +322,11 @@ function ExpenseEntriesPage() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All payment modes</SelectItem>
-              <SelectItem value="Cash">Cash</SelectItem>
-              <SelectItem value="Bank">Bank</SelectItem>
-              <SelectItem value="UPI">UPI</SelectItem>
+              {filterModes.map((m) => (
+                <SelectItem key={m} value={m}>
+                  {m}
+                </SelectItem>
+              ))}
             </SelectContent>
           </Select>
           <Select value={userFilter} onValueChange={setUserFilter}>
@@ -417,7 +436,7 @@ function ExpenseEntriesPage() {
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label required>Amount (₹)</Label>
+                  <Label required>Amount ({cs()})</Label>
                   <Input
                     {...form.fieldProps("amount")}
                     type="number"
@@ -431,15 +450,17 @@ function ExpenseEntriesPage() {
                   <Label>Payment mode</Label>
                   <Select
                     value={draft.mode}
-                    onValueChange={(v) => setDraft({ ...draft, mode: v as Expense["mode"] })}
+                    onValueChange={(v) => setDraft({ ...draft, mode: v })}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger aria-label="Payment mode">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="Cash">Cash</SelectItem>
-                      <SelectItem value="Bank">Bank</SelectItem>
-                      <SelectItem value="UPI">UPI</SelectItem>
+                      {draftModes.map((m) => (
+                        <SelectItem key={m} value={m}>
+                          {m}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -506,7 +527,7 @@ function ExpenseEntriesPage() {
                     label: "Amount",
                     value: draft.amount,
                     valid: (v) => typeof v === "number" && v > 0,
-                    message: "Amount must be more than ₹0",
+                    message: `Amount must be more than ${cs()}0`,
                   },
                   {
                     key: "date",

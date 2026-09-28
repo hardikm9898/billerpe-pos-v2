@@ -58,6 +58,7 @@ import { ApiError, orderApi, type RawTimelineEntry } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { displayBillNo, orderTotals, useStore } from "@/mock/store";
 import type { AuditLog, Order, OrderStatus } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 // constant/const.js's ACTION enum (controller/kto.js) - real values this
 // backend actually writes to hms_timeline_mst.action. "remove_kot" is a
@@ -102,7 +103,7 @@ function mapRawTimelineEntry(t: RawTimelineEntry): AuditLog & { rawAction: strin
     rawAction: t.action,
     entity: `Order #${t.bill_no}`,
     before: "",
-    after: `${t.order_status} · ₹${t.grandAmount}`,
+    after: `${t.order_status} · ${cs()}${t.grandAmount}`,
     device: t.device_name || t.from || "",
     ip: "",
     at: Number.isNaN(at.getTime()) ? t.created_Date : at.toLocaleString("en-IN"),
@@ -150,7 +151,7 @@ const filters: ("All" | OrderStatus)[] = [
 
 function paymentSummary(order: Order) {
   if (order.payments?.length) {
-    return order.payments.map((p) => `${p.mode} ₹${p.amount.toLocaleString("en-IN")}`).join(" + ");
+    return order.payments.map((p) => `${p.mode} ${cs()}${p.amount.toLocaleString(numLocale())}`).join(" + ");
   }
   return order.paymentMode ?? "—";
 }

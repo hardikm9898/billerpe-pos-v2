@@ -61,17 +61,16 @@ function KdsPage() {
   // look like a quiet service.
   const [kitchenCount, setKitchenCount] = useState<number | null>(null);
 
-  // Real-time visibility across devices only - see the KDS wiring
-  // decision: the backend has just one ready/not-ready flag per item, no
-  // equivalent of this board's Accepted/Preparing/Ready/Served stages, so
-  // those stay purely local (setKotStatus, unchanged). This only makes a
-  // KOT fired on one screen show up live on other screens, and clears it
-  // here once settled elsewhere.
+  // Tickets, and where each item is (Accepted / Preparing / Ready / Served),
+  // come from the exe and are kept there per item (billerpe-local-exe
+  // controller/kds.js): every kitchen screen and a refresh show the same
+  // board, and a stage set on one screen moves on all of them.
   useEffect(() => {
     if (!store.authed) return;
     const disconnect = connectKdsSocket({
       onTicket: (ticket) => store.receiveKdsTicket(ticket),
       onOrderComplete: (orderId) => store.receiveKdsOrderComplete(orderId),
+      onItemStatus: (payload) => store.receiveKdsItemStatus(payload),
       onKitchensResolved: setKitchenCount,
     });
     return disconnect;
@@ -147,6 +146,7 @@ function KdsPage() {
                     key={k.id}
                     kot={k}
                     onAdvance={() => store.setKotStatus(k.id, flow[k.status]!)}
+                    onItemStage={(detailId, stage) => store.setKdsItemStage(k.id, detailId, stage)}
                     onReject={() => {
                       setRejectReason("");
                       setRejectTarget(k);
@@ -199,15 +199,21 @@ function KdsPage() {
 function KotCard({
   kot,
   onAdvance,
+  onItemStage,
   onReject,
 }: {
   kot: Kot;
   onAdvance: () => void;
+  onItemStage: (detailId: number, stage: "ready" | "served") => void;
   onReject: () => void;
 }) {
   const access = useAccess("kds");
   const mins = elapsedMinutes(kot.createdAt);
   const urgency = mins > 20 ? "border-primary" : mins > 10 ? "border-warning" : "border-border";
+  // Once the kitchen has accepted a ticket it can't be rejected any more,
+  // and its items can be marked Ready / Served one by one (owner decision,
+  // 2026-09-28).
+  const accepted = !["Pending", "Printed"].includes(kot.status);
 
   return (
     <motion.article
@@ -230,8 +236,13 @@ function KotCard({
 
       <ul className="mt-2 space-y-1">
         {kot.items.map((i, idx) => (
-          <li key={idx} className="flex items-start justify-between gap-2 text-sm">
-            <span className="min-w-0">
+          <li
+            key={i.detailId ?? idx}
+            data-kds-item={i.detailId}
+            data-stage={i.stage ?? "new"}
+            className="flex items-start justify-between gap-2 text-sm"
+          >
+            <span className={cn("min-w-0", i.stage === "served" && "text-muted-foreground line-through")}>
               <span className="num font-semibold">{i.qty}×</span> {i.name}
               {i.note ? (
                 <span className="block whitespace-pre-wrap break-words text-[11px] italic text-warning">
@@ -239,6 +250,29 @@ function KotCard({
                 </span>
               ) : null}
             </span>
+            {access.edit && accepted && i.detailId ? (
+              i.stage === "served" ? (
+                <span className="shrink-0 text-[11px] text-muted-foreground">Served</span>
+              ) : i.stage === "ready" ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={() => onItemStage(i.detailId!, "served")}
+                >
+                  Served
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-6 shrink-0 px-2 text-[11px]"
+                  onClick={() => onItemStage(i.detailId!, "ready")}
+                >
+                  Ready
+                </Button>
+              )
+            ) : null}
           </li>
         ))}
       </ul>
@@ -254,7 +288,7 @@ function KotCard({
         </span>
         <div className="flex items-center gap-1.5">
           <Button
-            hidden={!access.edit}
+            hidden={!access.edit || accepted}
             size="sm"
             variant="outline"
             className="text-primary"

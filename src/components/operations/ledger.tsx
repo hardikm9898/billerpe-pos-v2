@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/select";
 import { useStore } from "@/mock/store";
 import type { PaymentSplit } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 const RANGES = [
   { id: "today", label: "Today", days: 0 },
@@ -320,7 +321,7 @@ export function DuePaymentSection() {
                 // more than what is due). Several bills must be paid in full.
                 if (settleTarget.ids.length > 1 && Math.abs(balance) > 0.5) {
                   toast.error("Split does not match the amount due", {
-                    description: `Balance of ₹${balance.toLocaleString("en-IN")} remaining.`,
+                    description: `Balance of ${cs()}${balance.toLocaleString(numLocale())} remaining.`,
                   });
                   return;
                 }

@@ -48,6 +48,7 @@ import { encryptHotelId, encryptQrPayload, qrBaseUrl } from "@/lib/publicMenu";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/mock/store";
 import type { Customer, OrderType } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 /* =============== Display =============== */
 
@@ -129,8 +130,8 @@ export function DisplaySection() {
               <Search className="size-4" /> Type item code or name…
             </div>
             <div className="mt-3 space-y-1.5 text-xs text-muted-foreground">
-              <div className="rounded-lg bg-surface px-3 py-2">101 · Gujarati Thali — ₹280</div>
-              <div className="rounded-lg bg-surface px-3 py-2">204 · Paneer Tikka — ₹320</div>
+              <div className="rounded-lg bg-surface px-3 py-2">101 · Gujarati Thali — {cs()}280</div>
+              <div className="rounded-lg bg-surface px-3 py-2">204 · Paneer Tikka — {cs()}320</div>
             </div>
           </div>
         ) : (
@@ -595,6 +596,12 @@ export function CustomerSection() {
   useEffect(() => {
     if (!formOpen) formReset();
   }, [formOpen, formReset]);
+  // Order counts and last visits change with every settled bill - re-read
+  // on opening, not only at login.
+  useEffect(() => {
+    void store.loadCustomersFromServer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const rows = useMemo(() => {
     const t = q.trim().toLowerCase();

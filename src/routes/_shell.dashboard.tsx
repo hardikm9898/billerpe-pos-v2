@@ -47,6 +47,7 @@ import {
 } from "@/mock/format";
 import { orderTotals, useStore } from "@/mock/store";
 import type { TableStatus } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/dashboard")({
   head: () => ({
@@ -518,9 +519,9 @@ function DashboardPage() {
           tone={openSession ? "primary" : closedToday ? "default" : "warning"}
           hint={
             openSession
-              ? `Opening float ₹${openSession.openingFloat.toLocaleString("en-IN")} · opened ${openSession.openedAt}`
+              ? `Opening float ${cs()}${openSession.openingFloat.toLocaleString(numLocale())} · opened ${openSession.openedAt}`
               : closedToday
-                ? `Counted ₹${(closedToday.countedCash ?? 0).toLocaleString("en-IN")} · variance ₹${(closedToday.variance ?? 0).toLocaleString("en-IN")}`
+                ? `Counted ${cs()}${(closedToday.countedCash ?? 0).toLocaleString(numLocale())} · variance ${cs()}${(closedToday.variance ?? 0).toLocaleString(numLocale())}`
                 : "Open today's session before billing in cash"
           }
         />
@@ -630,7 +631,7 @@ function DashboardPage() {
                 <div
                   key={d.day}
                   className="flex min-w-0 flex-1 flex-col items-center gap-2"
-                  title={`${d.label} · ₹${d.sales.toLocaleString("en-IN")}`}
+                  title={`${d.label} · ${cs()}${d.sales.toLocaleString(numLocale())}`}
                 >
                   <Money
                     value={d.sales}
@@ -731,7 +732,7 @@ function DashboardPage() {
                 <div
                   key={h.hour}
                   className="flex min-w-0 flex-1 flex-col items-center gap-1.5"
-                  title={`${h.hour} · ${h.orders} order${h.orders === 1 ? "" : "s"} · ₹${h.amount.toLocaleString("en-IN")}`}
+                  title={`${h.hour} · ${h.orders} order${h.orders === 1 ? "" : "s"} · ${cs()}${h.amount.toLocaleString(numLocale())}`}
                 >
                   <Money
                     value={h.amount}

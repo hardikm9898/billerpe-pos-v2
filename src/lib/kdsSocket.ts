@@ -1,6 +1,6 @@
 import { io, type Socket } from "socket.io-client";
 
-import { EXE_BASE_URL, getStoredAuthToken, kitchenApi } from "./api";
+import { EXE_BASE_URL, getStoredAuthToken, kitchenApi, type KdsItemStage } from "./api";
 
 // The /kds namespace's per-KOT-round push shape - shared by "newOrder"
 // (fired on generateKot success, both for a brand-new order and for a
@@ -27,7 +27,18 @@ export type KdsTicketPayload = {
     qty: number;
     comment: string;
     menu_categ_id: number;
+    /** The order line - what per-item Ready/Served acts on. */
+    detailId?: number;
+    /** Where it is on the board, kept on the exe (controller/kds.js). */
+    status?: KdsItemStage;
   }[];
+};
+
+/** A stage change made on any kitchen screen (controller/kds.js). */
+export type KdsItemStatusPayload = {
+  orderId: number;
+  kotNumber: number;
+  items: { detailId: number; status: KdsItemStage }[];
 };
 
 // Connects through the Local EXE, not the cloud directly - Web POS never
@@ -52,6 +63,8 @@ export type KdsTicketPayload = {
 export function connectKdsSocket(handlers: {
   onTicket: (order: KdsTicketPayload) => void;
   onOrderComplete: (orderId: number) => void;
+  /** Items moved on another screen (or this one) - keeps every board the same. */
+  onItemStatus?: (payload: KdsItemStatusPayload) => void;
   /** Called with 0 when this hotel has no kitchens configured - without a
    * kitchen there is no room to broadcast into, so the board can never
    * receive anything and should say so rather than look merely idle. */
@@ -105,6 +118,12 @@ export function connectKdsSocket(handlers: {
 
   socket.on("orderComplete", (orderId: number) => {
     if (typeof orderId === "number") handlers.onOrderComplete(orderId);
+  });
+
+  socket.on("kdsItemStatus", (data: KdsItemStatusPayload) => {
+    if (data && typeof data.orderId === "number" && Array.isArray(data.items)) {
+      handlers.onItemStatus?.(data);
+    }
   });
 
   return () => {

@@ -17,6 +17,7 @@ import { useStore } from "@/mock/store";
 import { PeriodBar, useLedger, usePeriod } from "@/components/stock/ledger";
 import { downloadTextFile, toCsv } from "@/lib/csv";
 import { stockLedgerApi, type RawOrderConsumption } from "@/lib/api";
+import { cs, numLocale } from "@/lib/currency";
 
 // The Export button used to do nothing at all (no handler) on every
 // stock report.
@@ -387,8 +388,8 @@ export function PurchaseReport() {
                         {l.po} · {l.date}
                       </span>
                       <span className="num text-muted-foreground">
-                        {fmtQty(l.qty)} {r.unit} @ ₹{l.rate} = ₹
-                        {Math.round(l.qty * l.rate).toLocaleString("en-IN")}
+                        {fmtQty(l.qty)} {r.unit} @ {cs()}{l.rate} = {cs()}
+                        {Math.round(l.qty * l.rate).toLocaleString(numLocale())}
                       </span>
                     </li>
                   ))}

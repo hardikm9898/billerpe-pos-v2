@@ -1,15 +1,17 @@
+import { cs, numLocale } from "@/lib/currency";
+
 export const inr = (value: number, opts: { decimals?: boolean } = {}) =>
-  `₹${value.toLocaleString("en-IN", {
+  `${cs()}${value.toLocaleString(numLocale(), {
     minimumFractionDigits: opts.decimals ? 2 : 0,
     maximumFractionDigits: opts.decimals ? 2 : 0,
   })}`;
 
 export const compactInr = (value: number) =>
   value >= 100000
-    ? `₹${(value / 100000).toFixed(2)}L`
+    ? `${cs()}${(value / 100000).toFixed(2)}L`
     : value >= 1000
-      ? `₹${(value / 1000).toFixed(1)}K`
-      : `₹${value}`;
+      ? `${cs()}${(value / 1000).toFixed(1)}K`
+      : `${cs()}${value}`;
 
 export function nowStamp() {
   const d = new Date();
@@ -137,3 +139,9 @@ export function resolveRange(
       return { from: addDays(today, -6), to: today, rangeLabel: "the last 7 days" };
   }
 }
+
+// An addon as the cart, order screens and audit log show it: "Cheese ×2".
+// The quantity used to be dropped, so 10 cheese looked like one (owner
+// report, 2026-09-28). A single one stays just its name, same as the e-bill.
+export const addonLabel = (a: { name: string; qty?: number }) =>
+  (a.qty ?? 1) > 1 ? `${a.name} ×${a.qty}` : a.name;

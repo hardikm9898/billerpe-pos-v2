@@ -1,5 +1,6 @@
 import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { READ_ONLY_NOTE, useAccess } from "@/lib/access";
+import { byCategoryOrder } from "@/lib/sellable";
 import { createFileRoute } from "@tanstack/react-router";
 import { LayoutList, Plus, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -10,7 +11,6 @@ import {
   Page,
   PageHeader,
   SectionCard,
-  StatusBadge,
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -78,14 +78,11 @@ function MenuCategoriesPage() {
     () => store.menuCategories.filter((c) => c.menuId === viewMenuId),
     [store.menuCategories, viewMenuId],
   );
-  const rows = [...menuCategories].sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0));
+  const rows = [...menuCategories].sort(byCategoryOrder);
   const itemCount = (id: string) => store.menuItems.filter((i) => i.categoryId === id).length;
-  // Deletion is gated on ACTIVE items only — a category whose items are all
-  // inactive is safe to remove (the backend cascades the same soft-delete to
-  // them), it's only categories still serving live items that must be
-  // emptied first.
-  const activeItemCount = (id: string) =>
-    store.menuItems.filter((i) => i.categoryId === id && i.active).length;
+  // Deleting a category needs it empty - inactive items count too: they are
+  // kept, not deleted, so deleting their category would strand them.
+  const activeItemCount = itemCount;
 
   const [selected, setSelected] = useState<string[]>([]);
   useEffect(() => setSelected([]), [viewMenuId]);
@@ -154,7 +151,7 @@ function MenuCategoriesPage() {
               disabled={!selected.length}
               title={
                 selectedWithItems.length
-                  ? `${selectedWithItems.length} of the selected categor${selectedWithItems.length === 1 ? "y has" : "ies have"} active item(s) — those will be skipped`
+                  ? `${selectedWithItems.length} of the selected categor${selectedWithItems.length === 1 ? "y has" : "ies have"} item(s) — those will be skipped`
                   : "Delete selected"
               }
               onClick={() => {
@@ -209,8 +206,18 @@ function MenuCategoriesPage() {
               },
               {
                 key: "status",
-                header: "Status",
-                cell: (c) => <StatusBadge status={c.active ? "Active" : "Inactive"} />,
+                header: "Active",
+                // Inactive hides the category and its items from billing,
+                // Captain App and QR; items keep their own status.
+                cell: (c) => (
+                  <Switch
+                    checked={c.active}
+                    disabled={!access.edit}
+                    aria-label={`${c.name} active`}
+                    onClick={(e) => e.stopPropagation()}
+                    onCheckedChange={(v) => store.setMenuCategoryActive(c.id, v)}
+                  />
+                ),
               },
             ]}
             mobileCard={(c) => (
@@ -221,7 +228,13 @@ function MenuCategoriesPage() {
                     {store.menuItems.filter((i) => i.categoryId === c.id).length} items
                   </p>
                 </div>
-                <StatusBadge status={c.active ? "Active" : "Inactive"} />
+                <Switch
+                  checked={c.active}
+                  disabled={!access.edit}
+                  aria-label={`${c.name} active`}
+                  onClick={(e) => e.stopPropagation()}
+                  onCheckedChange={(v) => store.setMenuCategoryActive(c.id, v)}
+                />
               </div>
             )}
           />
@@ -277,7 +290,7 @@ function MenuCategoriesPage() {
                 disabled={activeItemCount(draft.id) > 0}
                 title={
                   activeItemCount(draft.id) > 0
-                    ? `In use by ${activeItemCount(draft.id)} active item(s) — deactivate or move them first`
+                    ? `In use by ${activeItemCount(draft.id)} item(s) — delete or move them first`
                     : "Delete category"
                 }
                 onClick={() => {

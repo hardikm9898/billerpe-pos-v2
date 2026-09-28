@@ -18,7 +18,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
-import { ApiError, registerThisPc } from "@/lib/api";
+import { ApiError, localServerApi, registerThisPc, type RawSyncProblem } from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/system/")({
@@ -59,10 +59,74 @@ function formatRelative(iso: string | null): string {
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
+// What this outlet could not get onto the BillerPe server, and why
+// (billerpe-local-exe controller/syncProblems.js). Before this a refusal only
+// reached the exe's console log, so nobody knew a login or menu row never
+// arrived online (owner decision, 2026-09-28).
+function SyncProblemsCard({ reloadKey }: { reloadKey: number }) {
+  const [problems, setProblems] = useState<RawSyncProblem[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      localServerApi
+        .getSyncProblems()
+        .then(({ problems }) => alive && setProblems(problems))
+        .catch(() => alive && setProblems((p) => p ?? []));
+    void load();
+    const id = setInterval(load, 30000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [reloadKey]);
+
+  return (
+    <SectionCard
+      title={`Sync problems${problems?.length ? ` (${problems.length})` : ""}`}
+      bodyClassName="p-3 sm:p-4"
+    >
+      {problems === null ? (
+        <p className="text-sm text-muted-foreground">Checking…</p>
+      ) : !problems.length ? (
+        <p data-sync-problems="none" className="text-sm text-muted-foreground">
+          Everything on this PC has reached the BillerPe server.
+        </p>
+      ) : (
+        <ul data-sync-problems className="space-y-2">
+          {problems.map((p) => (
+            <li
+              key={`${p.entity}-${p.local_id}`}
+              className="rounded-lg border border-border px-3 py-2 text-sm"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">{p.label ?? `${p.entity} #${p.local_id}`}</span>
+                <span
+                  className={
+                    p.retryable
+                      ? "rounded-full bg-surface-muted px-2 py-0.5 text-[11px] text-muted-foreground"
+                      : "rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] font-medium text-destructive"
+                  }
+                >
+                  {p.retryable ? "Retrying automatically" : "Needs a change - not retried until edited"}
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {p.message ?? "Refused by the BillerPe server"} · {p.attempts} attempt
+                {p.attempts === 1 ? "" : "s"} · {formatRelative(p.last_failed_at)}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </SectionCard>
+  );
+}
+
 function SystemPage() {
   const store = useStore();
   const status = store.localServerStatus;
   const [syncing, setSyncing] = useState(false);
+  const [syncRuns, setSyncRuns] = useState(0);
 
   useEffect(() => {
     store.loadServerStatusFromServer();
@@ -151,6 +215,7 @@ function SystemPage() {
       await store.forceSyncServer();
     } finally {
       setSyncing(false);
+      setSyncRuns((n) => n + 1);
     }
   }
 
@@ -286,6 +351,8 @@ function SystemPage() {
               </div>
             </dl>
           </SectionCard>
+
+          <SyncProblemsCard reloadKey={syncRuns} />
         </>
       )}
 

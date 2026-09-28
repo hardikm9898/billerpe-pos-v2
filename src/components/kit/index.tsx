@@ -8,6 +8,7 @@ import { Button, type ButtonProps } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { cs, numLocale, useCurrency } from "@/lib/currency";
 
 /* ---------------- page primitives ---------------- */
 
@@ -494,9 +495,10 @@ export function DataTable<T>({
 }
 
 export function Money({ value, className }: { value: number; className?: string }) {
+  useCurrency(); // re-render when the outlet currency changes
   return (
     <span className={cn("num", className)}>
-      {value < 0 ? "−" : ""}₹{Math.abs(value).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+      {value < 0 ? "−" : ""}{cs()}{Math.abs(value).toLocaleString(numLocale(), { maximumFractionDigits: 2 })}
     </span>
   );
 }

@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
+import { cs, numLocale } from "@/lib/currency";
 
 // One way every form in the app checks itself before saving:
 //  - required fields carry <Label required> (a red *)
@@ -96,6 +97,6 @@ export function discountProblem(type: "percent" | "flat", value: number, subtota
   if (!Number.isFinite(value) || value <= 0) return "Enter a discount more than 0";
   if (type === "percent" && value > 100) return "A percentage discount can't be more than 100%";
   if (type === "flat" && value > subtotal)
-    return `A flat discount can't be more than the ₹${subtotal.toLocaleString("en-IN")} bill`;
+    return `A flat discount can't be more than the ${cs()}${subtotal.toLocaleString(numLocale())} bill`;
   return null;
 }

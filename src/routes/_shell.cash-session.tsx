@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useStore } from "@/mock/store";
+import { cs } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/cash-session")({
   head: () => ({
@@ -254,12 +255,12 @@ function CashSessionPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1.5">
-              <Label required>
+              <Label required={mode !== "open"}>
                 {mode === "open"
-                  ? "Opening float (₹)"
+                  ? `Opening float (${cs()})`
                   : mode === "close"
-                    ? "Counted cash (₹)"
-                    : "Amount (₹)"}
+                    ? `Counted cash (${cs()})`
+                    : `Amount (${cs()})`}
               </Label>
               <Input
                 {...form.fieldProps("amount")}
@@ -332,8 +333,14 @@ function CashSessionPage() {
                     key: "amount",
                     label: "Amount",
                     value: amount,
-                    valid: (v) => v !== "" && (movement ? Number(v) > 0 : Number(v) >= 0),
-                    message: movement ? "Enter an amount more than ₹0" : "Enter an amount (₹0 or more)",
+                    // The box shows 0 while empty, and a session may start
+                    // with nothing in the drawer (owner, 2026-09-28): an
+                    // untouched opening float is 0, not missing.
+                    valid: (v) =>
+                      mode === "open"
+                        ? Number(v || 0) >= 0
+                        : v !== "" && (movement ? Number(v) > 0 : Number(v) >= 0),
+                    message: movement ? `Enter an amount more than ${cs()}0` : `Enter an amount (${cs()}0 or more)`,
                   },
                   ...(mode === "withdraw"
                     ? [
@@ -342,7 +349,7 @@ function CashSessionPage() {
                           label: "Amount",
                           value: value,
                           valid: (v: unknown) => Number(v) <= balance,
-                          message: `You can't withdraw more than the drawer balance (₹${balance})`,
+                          message: `You can't withdraw more than the drawer balance (${cs()}${balance})`,
                         },
                       ]
                     : []),

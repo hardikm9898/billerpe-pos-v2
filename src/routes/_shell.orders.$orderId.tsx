@@ -1,4 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { addonLabel } from "@/mock/format";
 import { ArrowLeft, Ban, ChefHat, Printer, Receipt, Send } from "lucide-react";
 import { useState } from "react";
 
@@ -24,6 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { roundQty } from "@/lib/qty";
 import { displayBillNo, lineTotal, orderTotals, useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/orders/$orderId")({
@@ -75,7 +77,61 @@ function OrderDetailPage() {
         service: order.backendTotals.serviceCharge,
       }
     : orderTotals(order, store);
+  // Live KDS status, when this device has it (memory only - used as a badge).
   const kots = store.kots.filter((k) => k.orderId === order.id);
+  // KOT trail: built from the order's own saved lines, so it is complete on
+  // any device and after a refresh (it used to list only the tickets this
+  // browser happened to have seen - usually none).
+  const byRound = new Map<number, typeof order.lines>();
+  for (const l of order.lines) {
+    if (!Number.isFinite(l.kotRound)) continue;
+    byRound.set(l.kotRound, [...(byRound.get(l.kotRound) ?? []), l]);
+  }
+  const kotRounds = [...byRound.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([round, lines]) => {
+      const first = lines
+        .map((l) => l.kotAt)
+        .filter(Boolean)
+        .sort()[0];
+      const at = first
+        ? new Date(first).toLocaleString("en-IN", { dateStyle: "short", timeStyle: "short" })
+        : undefined;
+      return { round, lines, at };
+    });
+  const unsent = order.lines.filter((l) => !Number.isFinite(l.kotRound));
+  // Items: each dish once (owner decision, 2026-09-28) - Jems x1 in round 1
+  // and Jems x1 in round 2 is Jems x2. Lines stay apart when anything that
+  // shows differs: variant, addons (and their qty), price, note, origin table.
+  const mergedLines = (() => {
+    const out = new Map<string, (typeof order.lines)[number]>();
+    for (const l of order.lines) {
+      const key = [
+        l.itemId,
+        l.name,
+        l.variant ?? "",
+        l.price,
+        l.note ?? "",
+        l.originTable ?? "",
+        (l.addons ?? [])
+          .map((a) => `${a.addonId ?? a.name}:${a.qty}:${a.price}`)
+          .sort()
+          .join("|"),
+      ].join("~");
+      const seen = out.get(key);
+      out.set(
+        key,
+        seen
+          ? {
+              ...seen,
+              qty: roundQty(seen.qty + l.qty),
+              addons: seen.addons?.map((a, i) => ({ ...a, qty: a.qty + (l.addons?.[i]?.qty ?? 0) })),
+            }
+          : { ...l },
+      );
+    }
+    return [...out.values()];
+  })();
   // Historical entries (id "oh-...") are always "Settled" (see
   // mapRawOrderHistoryEntry), so this already excludes them from Cancel -
   // that's now a real, irreversible soft-delete against the live backend
@@ -88,7 +144,7 @@ function OrderDetailPage() {
       <PageHeader
         icon={Receipt}
         title={`Order #${displayBillNo(order)}`}
-        description={`${order.tableLabel} · ${order.type} · ${order.guests} guests · created ${order.createdAt} by ${order.createdBy}`}
+        description={`${order.tableLabel} · ${order.type} · ${order.guests} guests · opened ${order.openedAt ?? order.createdAt} by ${order.createdBy}`}
         actions={
           <>
             <Button variant="ghost" onClick={() => navigate({ to: "/orders" })}>
@@ -130,11 +186,11 @@ function OrderDetailPage() {
         <div className="space-y-4">
           <SectionCard
             title="Items"
-            description={`${order.lines.length} lines · ${order.kotRounds} KOT rounds`}
+            description={`${mergedLines.length} items · ${kotRounds.length} KOT round${kotRounds.length === 1 ? "" : "s"}`}
           >
             {order.itemised ? (
               <DataTable
-                rows={order.lines}
+                rows={mergedLines}
                 keyFn={(l) => l.id}
                 columns={[
                   {
@@ -144,17 +200,15 @@ function OrderDetailPage() {
                       <div>
                         <p className="font-medium">{l.name}</p>
                         <p className="text-xs text-muted-foreground">
-                          {[l.variant, ...(l.addons ?? []).map((a) => a.name)]
+                          {[l.variant, ...(l.addons ?? []).map(addonLabel)]
                             .filter(Boolean)
                             .join(" · ") || "—"}
                         </p>
+                        {l.note ? (
+                          <p className="text-xs italic text-warning">“{l.note}”</p>
+                        ) : null}
                       </div>
                     ),
-                  },
-                  {
-                    key: "kot",
-                    header: "KOT",
-                    cell: (l) => <span className="num">{l.kotRound}</span>,
                   },
                   {
                     key: "origin",
@@ -179,31 +233,51 @@ function OrderDetailPage() {
             )}
           </SectionCard>
 
-          <SectionCard title="KOT trail" description="Every ticket printed for this order">
-            {kots.length ? (
+          <SectionCard
+            title="KOT trail"
+            description="Each KOT sent to the kitchen, round by round, with what was on it"
+          >
+            {kotRounds.length || unsent.length ? (
               <ul className="space-y-2">
-                {kots.map((k) => (
-                  <li
-                    key={k.id}
-                    className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border p-3"
-                  >
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">
-                        KOT #{k.kotNo} · Round {k.round} · {k.station}
-                      </p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {k.items.map((i) => `${i.qty}× ${i.name}`).join(", ")}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="num text-xs text-muted-foreground">{k.createdAt}</span>
-                      <StatusBadge status={k.status} />
-                    </div>
+                {kotRounds.map(({ round, lines, at }) => {
+                  const kds = kots.find((k) => k.round === round);
+                  return (
+                    <li key={round} className="rounded-xl border border-border p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-medium">KOT {round}</p>
+                        <div className="flex items-center gap-2">
+                          {at ? (
+                            <span className="num text-xs text-muted-foreground">{at}</span>
+                          ) : null}
+                          {kds ? <StatusBadge status={kds.status} /> : null}
+                        </div>
+                      </div>
+                      <ul className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+                        {lines.map((l) => (
+                          <li key={l.id}>
+                            <span className="num font-medium text-foreground">{l.qty}×</span>{" "}
+                            {l.name}
+                            {l.variant ? ` (${l.variant})` : ""}
+                            {l.addons?.length ? ` + ${l.addons.map(addonLabel).join(", ")}` : ""}
+                            {l.originTable ? ` · from ${l.originTable}` : ""}
+                            {l.note ? ` · “${l.note}”` : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  );
+                })}
+                {unsent.length ? (
+                  <li className="rounded-xl border border-dashed border-border p-3">
+                    <p className="text-sm font-medium">Not sent to the kitchen yet</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {unsent.map((l) => `${l.qty}× ${l.name}`).join(", ")}
+                    </p>
                   </li>
-                ))}
+                ) : null}
               </ul>
             ) : (
-              <EmptyState compact icon={ChefHat} title="No KOT printed yet" />
+              <EmptyState compact icon={ChefHat} title="No KOT sent yet" />
             )}
           </SectionCard>
         </div>
@@ -251,6 +325,15 @@ function OrderDetailPage() {
                   <span>Settled at</span>
                   <span className="num">{order.settledAt ?? "—"}</span>
                 </li>
+                {order.openedAt ? (
+                  <li
+                    data-opened-at
+                    className="flex items-center justify-between text-xs text-muted-foreground"
+                  >
+                    <span>Opened at</span>
+                    <span className="num">{order.openedAt}</span>
+                  </li>
+                ) : null}
               </ul>
             ) : (
               <p className="text-sm text-muted-foreground">Not settled yet.</p>

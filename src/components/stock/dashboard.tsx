@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { STOCK_GROUPS, STOCK_SECTIONS } from "@/mock/stock-sections";
 import { useStore } from "@/mock/store";
+import { cs, numLocale } from "@/lib/currency";
 
 export function StockDashboard() {
   const store = useStore();
@@ -49,7 +50,7 @@ export function StockDashboard() {
         <StatCard
           label="Stock on hand"
           value={<Money value={Math.round(kpi.rawValue + kpi.semiValue)} />}
-          hint={`Raw ₹${Math.round(kpi.rawValue).toLocaleString("en-IN")} · Prep ₹${Math.round(kpi.semiValue).toLocaleString("en-IN")}`}
+          hint={`Raw ${cs()}${Math.round(kpi.rawValue).toLocaleString(numLocale())} · Prep ${cs()}${Math.round(kpi.semiValue).toLocaleString(numLocale())}`}
           tone="primary"
         />
         <StatCard

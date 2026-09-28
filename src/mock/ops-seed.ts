@@ -99,6 +99,8 @@ export const invoiceFormat: InvoiceFormat = {
   gstNo: "24ABCDE1234F1Z5",
   fssaiNo: "10724003000123",
   multiLanguage: false,
+  currencyCode: "INR",
+  currencySymbol: "₹",
   upiId: "billerpedemo@okhdfcbank",
   header: [
     { id: "h1", content: "logo", fontSize: 14 },

@@ -38,6 +38,7 @@ import { Route as ShellOrdersIndexRouteImport } from './routes/_shell.orders.ind
 import { Route as ShellOrdersOrderIdRouteImport } from './routes/_shell.orders.$orderId'
 import { Route as ShellReportsIndexRouteImport } from './routes/_shell.reports.index'
 import { Route as ShellReportsReportIdRouteImport } from './routes/_shell.reports.$reportId'
+import { Route as ShellReportsDueReceivedRouteImport } from './routes/_shell.reports.due-received'
 import { Route as ShellStockIndexRouteImport } from './routes/_shell.stock.index'
 import { Route as ShellStockSectionRouteImport } from './routes/_shell.stock.$section'
 import { Route as ShellSupportHelpRouteImport } from './routes/_shell.support.help'
@@ -197,6 +198,11 @@ const ShellReportsReportIdRoute = ShellReportsReportIdRouteImport.update({
   path: '/reports/$reportId',
   getParentRoute: () => ShellRoute,
 } as any)
+const ShellReportsDueReceivedRoute = ShellReportsDueReceivedRouteImport.update({
+  id: '/reports/due-received',
+  path: '/reports/due-received',
+  getParentRoute: () => ShellRoute,
+} as any)
 const ShellStockIndexRoute = ShellStockIndexRouteImport.update({
   id: '/stock/',
   path: '/stock/',
@@ -280,6 +286,7 @@ export interface FileRoutesByFullPath {
   '/operations/delivery-charge': typeof ShellOperationsDeliveryChargeRoute
   '/orders/$orderId': typeof ShellOrdersOrderIdRoute
   '/reports/$reportId': typeof ShellReportsReportIdRoute
+  '/reports/due-received': typeof ShellReportsDueReceivedRoute
   '/stock/$section': typeof ShellStockSectionRoute
   '/support/help': typeof ShellSupportHelpRoute
   '/support/raise-ticket': typeof ShellSupportRaiseTicketRoute
@@ -321,6 +328,7 @@ export interface FileRoutesByTo {
   '/operations/delivery-charge': typeof ShellOperationsDeliveryChargeRoute
   '/orders/$orderId': typeof ShellOrdersOrderIdRoute
   '/reports/$reportId': typeof ShellReportsReportIdRoute
+  '/reports/due-received': typeof ShellReportsDueReceivedRoute
   '/stock/$section': typeof ShellStockSectionRoute
   '/support/help': typeof ShellSupportHelpRoute
   '/support/raise-ticket': typeof ShellSupportRaiseTicketRoute
@@ -364,6 +372,7 @@ export interface FileRoutesById {
   '/_shell/operations/delivery-charge': typeof ShellOperationsDeliveryChargeRoute
   '/_shell/orders/$orderId': typeof ShellOrdersOrderIdRoute
   '/_shell/reports/$reportId': typeof ShellReportsReportIdRoute
+  '/_shell/reports/due-received': typeof ShellReportsDueReceivedRoute
   '/_shell/stock/$section': typeof ShellStockSectionRoute
   '/_shell/support/help': typeof ShellSupportHelpRoute
   '/_shell/support/raise-ticket': typeof ShellSupportRaiseTicketRoute
@@ -407,6 +416,7 @@ export interface FileRouteTypes {
     | '/operations/delivery-charge'
     | '/orders/$orderId'
     | '/reports/$reportId'
+    | '/reports/due-received'
     | '/stock/$section'
     | '/support/help'
     | '/support/raise-ticket'
@@ -448,6 +458,7 @@ export interface FileRouteTypes {
     | '/operations/delivery-charge'
     | '/orders/$orderId'
     | '/reports/$reportId'
+    | '/reports/due-received'
     | '/stock/$section'
     | '/support/help'
     | '/support/raise-ticket'
@@ -490,6 +501,7 @@ export interface FileRouteTypes {
     | '/_shell/operations/delivery-charge'
     | '/_shell/orders/$orderId'
     | '/_shell/reports/$reportId'
+    | '/_shell/reports/due-received'
     | '/_shell/stock/$section'
     | '/_shell/support/help'
     | '/_shell/support/raise-ticket'
@@ -721,6 +733,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellReportsReportIdRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/reports/due-received': {
+      id: '/_shell/reports/due-received'
+      path: '/reports/due-received'
+      fullPath: '/reports/due-received'
+      preLoaderRoute: typeof ShellReportsDueReceivedRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/_shell/stock/': {
       id: '/_shell/stock/'
       path: '/stock'
@@ -821,6 +840,7 @@ interface ShellRouteChildren {
   ShellOperationsDeliveryChargeRoute: typeof ShellOperationsDeliveryChargeRoute
   ShellOrdersOrderIdRoute: typeof ShellOrdersOrderIdRoute
   ShellReportsReportIdRoute: typeof ShellReportsReportIdRoute
+  ShellReportsDueReceivedRoute: typeof ShellReportsDueReceivedRoute
   ShellStockSectionRoute: typeof ShellStockSectionRoute
   ShellSupportHelpRoute: typeof ShellSupportHelpRoute
   ShellSupportRaiseTicketRoute: typeof ShellSupportRaiseTicketRoute
@@ -858,6 +878,7 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellOperationsDeliveryChargeRoute: ShellOperationsDeliveryChargeRoute,
   ShellOrdersOrderIdRoute: ShellOrdersOrderIdRoute,
   ShellReportsReportIdRoute: ShellReportsReportIdRoute,
+  ShellReportsDueReceivedRoute: ShellReportsDueReceivedRoute,
   ShellStockSectionRoute: ShellStockSectionRoute,
   ShellSupportHelpRoute: ShellSupportHelpRoute,
   ShellSupportRaiseTicketRoute: ShellSupportRaiseTicketRoute,

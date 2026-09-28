@@ -181,13 +181,17 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // loadMenuFromServer (mock/store.tsx) Promise.all's these three alongside
     // getCategories - same "one unported call poisons the whole load" lesson
     // as /pickupOrder above, found the same way (driving the browser).
-    { method: "GET", test: (p) => p === "/menuShowWithVariants" },
+    // "?all=1" (the Menu screens' full list) is the same route.
+    { method: "GET", test: (p) => p.split("?")[0] === "/menuShowWithVariants" },
     { method: "GET", test: (p) => p === "/variant" },
     { method: "POST", test: (p) => p === "/variant" },
     { method: "PUT", test: (p) => p === "/variant" },
     { method: "GET", test: (p) => p === "/addon" },
     { method: "POST", test: (p) => p === "/addon" },
     { method: "PUT", test: (p) => p === "/addon" },
+    { method: "POST", test: (p) => p === "/menuSetActive" },
+    { method: "POST", test: (p) => p === "/variantRemove" },
+    { method: "POST", test: (p) => p === "/addonRemove" },
     { method: "GET", test: (p) => p === "/role" },
     { method: "GET", test: (p) => p === "/getUserAccess" },
     { method: "POST", test: (p) => p === "/adminOrder" },
@@ -219,6 +223,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // that one browser tab (setKotStatus, mock/store.tsx); this is the real
     // write + cross-device broadcast the Captain App's notifications need.
     { method: "POST", test: (p) => p === "/kotReady" },
+    { method: "POST", test: (p) => p === "/kdsStatus" },
     // Token display + manual reset (billerpe-local-exe/controller/tokenBoard.js).
     { method: "GET", test: (p) => p === "/tokenBoard" },
     { method: "POST", test: (p) => p === "/tokenBoard/status" },
@@ -251,6 +256,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // necessity, not a shortcut).
 
     { method: "GET", test: (p) => p === "/offlineHotelUser" },
+    { method: "GET", test: (p) => p === "/syncProblems" },
     { method: "POST", test: (p) => p === "/user" },
     { method: "POST", test: (p) => p === "/userUpdate" },
     { method: "GET", test: (p) => p === "/singleHotel" },
@@ -301,6 +307,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/stock/manualAveragePrice" },
     { method: "GET", test: (p) => p.startsWith("/report/order-aggregation") },
     { method: "GET", test: (p) => p.startsWith("/report/posCollection") },
+    { method: "GET", test: (p) => p.startsWith("/dueReceipts") },
     { method: "GET", test: (p) => p.startsWith("/report/itemTextReports") },
     { method: "GET", test: (p) => p.startsWith("/report/discountedReports") },
     { method: "GET", test: (p) => p.startsWith("/report/kotReport") },
@@ -1258,6 +1265,9 @@ export const hotelApi = {
       bill_with_kot?: string | null;
       bill_with_token?: string | null;
       saveBehave?: string | null;
+      /** the symbol printed ("₹", "$", "AED") and its code from lib/currency.ts's list */
+      currency?: string | null;
+      currency_code?: string | null;
     }>("/singleHotel"),
   // Same endpoint, now also carries the two "marketing" header/footer
   // line's actual text - those live on Hotel itself
@@ -1277,6 +1287,8 @@ export const hotelApi = {
     bill_with_kot?: "0" | "1" | "2" | "3";
     bill_with_token?: "0" | "1" | "2" | "3";
     saveBehave?: "save" | "pdf";
+    currency?: string;
+    currency_code?: string;
   }) =>
     apiPost<{ message?: string; /** false = saved on this PC, but the cloud (which renders the e-bill) could not be reached */ cloudUpdated?: boolean }>(
       "/updateInvoiceFormate",
@@ -1619,9 +1631,10 @@ export type RawVariant = {
 export type RawMenuItemVariant = {
   id: number;
   variants_name: string;
+  active?: boolean;
   hms_menu_variant_mst?: { variant_price: number };
 };
-export type RawMenuItemAddonGroup = { id: number };
+export type RawMenuItemAddonGroup = { id: number; active?: boolean };
 
 export type RawAddonOption = { id: number; addon_name: string; price: number; attributes: string };
 export type RawAddonGroup = {
@@ -1632,6 +1645,8 @@ export type RawAddonGroup = {
   singleSelection: boolean;
   hms_addon_msts?: RawAddonOption[];
   menu_catalog_id?: number;
+  // Inactive = listed on the Addons screen, not offered in billing.
+  active?: boolean;
 };
 
 type MenuItemPayload = {
@@ -1645,6 +1660,8 @@ type MenuItemPayload = {
   gst_type: "S" | "G";
   barcode_value: string;
   imageUrl?: string;
+  // The item form's Active switch (inactive = listed, not sold).
+  active?: boolean;
   // Always required by the controller - it does `addons.length` with no
   // optional-chaining, on both create and edit, so an omitted array throws
   // a 500 rather than being treated as "no addons".
@@ -1667,6 +1684,7 @@ type AddonGroupPayload = {
   singleSelection: boolean;
   addons: { addon_name: string; price: number; attributes: string }[];
   menu_catalog_id?: number;
+  active?: boolean;
 };
 
 export const menuApi = {
@@ -1679,7 +1697,10 @@ export const menuApi = {
   // so this returns every category regardless of item count. Confirmed
   // live: /catagories/all silently dropped a just-created empty category
   // that /catagories/%25 correctly returned.
-  getCategories: () => apiGet<{ catagories: RawMenuCategory[] }>("/catagories/%25"),
+  // ?all=1: inactive categories/items too (not deleted ones) - the Menu
+  // screens list them with an Inactive badge; every billing screen filters
+  // on `active` itself. Without it the exe returns only what can be sold.
+  getCategories: () => apiGet<{ catagories: RawMenuCategory[] }>("/catagories/%25?all=1"),
   getItems: () => apiGet<{ menu: RawMenuItem[] }>("/menuShow/all"),
   getItemsWithVariants: () =>
     apiGet<{
@@ -1687,7 +1708,7 @@ export const menuApi = {
         variantData?: RawMenuItemVariant[];
         addonDepartmentData?: RawMenuItemAddonGroup[];
       })[];
-    }>("/menuShowWithVariants"),
+    }>("/menuShowWithVariants?all=1"),
   getVariants: () => apiGet<{ variants: RawVariant[] }>("/variant"),
   getAddonGroups: () => apiGet<{ addons: RawAddonGroup[] }>("/addon"),
 
@@ -1723,13 +1744,20 @@ export const menuApi = {
     apiPost<{ message?: string }>("/catagories", {
       catagoriesFrom: { catagories_name: name, menu_catalog_id: menuCatalogId },
     }),
-  editCategory: (id: number, name: string, rank?: number, menuCatalogId?: number) =>
+  editCategory: (
+    id: number,
+    name: string,
+    rank?: number,
+    menuCatalogId?: number,
+    active?: boolean,
+  ) =>
     apiPost<{ message?: string }>("/catagoriesEdit", {
       editCatagoriesFrom: {
         id,
         menu_categ_nm: name,
         rank: rank ?? 0,
         menu_catalog_id: menuCatalogId,
+        ...(active === undefined ? {} : { active }),
       },
     }),
   removeCategories: (allId: number[]) =>
@@ -1739,6 +1767,12 @@ export const menuApi = {
   editItem: (params: MenuItemPayload & { id: number }) =>
     apiPost<{ message?: string }>("/menuEdit", params),
   removeItems: (allId: number[]) => apiPost<{ message?: string }>("/menuRemove", { allId }),
+  setItemsActive: (ids: number[], active: boolean) =>
+    apiPost<{ message?: string; changed: number }>("/menuSetActive", { ids, active }),
+  removeVariant: (id: number) =>
+    apiPost<{ message?: string; variants: RawVariant[] }>("/variantRemove", { id }),
+  removeAddonGroup: (id: number) =>
+    apiPost<{ message?: string; addons: RawAddonGroup[] }>("/addonRemove", { id }),
 
   createVariant: (variants_name: string, active: boolean, menuCatalogId?: number) =>
     apiPost<{ message?: string; variants: RawVariant[] }>("/variant", {
@@ -1821,6 +1855,11 @@ export type RawHotelUser = {
    * moved to another role or have its permissions changed
    * (billerpe-local-exe/helpers/ownerAccount.js). */
   is_owner?: boolean;
+  /** Whether a password / PIN is set - the values themselves never leave the exe. */
+  has_password?: boolean;
+  has_pin?: boolean;
+  /** Why the BillerPe server refused this login, null when it synced. */
+  sync_problem?: string | null;
 };
 
 export type RawPermissionOverrides = {
@@ -1838,7 +1877,8 @@ type UserPayload = {
   // update (updateUser only applies it when present - see editUser below).
   password?: string;
   pin?: string;
-  access_name: {
+  /** Left out for the owner's own account - their access is fixed. */
+  access_name?: {
     access: string;
     permissions: { read: boolean; create: boolean; edit: boolean; delete: boolean };
   }[];
@@ -2017,6 +2057,21 @@ export const orderApi = {
   markKotReady: (orderId: number, kotNumber: number) =>
     apiPost<{ message?: string }>("/kotReady", { order_id: orderId, kotNumber }),
 
+  /** Kitchen Display stage for a ticket's items or one item (billerpe-local-
+   * exe controller/kds.js) - kept on the exe, so every screen agrees. */
+  kdsStatus: (params: {
+    orderId: number;
+    kotNumber: number;
+    status: Exclude<KdsItemStage, "new">;
+    detailIds?: number[];
+  }) =>
+    apiPost<{ items: { detailId: number; status: KdsItemStage }[] }>("/kdsStatus", {
+      order_id: params.orderId,
+      kotNumber: params.kotNumber,
+      status: params.status,
+      ...(params.detailIds?.length ? { detailIds: params.detailIds } : {}),
+    }),
+
   // POST /adminOrder finalizes an order (Running -> table status "P",
   // Pending Settle) - but ONLY the dine-in path is safe to call from a
   // "generate bill, no payment info yet" step. Its order_id branch runs
@@ -2071,6 +2126,9 @@ export const orderApi = {
     gstin?: string;
     address?: string;
     cart: AdminOrderCart;
+    /** Pickup only: generate the bill but leave it unpaid ("Bill
+     * Generated"), to be settled later like a dine-in bill. */
+    bill_only?: boolean;
   }) => apiPost<{ message?: string; orderId?: number; bill_no?: string }>("/adminOrder", payload),
 
   // Dine-in "Settle" straight from an open table, in one call (billerpe-
@@ -2359,6 +2417,9 @@ export type RawOrderHeader = {
   packaging_override?: number | null;
   /** The cashier's manual service charge, null when none was entered. */
   service_override?: number | null;
+  /** When the order was opened - set once settling moved it to the settle
+   * time (billerpe-local-exe helpers/settleDate.js). */
+  opened_at?: string | null;
   packaging_charge?: number | null;
   totalAmount?: number | null;
   roundOff?: number | null;
@@ -2381,6 +2442,8 @@ export type RawOrderLine = {
   MenuId: number;
   kotNumber: number;
   hms_menu_mst?: { item_name?: string };
+  /** when the line was written - for a fired line, when its KOT round went out */
+  createdAt?: string;
 };
 
 export type RawOrderDetail = RawOrderHeader & {
@@ -2767,6 +2830,10 @@ export type RawCustomer = {
   name: string;
   address: string;
   gstin: string;
+  /** Settled bills for this mobile (billerpe-local-exe controller/customer.js). */
+  orders?: number;
+  /** The latest settled bill's time (ISO), null when none. */
+  lastVisit?: string | null;
 };
 
 // /customer/getAll (controller/user.js's getNumberSuggestion, reused under
@@ -2944,6 +3011,24 @@ export type RawLocalServerStatus =
 export const localServerApi = {
   getStatus: () => apiGetRaw<RawLocalServerStatus>("/localServerStatus"),
   forceSync: () => apiPostRaw<{ ok: boolean }>("/localServerForceSync", {}),
+  /** What this outlet could not get onto the BillerPe server, and why
+   * (billerpe-local-exe controller/syncProblems.js). */
+  getSyncProblems: () => apiGet<{ problems: RawSyncProblem[] }>("/syncProblems"),
+};
+
+/** An item's stage on the Kitchen Display, as the exe stores it. */
+export type KdsItemStage = "new" | "accepted" | "preparing" | "ready" | "served";
+
+export type RawSyncProblem = {
+  entity: string;
+  local_id: number;
+  /** "Staff: Ravi (9876543210)", "Bill: 42" */
+  label: string | null;
+  message: string | null;
+  /** false = retrying can't help; not sent again until the row is edited. */
+  retryable: boolean;
+  attempts: number;
+  last_failed_at: string | null;
 };
 
 // Direct silent printing from the EXE - generates the same PDF format as
@@ -4041,6 +4126,30 @@ export type RawDiscountedOrder = {
 // call site) - getAllDiscountedOrders below walks every page rather than
 // silently truncating to the first 10, capped at 50 pages (500 rows) as a
 // sanity bound.
+// One payment received against a Due bill (billerpe-local-exe
+// model/dueReceipt.js) - the "Due received" report.
+export type RawDueReceipt = {
+  id: number;
+  order_id: number;
+  bill_no: string | null;
+  bill_date: string | null;
+  customer_name: string | null;
+  customer_number: string | null;
+  amount: number;
+  mode: string;
+  received_by_name: string | null;
+  still_due: number;
+  received_at: string;
+  business_date: string;
+};
+
+export const dueReceiptApi = {
+  get: (startDate: string, endDate: string, mode?: string) =>
+    apiGet<{ receipts: RawDueReceipt[]; byMode: Record<string, number>; total: number; modes: string[] }>(
+      `/dueReceipts?startDate=${startDate}&endDate=${endDate}${mode && mode !== "all" ? `&mode=${encodeURIComponent(mode)}` : ""}`,
+    ),
+};
+
 export const reportApi = {
   dayWiseSales: (startDate: string, endDate: string) =>
     apiGet<{ periodData: RawDayWisePeriod[] }>(

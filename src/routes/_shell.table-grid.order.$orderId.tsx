@@ -1,5 +1,7 @@
 import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
+import { addonLabel } from "@/mock/format";
 import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
+import { byCategoryOrder, isSellable, sellableItem } from "@/lib/sellable";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { CustomerHistoryPanel } from "@/components/billing/customer-history";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -81,6 +83,7 @@ import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
 import { lineTotal, orderTotals, parseOrderAddons, serviceIsManual, useStore } from "@/mock/store";
 import type { MenuItem, OrderLine, PaymentSplit } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/table-grid/order/$orderId")({
   head: () => ({
@@ -263,6 +266,7 @@ function OrderCartPage() {
         const item = store.menuItems.find(
           (i) =>
             i.active &&
+            store.menuCategories.find((c) => c.id === i.categoryId)?.active !== false &&
             (i.id.toLowerCase() === code.toLowerCase() ||
               i.name.toLowerCase() === code.toLowerCase()),
         );
@@ -375,24 +379,53 @@ function OrderCartPage() {
     () => new Map(store.menuCategories.map((c) => [c.id, c])),
     [store.menuCategories],
   );
+  // In the order set under Menu > Categories (owner report, 2026-09-28: the
+  // biller ignored it) - the Captain App lists them the same way.
   const menuCategories = useMemo(
-    () => store.menuCategories.filter((c) => c.menuId === activeMenuId && c.active),
+    () =>
+      store.menuCategories
+        .filter((c) => c.menuId === activeMenuId && c.active)
+        .sort(byCategoryOrder),
     [store.menuCategories, activeMenuId],
   );
 
   const q = query.trim().toLowerCase();
   const items = useMemo(() => {
-    const onMenu = store.menuItems.filter(
-      (i) => i.active && categoriesById.get(i.categoryId)?.menuId === activeMenuId,
-    );
+    // Only what can be sold: active items in active categories, with their
+    // active variants/addon groups (lib/sellable.ts).
+    const onMenu = store.menuItems
+      .filter(
+        (i) =>
+          isSellable(i, categoriesById) && categoriesById.get(i.categoryId)?.menuId === activeMenuId,
+      )
+      .map((i) => sellableItem(i, store.addonGroups));
     // A search looks across the whole menu (a SKU from another category must
     // still be found) and ranks exact SKU matches first - lib/menuSearch.ts.
     if (q) return searchMenuItems(onMenu, q);
-    return onMenu.filter(
+    const shown = onMenu.filter(
       (i) =>
         categoryId === "all" || (categoryId === "fav" ? i.favourite : i.categoryId === categoryId),
     );
-  }, [store.menuItems, categoriesById, categoryId, activeMenuId, q]);
+    if (categoryId !== "all" && categoryId !== "fav") return shown;
+    // All / Favourites: category by category, in the categories' order.
+    const position = new Map(menuCategories.map((c, i) => [c.id, i]));
+    return shown
+      .map((item, i) => ({ item, i }))
+      .sort(
+        (a, b) =>
+          (position.get(a.item.categoryId) ?? 1e9) - (position.get(b.item.categoryId) ?? 1e9) ||
+          a.i - b.i,
+      )
+      .map(({ item }) => item);
+  }, [
+    store.menuItems,
+    store.addonGroups,
+    categoriesById,
+    menuCategories,
+    categoryId,
+    activeMenuId,
+    q,
+  ]);
 
   const kotGroups = useMemo(() => {
     const map = new Map<number, OrderLine[]>();
@@ -686,7 +719,7 @@ function OrderCartPage() {
                                   {l.variant ? `${l.variant} · ` : ""}
                                   {editable ? (
                                     <span className="num inline-flex items-center gap-0.5">
-                                      ₹
+                                      {cs()}
                                       <input
                                         defaultValue={l.price}
                                         key={`${l.id}-price-${l.price}`}
@@ -705,13 +738,13 @@ function OrderCartPage() {
                                       />
                                     </span>
                                   ) : (
-                                    <span className="num">₹{l.price}</span>
+                                    <span className="num">{cs()}{l.price}</span>
                                   )}
                                   {l.originTable ? ` · from ${l.originTable}` : ""}
                                 </p>
                                 {l.addons?.length ? (
                                   <p className="text-[11px] text-muted-foreground">
-                                    + {l.addons.map((a) => a.name).join(", ")}
+                                    + {l.addons.map(addonLabel).join(", ")}
                                   </p>
                                 ) : null}
                                 {l.note ? (
@@ -758,8 +791,10 @@ function OrderCartPage() {
                                   <Plus className="size-3.5" />
                                 </IconButton>
                                 {editable &&
-                                store.menuItems.find((m) => m.id === l.itemId)?.addonGroupIds
-                                  ?.length ? (
+                                (() => {
+                                  const mi = store.menuItems.find((m) => m.id === l.itemId);
+                                  return mi ? sellableItem(mi, store.addonGroups) : undefined;
+                                })()?.addonGroupIds?.length ? (
                                   <IconButton
                                     label="Edit addons"
                                     className="size-7"
@@ -1026,7 +1061,7 @@ function OrderCartPage() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label htmlFor="customPrice" required>
-                  Price (₹)
+                  Price ({cs()})
                 </Label>
                 <Input
                   {...bForm.fieldProps("customPrice")}
@@ -1072,7 +1107,7 @@ function OrderCartPage() {
                     label: "Price",
                     value: customPrice,
                     valid: (v) => typeof v === "number" && v > 0,
-                    message: "Price must be more than ₹0",
+                    message: `Price must be more than ${cs()}0`,
                   },
                 ]);
                 const routeProblem = customRouteProblem(customStations, customRoute);
@@ -1098,7 +1133,7 @@ function OrderCartPage() {
             </DialogDescription>
           </DialogHeader>
           <div>
-            <Label htmlFor="packagingOverride">Packaging (₹)</Label>
+            <Label htmlFor="packagingOverride">Packaging ({cs()})</Label>
             <Input
               {...bForm.fieldProps("packaging")}
               id="packagingOverride"
@@ -1144,7 +1179,7 @@ function OrderCartPage() {
             </DialogDescription>
           </DialogHeader>
           <div>
-            <Label htmlFor="serviceInput">Service charge (₹)</Label>
+            <Label htmlFor="serviceInput">Service charge ({cs()})</Label>
             <Input
               {...bForm.fieldProps("service")}
               id="serviceInput"
@@ -1213,7 +1248,7 @@ function OrderCartPage() {
                         variant === v.name ? "border-primary bg-primary-soft" : "border-border",
                       )}
                     >
-                      {v.name} · <span className="num">₹{v.price}</span>
+                      {v.name} · <span className="num">{cs()}{v.price}</span>
                     </button>
                   ))}
               </div>
@@ -1294,7 +1329,7 @@ function OrderCartPage() {
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="discountValue" required>
-              {discountType === "percent" ? "Percent off" : "Amount off (₹)"}
+              {discountType === "percent" ? "Percent off" : `Amount off (${cs()})`}
             </Label>
             <Input
               {...bForm.fieldProps("discount")}
@@ -1362,7 +1397,7 @@ function OrderCartPage() {
                 if (!valid) return;
                 store.applyDiscount(
                   order.id,
-                  discountType === "percent" ? `${discountValue}%` : `Flat ₹${discountValue}`,
+                  discountType === "percent" ? `${discountValue}%` : `Flat ${cs()}${discountValue}`,
                   discountType,
                   discountValue,
                 );
@@ -1414,7 +1449,7 @@ function OrderCartPage() {
                 <span>
                   {(order.payments ?? [])
                     .filter((p) => p.amount > 0)
-                    .map((p) => `${p.mode} ₹${p.amount}`)
+                    .map((p) => `${p.mode} ${cs()}${p.amount}`)
                     .join(" + ")}
                 </span>
               </div>
@@ -1444,7 +1479,7 @@ function OrderCartPage() {
                 const gap = Math.round((totals.grand - paid) * 100) / 100;
                 if (Math.abs(gap) > 0.009) {
                   toast.error("Payments must add up to the bill total", {
-                    description: `${gap > 0 ? "Remaining" : "Over by"} ₹${Math.abs(gap).toLocaleString("en-IN")}`,
+                    description: `${gap > 0 ? "Remaining" : "Over by"} ${cs()}${Math.abs(gap).toLocaleString(numLocale())}`,
                   });
                   return;
                 }

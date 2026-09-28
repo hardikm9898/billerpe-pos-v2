@@ -14,6 +14,7 @@ import {
 import { cn } from "@/lib/utils";
 import { STOCK_GROUPS, STOCK_SECTIONS } from "@/mock/stock-sections";
 import type { RawMaterial } from "@/mock/types";
+import { numLocale } from "@/lib/currency";
 
 /* ------------- module switcher ------------- */
 
@@ -195,8 +196,9 @@ export function HealthBar({ stock, reorder }: { stock: number; reorder: number }
 /* ------------- dual unit qty ------------- */
 
 export function fmtQty(n: number) {
-  const rounded = Math.round(n * 1000) / 1000;
-  return rounded.toLocaleString("en-IN", { maximumFractionDigits: 3 });
+  // `|| 0` turns -0 into 0: -0.5 g in kg rounds to -0, shown as "-0 kg".
+  const rounded = Math.round(n * 1000) / 1000 || 0;
+  return rounded.toLocaleString(numLocale(), { maximumFractionDigits: 3 });
 }
 
 /** Shows consumption stock plus its purchase-unit equivalent, e.g. "12 box · 120 kg". */

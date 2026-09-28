@@ -18,7 +18,8 @@ export function QtyInput({
   allowZero = true,
 }: {
   value: number;
-  onCommit: (qty: number) => void;
+  /** return false when this line kept its qty (e.g. the extra became a new line) - the box then shows the real qty again */
+  onCommit: (qty: number) => void | boolean;
   commitOnChange?: boolean;
   disabled?: boolean;
   className?: string;
@@ -49,10 +50,15 @@ export function QtyInput({
       setText(String(value));
       return;
     }
+    // Already reported (Enter, then the blur that follows) - leave the box
+    // as the first commit set it.
+    if (q === sent.current) return;
     setText(String(q));
-    if (q === value || q === sent.current) return;
+    if (q === value) return;
     sent.current = q;
-    onCommit(q);
+    // `sent` stays set: Enter commits and then blurs, and the blur must not
+    // apply the same qty a second time (focusing the box again clears it).
+    if (onCommit(q) === false) setText(String(value));
   };
 
   return (

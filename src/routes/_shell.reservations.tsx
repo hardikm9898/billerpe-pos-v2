@@ -28,6 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useStore } from "@/mock/store";
 import type { Reservation } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/reservations")({
   head: () => ({
@@ -329,7 +330,7 @@ function ReservationsPage() {
               className: "text-right",
               cell: (r) => (
                 <span className="num">
-                  ₹{r.totalAmount.toLocaleString("en-IN")}
+                  {cs()}{r.totalAmount.toLocaleString(numLocale())}
                   {r.advance ? (
                     <span className="text-muted-foreground"> ({r.advance} adv.)</span>
                   ) : null}

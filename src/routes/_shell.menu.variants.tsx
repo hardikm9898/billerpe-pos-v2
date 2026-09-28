@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -24,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { useStore } from "@/mock/store";
 import type { VariantOption } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/menu/variants")({
   head: () => ({
@@ -125,7 +127,9 @@ function MenuVariantsPage() {
         <DataTable
           rows={usage}
           keyFn={(v) => v.id}
-          onRowClick={(v) => setDraft({ id: v.id, name: v.name, price: v.price, menuId: v.menuId })}
+          onRowClick={(v) =>
+            setDraft({ id: v.id, name: v.name, price: v.price, menuId: v.menuId, active: v.active })
+          }
           columns={[
             {
               key: "name",
@@ -133,6 +137,20 @@ function MenuVariantsPage() {
               cell: (v) => <span className="font-medium">{v.name}</span>,
             },
             { key: "count", header: "Used by", cell: (v) => `${v.items.length} items` },
+            {
+              key: "active",
+              header: "Active",
+              // Inactive = still listed here and on its items, not offered in billing.
+              cell: (v) => (
+                <Switch
+                  checked={v.active !== false}
+                  disabled={!access.edit}
+                  aria-label={`${v.name} active`}
+                  onClick={(e) => e.stopPropagation()}
+                  onCheckedChange={(on) => store.setVariantActive(v.id, on)}
+                />
+              ),
+            },
             {
               key: "delete",
               header: "",
@@ -181,7 +199,7 @@ function MenuVariantsPage() {
                       key={v.id}
                       className="rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium"
                     >
-                      {v.name} · <span className="num">₹{v.price}</span>
+                      {v.name} · <span className="num">{cs()}{v.price}</span>
                     </span>
                   ))}
                 </div>

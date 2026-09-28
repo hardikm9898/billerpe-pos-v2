@@ -371,7 +371,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   // guard above then moves this user off a page they can no longer open.
   useEffect(() => {
     if (!store.sessionReady) return;
-    return connectChangeFeed({
+    // The menu edited on another screen (category order, prices, items):
+    // re-read once after a burst of saves, not once per save.
+    let menuTimer: ReturnType<typeof setTimeout> | null = null;
+    const disconnect = connectChangeFeed({
       onChange: () => {},
       // The exe prints every KOT itself (billerpe-local-exe/services/
       // kotAutoPrint.js), including rounds fired from a captain's phone or
@@ -392,6 +395,18 @@ export function AppShell({ children }: { children: ReactNode }) {
         // the cloud) must change this screen's bill previews at once - the
         // exe already bills with it.
         if (entities.includes("taxTypes")) void store.loadTaxRulesFromServer();
+        if (
+          entities.some(
+            (e) =>
+              e.startsWith("menu") ||
+              e === "variants" ||
+              e === "addons" ||
+              e === "addonDepartments",
+          )
+        ) {
+          if (menuTimer) clearTimeout(menuTimer);
+          menuTimer = setTimeout(() => void store.loadMenuFromServer(), 700);
+        }
         if (!entities.includes("permissions")) return;
         void Promise.all([
           store.syncCurrentUser(),
@@ -400,6 +415,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         ]);
       },
     });
+    return () => {
+      if (menuTimer) clearTimeout(menuTimer);
+      disconnect();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.sessionReady]);
 

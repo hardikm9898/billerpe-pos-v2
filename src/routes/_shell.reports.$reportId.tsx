@@ -30,6 +30,7 @@ import {
   resolveRange,
 } from "@/mock/format";
 import { useStore } from "@/mock/store";
+import { cs } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/reports/$reportId")({
   head: () => ({
@@ -329,7 +330,7 @@ function ReportDetailPage() {
         const r = store.cashSessions.map((c) => ({
           label: c.openedAt,
           a: c.status,
-          b: `₹${c.countedCash ?? c.movements.reduce((s, m) => s + m.amount, 0)}`,
+          b: `${cs()}${c.countedCash ?? c.movements.reduce((s, m) => s + m.amount, 0)}`,
           value: c.variance ?? 0,
         }));
         return {
@@ -362,7 +363,7 @@ function ReportDetailPage() {
         const r = store.rawMaterials.map((m) => ({
           label: m.name,
           a: `${m.stock} ${m.unit}`,
-          b: `₹${m.rate}`,
+          b: `${cs()}${m.rate}`,
           value: Math.round(m.stock * m.rate),
         }));
         return {

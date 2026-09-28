@@ -75,6 +75,12 @@ export interface User {
   /** THE owner's own login: locked - never turned off, never moved to
    * another role, permissions never changed (owner rule, 2026-09-22). */
   isOwner?: boolean;
+  /** A password / PIN is set (they can't be shown, only reset). */
+  hasPassword?: boolean;
+  hasPin?: boolean;
+  /** Why the BillerPe server refused this login (e.g. mobile registered with
+   * another restaurant) - shown as "Not synced". */
+  syncProblem?: string;
 }
 
 export type TableStatus = "Free" | "Hold" | "Running" | "Bill Generated" | "Reserved";
@@ -146,6 +152,8 @@ export interface VariantOption {
   price: number;
   /** which Menu's variant master this belongs to */
   menuId: string;
+  /** false = listed on the Menu screens, not offered in billing */
+  active?: boolean;
 }
 
 export interface AddonOption {
@@ -163,6 +171,8 @@ export interface AddonGroup {
   options: AddonOption[];
   /** which Menu this addon group belongs to */
   menuId: string;
+  /** false = listed on the Addons screen, not offered in billing */
+  active?: boolean;
 }
 
 export type MenuDietary = "Regular Veg" | "Jain" | "Non-Veg" | "Vegan" | "Swaminarayan";
@@ -182,6 +192,8 @@ export interface MenuItem {
   barcode?: string;
   description?: string;
   imageUrl?: string;
+  /** Goods item (e.g. packaged water at MRP): no tax on the bill - menu gst_type "G". */
+  goods?: boolean;
 }
 
 export type OrderType = "Dine In" | "Pickup";
@@ -222,6 +234,8 @@ export interface OrderLine {
   variant?: string;
   addons?: { name: string; price: number; qty: number; groupId?: string; addonId?: string }[];
   kotRound: number;
+  /** when this line's KOT round was sent (server copy only) - the KOT trail's time */
+  kotAt?: string;
   originTable?: string;
   note?: string;
   /** Added at billing, not on the menu ("Custom item"). */
@@ -303,6 +317,9 @@ export interface Order {
   paymentMode?: PaymentMode;
   businessDate: string;
   createdAt: string;
+  /** When the order was opened, if settling moved it to a later time (a
+   * settled order belongs to its settle time - owner, 2026-09-28). */
+  openedAt?: string;
   settledAt?: string;
   createdBy: string;
   mergedFrom?: string[];
@@ -352,7 +369,16 @@ export interface Kot {
   station: string;
   status: KotStatus;
   createdAt: string;
-  items: { name: string; qty: number; note?: string }[];
+  items: {
+    name: string;
+    qty: number;
+    note?: string;
+    /** The order line on the exe - per-item Ready/Served act on it. */
+    detailId?: number;
+    /** Where it is on the Kitchen Display, kept on the exe. The ticket's own
+     * status follows its items (kotStatusFromItems). */
+    stage?: "new" | "accepted" | "preparing" | "ready" | "served";
+  }[];
   /** uat-backend's hms_order_msts.id this round belongs to, paired with
    * kotNumber as the dedupe key against live /kds socket pushes for the
    * same round arriving from another device/tab - undefined for KOTs that
@@ -637,7 +663,9 @@ export interface Expense {
    * from `date` so existing `date === X` day-bucket comparisons elsewhere
    * keep working unchanged. */
   time: string;
-  mode: "Cash" | "Bank" | "UPI";
+  /** One of the outlet's payment modes (never Due); older entries may say
+   * "Bank". Only Cash moves the cash drawer. */
+  mode: string;
   note: string;
   createdBy: string;
   /** Real HotelUser id who recorded this, when known - lets the entries
@@ -778,6 +806,9 @@ export interface InvoiceFormat {
   fssaiNo: string;
   multiLanguage: boolean;
   upiId: string;
+  /** Outlet currency (lib/currency.ts): a code from the list ("INR" default, "OTHER" = own symbol) and the symbol printed. */
+  currencyCode: string;
+  currencySymbol: string;
   /** Full, ready-to-render URL for the "logo" header/footer line content -
    * built client-side from the hotel's own uploaded filename
    * (hotelApi.getSettings/uploadLogo), never stored as a filename here. */

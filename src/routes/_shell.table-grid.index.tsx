@@ -37,11 +37,13 @@ import { Label } from "@/components/ui/label";
 import { ApiError, qrOrderApi, type RawPendingQrOrder } from "@/lib/api";
 import { getQrInbox, removeFromQrInbox, subscribeQrInbox } from "@/lib/qrInbox";
 import { QrOrderCard, type QrItemDecision } from "@/components/qr/qr-order-card";
+import { TablePicker } from "@/components/billing/table-picker";
 import { connectChangeFeed } from "@/lib/changeFeedSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom } from "@/mock/format";
 import { orderTotals, useStore } from "@/mock/store";
 import type { Order, PaymentSplit, RestaurantTable, TableStatus } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
 
 export const Route = createFileRoute("/_shell/table-grid/")({
   head: () => ({
@@ -77,7 +79,13 @@ function TableGridPage() {
   const [statusFilter, setStatusFilter] = useState<"all" | TableStatus>("all");
   const [mergeFrom, setMergeFrom] = useState<RestaurantTable | null>(null);
   const [transferFrom, setTransferFrom] = useState<RestaurantTable | null>(null);
-  const [settleTable, setSettleTable] = useState<RestaurantTable | null>(null);
+  // The bill being settled from this screen - a billed table's, or a billed
+  // pickup order's from the Running pickup list.
+  const [settleTarget, setSettleTarget] = useState<{
+    orderId?: string;
+    name: string;
+    categoryId?: string;
+  } | null>(null);
   const [splits, setSplits] = useState<PaymentSplit[]>([]);
   const [tip, setTip] = useState(0);
   // Shared app-wide inbox (lib/qrInbox.ts, started by AppShell).
@@ -320,7 +328,7 @@ function TableGridPage() {
         <div className="mt-1 space-y-0.5">
           <p className="text-[11px] font-medium opacity-90">{t.status}</p>
           {order ? (
-            <p className="num text-xs font-semibold">₹{totals.grand.toLocaleString("en-IN")}</p>
+            <p className="num text-xs font-semibold">{cs()}{totals.grand.toLocaleString(numLocale())}</p>
           ) : null}
           {t.occupiedSince ? (
             <p className="text-[10px] opacity-75">{elapsedFrom(t.occupiedSince)}</p>
@@ -372,7 +380,7 @@ function TableGridPage() {
                         : store.resolveDefaultPaymentMode("Dine-in", t.categoryId);
                     setSplits([{ mode: defaultMode, amount: Math.max(0, balance) }]);
                     setTip(0);
-                    setSettleTable(t);
+                    setSettleTarget({ orderId: t.orderId, name: t.name, categoryId: t.categoryId });
                   }}
                   className={cn(actionIconCls, "bg-black/20 hover:bg-black/30")}
                 >
@@ -458,10 +466,10 @@ function TableGridPage() {
           {runningOrders.length ? (
             <ul className="space-y-1.5">
               {runningOrders.map((o) => (
-                <li key={o.id}>
+                <li key={o.id} className="rounded-lg hover:bg-surface-muted">
                   <button
                     onClick={() => openBiller(o.id)}
-                    className="flex w-full flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left hover:bg-surface-muted"
+                    className="flex w-full flex-col gap-0.5 rounded-lg px-2.5 py-2 text-left"
                   >
                     <span className="flex items-center justify-between gap-2">
                       <span className="truncate text-sm font-medium">{o.tableLabel}</span>
@@ -475,6 +483,28 @@ function TableGridPage() {
                       <Money value={orderTotals(o, store).grand} className="font-medium" />
                     </span>
                   </button>
+                  {/* A billed pickup is paid later, like a billed table
+                      (owner decision, 2026-09-28). */}
+                  {o.status === "Bill Generated" ? (
+                    <div className="flex justify-end gap-1 px-2.5 pb-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        data-pickup-settle={o.orderNo}
+                        onClick={() => {
+                          const paid = (o.payments ?? []).reduce((sum, p) => sum + p.amount, 0);
+                          const balance = Math.round((orderTotals(o, store).grand - paid) * 100) / 100;
+                          setSplits([
+                            { mode: store.resolveDefaultPaymentMode("Pickup"), amount: Math.max(0, balance) },
+                          ]);
+                          setTip(0);
+                          setSettleTarget({ orderId: o.id, name: `Pickup #${o.orderNo}` });
+                        }}
+                      >
+                        <Wallet className="size-3.5" /> Settle
+                      </Button>
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>
@@ -565,7 +595,7 @@ function TableGridPage() {
       </div>
 
       <Dialog open={!!mergeFrom} onOpenChange={(o) => !o && setMergeFrom(null)}>
-        <DialogContent>
+        <DialogContent className="max-h-[90vh] sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>
               Merge {mergeFrom ? `${categoryName(mergeFrom.categoryId)} · ${mergeFrom.name}` : ""}{" "}
@@ -575,36 +605,24 @@ function TableGridPage() {
               Items keep their origin table tag on the KOT and bill.
             </DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-3 gap-2">
-            {store.tables
-              .filter((t) => t.id !== mergeFrom?.id && t.status === "Running")
-              .map((t) => (
-                <Button
-                  key={t.id}
-                  variant="outline"
-                  className="h-auto flex-col gap-0.5 py-2"
-                  onClick={() => {
-                    if (!mergeFrom) return;
-                    store.mergeTables(mergeFrom.id, t.id);
-                    setMergeFrom(null);
-                  }}
-                >
-                  <span className="flex items-center gap-1.5">
-                    <Merge className="size-4" /> {t.name}
-                  </span>
-                  {/* which section the table is in - two tables can share a
-                      name across sections (owner report, 2026-09-22) */}
-                  <span className="text-[10px] font-normal text-muted-foreground">
-                    {categoryName(t.categoryId)}
-                  </span>
-                </Button>
-              ))}
-          </div>
+          {/* The section shows under each table - two tables can share a
+              name across sections (owner report, 2026-09-22). */}
+          <TablePicker
+            tables={store.tables.filter((t) => t.id !== mergeFrom?.id && t.status === "Running")}
+            sectionOf={(t) => categoryName(t.categoryId)}
+            icon={<Merge className="size-4" />}
+            emptyText="No other running table to merge."
+            onPick={(t) => {
+              if (!mergeFrom) return;
+              store.mergeTables(mergeFrom.id, t.id);
+              setMergeFrom(null);
+            }}
+          />
         </DialogContent>
       </Dialog>
 
       <Dialog open={!!transferFrom} onOpenChange={(o) => !o && setTransferFrom(null)}>
-        <DialogContent>
+        <DialogContent className="max-h-[90vh] sm:max-w-xl">
           <DialogHeader>
             <DialogTitle>
               Transfer{" "}
@@ -615,36 +633,26 @@ function TableGridPage() {
             </DialogTitle>
             <DialogDescription>Only free tables can receive a transfer.</DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-3 gap-2">
-            {freeTables.map((t) => (
-              <Button
-                key={t.id}
-                variant="outline"
-                className="h-auto flex-col gap-0.5 py-2"
-                onClick={() => {
-                  if (!transferFrom?.orderId) return;
-                  store.transferTable(transferFrom.orderId, t.id);
-                  setTransferFrom(null);
-                }}
-              >
-                <span className="flex items-center gap-1.5">
-                  <ArrowLeftRight className="size-4" /> {t.name}
-                </span>
-                <span className="text-[10px] font-normal text-muted-foreground">
-                  {categoryName(t.categoryId)}
-                </span>
-              </Button>
-            ))}
-          </div>
+          <TablePicker
+            tables={freeTables}
+            sectionOf={(t) => categoryName(t.categoryId)}
+            icon={<ArrowLeftRight className="size-4" />}
+            emptyText="No free tables right now."
+            onPick={(t) => {
+              if (!transferFrom?.orderId) return;
+              store.transferTable(transferFrom.orderId, t.id);
+              setTransferFrom(null);
+            }}
+          />
         </DialogContent>
       </Dialog>
 
-      <Dialog open={!!settleTable} onOpenChange={(o) => !o && setSettleTable(null)}>
+      <Dialog open={!!settleTarget} onOpenChange={(o) => !o && setSettleTarget(null)}>
         <DialogContent>
-          {settleTable
+          {settleTarget
             ? (() => {
-                const order = settleTable.orderId
-                  ? store.orderById(settleTable.orderId)
+                const order = settleTarget.orderId
+                  ? store.orderById(settleTarget.orderId)
                   : undefined;
                 const totals = orderTotals(order, store);
                 const paid = (order?.payments ?? []).reduce((s, p) => s + p.amount, 0);
@@ -658,7 +666,7 @@ function TableGridPage() {
                 return (
                   <>
                     <DialogHeader>
-                      <DialogTitle>Settle bill · {settleTable.name}</DialogTitle>
+                      <DialogTitle>Settle bill · {settleTarget.name}</DialogTitle>
                       <DialogDescription>
                         Single or split payment. Only cash may be more than the bill - the extra is
                         shown as change to return.
@@ -669,7 +677,7 @@ function TableGridPage() {
                       onChange={setSplits}
                       total={balance}
                       orderType={order?.type === "Pickup" ? "Pickup" : "Dine-in"}
-                      tableCategoryId={settleTable.categoryId}
+                      tableCategoryId={settleTarget.categoryId}
                     />
                     {order?.type === "Dine In" ? (
                       <div className="space-y-1.5">
@@ -689,7 +697,7 @@ function TableGridPage() {
                         onClick={() => {
                           if (!order) return;
                           store.settleOrder(order.id, splits, tip || undefined);
-                          setSettleTable(null);
+                          setSettleTarget(null);
                         }}
                       >
                         <Wallet className="size-4" /> Confirm settlement

@@ -26,6 +26,8 @@ export type EngineLine = {
   price: number;
   addons?: EngineAddon[] | undefined;
   menuId?: string | number | undefined;
+  /** A Goods item (menu gst_type "G"): carries no tax at all. */
+  noTax?: boolean | undefined;
 };
 export type EngineDiscount = { type: "fix" | "pr"; value: number } | null | undefined;
 export type EngineChargeRule = {
@@ -204,8 +206,13 @@ export function computeBill(input: EngineInput): EngineTotals {
   const delivery = 0;
 
   const net = Math.max(0, subtotal - discount);
+  // Goods items carry no tax (owner decision 2026-09-28) - only the taxable
+  // lines' share of the (discounted) item total is taxed. Same as the exe.
+  const taxableLineTotals = lines.map((l, i) => (l.noTax ? 0 : (lineTotals[i] ?? 0)));
+  const taxableSubtotal = r2(taxableLineTotals.reduce((s, v) => s + v, 0));
+  const taxableNet = subtotal > 0 ? r2(net * (taxableSubtotal / subtotal)) : 0;
   const taxBase =
-    net +
+    taxableNet +
     (config.serviceCharge?.taxOnCharge ? service : 0) +
     (config.packagingRule?.taxOnCharge ? packaging : 0);
 
@@ -223,17 +230,20 @@ export function computeBill(input: EngineInput): EngineTotals {
       const menuIds = (t.menuIds ?? []).map(String);
       let base = taxBase;
       if (menuIds.length) {
-        if (subtotal <= 0) continue;
+        if (taxableSubtotal <= 0) continue;
         const matching = lines.reduce(
-          (s, l, i) => s + (menuIds.includes(String(l.menuId)) ? (lineTotals[i] ?? 0) : 0),
+          (s, l, i) => s + (menuIds.includes(String(l.menuId)) ? (taxableLineTotals[i] ?? 0) : 0),
           0,
         );
         if (matching <= 0) continue;
-        base = r2(taxBase * (matching / subtotal));
+        base = r2(taxBase * (matching / taxableSubtotal));
       }
       const isPercent = t.type !== "fix";
       const rate = Number(t.rate) || 0;
-      const amount = subtotal <= 0 ? 0 : isPercent ? r2((base * rate) / 100) : r2(rate);
+      // An order of only Goods items (and no taxed charge) has nothing to tax.
+      const nothingTaxable = taxableSubtotal <= 0 && base <= 0;
+      const amount =
+        subtotal <= 0 || nothingTaxable ? 0 : isPercent ? r2((base * rate) / 100) : r2(rate);
       taxLines.push({
         id: t.id,
         name: t.name,

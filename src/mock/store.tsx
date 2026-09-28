@@ -1,4 +1,5 @@
 import { roundQty } from "@/lib/qty";
+import { itemShortCode } from "@/lib/menuSearch";
 import {
   createContext,
   useCallback,
@@ -15,7 +16,7 @@ import { splitCheck } from "@/lib/payments";
 import QRCode from "qrcode";
 
 import { OFFLINE_SETTINGS, ROLE_PERMISSION_DEFAULTS, ROLE_SPECIAL_DEFAULTS } from "./data";
-import { nowStamp, realToday, isoToDMY, dmyToIso } from "./format";
+import { addonLabel, nowStamp, realToday, isoToDMY, dmyToIso } from "./format";
 import {
   ApiError,
   API_BASE_URL,
@@ -104,11 +105,12 @@ import {
   type RawVariant,
   type RawAddonGroup,
   type RawHotelUser,
+  type AdminOrderCart,
   setStoredAuthToken,
   setPermissionChecker,
 } from "@/lib/api";
 import { discountProblem } from "@/lib/formCheck";
-import type { KdsTicketPayload } from "@/lib/kdsSocket";
+import type { KdsItemStatusPayload, KdsTicketPayload } from "@/lib/kdsSocket";
 import type {
   AddonGroup,
   AppNotification,
@@ -144,6 +146,7 @@ import type {
   Expense,
   ExpenseHead,
   Kot,
+  KotStatus,
   Menu,
   MenuCategory,
   MenuDietary,
@@ -179,6 +182,7 @@ import type {
   VariantOption,
   Wastage,
 } from "./types";
+import { cs, numLocale, setCurrency } from "@/lib/currency";
 
 let seq = 1000;
 const uid = (p: string) => `${p}-${++seq}`;
@@ -356,6 +360,8 @@ const EMPTY_INVOICE_FORMAT: State["invoiceFormat"] = {
   fssaiNo: "",
   multiLanguage: false,
   upiId: "",
+  currencyCode: "INR",
+  currencySymbol: "₹",
   header: [
     { id: "h1", content: "logo", fontSize: 14 },
     { id: "h2", content: "outlet-name", fontSize: 16 },
@@ -529,7 +535,7 @@ export type BillSettings = Pick<
   tables?: Pick<RestaurantTable, "id" | "categoryId">[];
   /** Optional - lets tax rules scoped to menu categories resolve which
    * lines they apply to. The whole State satisfies this too. */
-  menuItems?: Pick<MenuItem, "id" | "categoryId">[];
+  menuItems?: Pick<MenuItem, "id" | "categoryId" | "goods">[];
 };
 
 const OPS_TYPE_TO_ENGINE: Record<OpsOrderType, string> = { "Dine-in": "dinin", Pickup: "pickup" };
@@ -600,6 +606,8 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
         price: l.price,
         addons: (l.addons ?? []).map((a) => ({ price: a.price, qty: a.qty })),
         menuId: l.itemId,
+        // Goods items carry no tax (billEngine noTax) - same rule as the exe.
+        noTax: !!settings.menuItems?.find((m) => m.id === l.itemId)?.goods,
       }))
     : [{ qty: 1, price: order.fallbackTotal ?? 0 }];
   const discount = order.discount
@@ -802,7 +810,8 @@ interface Ctx extends State {
   /** Returns false if blocked by the already-sent-to-kitchen permission
    * guard (see removeLine's own comment - same reasoning applies here). */
   changeQty: (orderId: string, lineId: string, delta: number, module: BillingModule) => boolean;
-  setLineQty: (orderId: string, lineId: string, qty: number, module: BillingModule) => void;
+  /** false when this line's own qty did not change (refused, or the extra went on a new line) */
+  setLineQty: (orderId: string, lineId: string, qty: number, module: BillingModule) => boolean;
   setLineNote: (orderId: string, lineId: string, note: string) => void;
   setLinePrice: (orderId: string, lineId: string, price: number) => void;
   setLineAddons: (
@@ -892,8 +901,12 @@ interface Ctx extends State {
    * remove it from the actual bill (KDS state is its own local board, not
    * tied to real order/billing state - see setKotStatus's own comment). */
   rejectKot: (kotId: string, reason?: string) => void;
+  /** Ready / Served for ONE item of a ticket (the ticket follows its items). */
+  setKdsItemStage: (kotId: string, detailId: number, stage: "ready" | "served") => void;
   receiveKdsTicket: (payload: KdsTicketPayload) => void;
   receiveKdsOrderComplete: (backendOrderId: number) => void;
+  /** A stage change made on any kitchen screen (lib/kdsSocket.ts). */
+  receiveKdsItemStatus: (payload: KdsItemStatusPayload) => void;
   /* reservations */
   loadReservationsFromServer: () => Promise<void>;
   createReservation: (r: {
@@ -967,6 +980,9 @@ interface Ctx extends State {
   removeVariant: (id: string) => void;
   upsertAddonGroup: (g: AddonGroup) => Promise<boolean>;
   removeAddonGroup: (id: string) => void;
+  setVariantActive: (id: string, active: boolean) => void;
+  setAddonGroupActive: (id: string, active: boolean) => void;
+  setMenuCategoryActive: (id: string, active: boolean) => void;
   loadMenuFromServer: () => Promise<void>;
   upsertTable: (t: RestaurantTable) => Promise<boolean>;
   removeTable: (id: string) => void;
@@ -1558,6 +1574,7 @@ function mapRawMenuItem(
     barcode: m.barcode_value || undefined,
     description: m.description || undefined,
     imageUrl: m.foodImage || undefined,
+    goods: m.gst_type === "G",
     menuId,
     // Real per-item price lives on the junction row
     // (hms_menu_variant_mst.variant_price), not on the Variants row -
@@ -1568,6 +1585,7 @@ function mapRawMenuItem(
       name: v.variants_name,
       price: v.hms_menu_variant_mst?.variant_price ?? 0,
       menuId,
+      active: v.active !== false,
     })),
     addonGroupIds: m.addonDepartmentData?.map((g) => String(g.id)),
   } as MenuItem;
@@ -1584,12 +1602,14 @@ function mapRawVariant(v: RawVariant, fallbackMenuId: string): VariantOption {
     name: v.variants_name,
     price: 0,
     menuId: v.menu_catalog_id != null ? String(v.menu_catalog_id) : fallbackMenuId,
+    active: v.active !== false,
   };
 }
 
 function mapRawAddonGroup(g: RawAddonGroup, fallbackMenuId: string): AddonGroup {
   return {
     id: String(g.id),
+    active: g.active !== false,
     name: g.department_name,
     min: g.minimum_allowed_addon,
     max: g.maximum_allowed_addon,
@@ -1607,11 +1627,44 @@ function mapRawAddonGroup(g: RawAddonGroup, fallbackMenuId: string): AddonGroup 
 // (menuSchema: .alphanum().required()) but the current Items form's SKU
 // field is optional and free-text. Derives one when missing/invalid rather
 // than blocking save on a field the UI doesn't make mandatory.
-function toShortCode(sku: string | undefined, name: string, seed: string): string {
-  const fromSku = (sku ?? "").replace(/[^a-zA-Z0-9]/g, "");
-  if (fromSku) return fromSku.slice(0, 20);
-  const fromName = name.replace(/[^a-zA-Z0-9]/g, "");
-  return (fromName || `ITEM${seed}`).slice(0, 20);
+// Short code as the exe stores it: letters and numbers, upper-case, up to 10.
+// It is required (owner decision, 2026-09-28) - it used to be made up from
+// the item name when left empty, so many items shared one code.
+export function toShortCode(sku: string | undefined): string {
+  return (sku ?? "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase().slice(0, 10);
+}
+
+// POST /menu and /menuEdit body for one item - the item form and the CSV
+// import both save through this. Variant rows carry the item editor's own
+// draft id, not the Variants master id, so each is resolved by name among
+// THIS menu's variants (a second menu may have its own "Half"). Joi rejects
+// a variant_price <= 0, so a row left at 0 is dropped rather than failing
+// the whole save.
+function menuItemPayload(item: MenuItem, variantMasters: VariantOption[], menuId: string | undefined) {
+  const variants = (item.variants ?? [])
+    .map((v) => {
+      const masterId = variantMasters.find(
+        (m) => m.name === v.name && (!menuId || m.menuId === menuId),
+      )?.id;
+      return masterId && v.price > 0 ? { id: Number(masterId), variant_price: v.price } : null;
+    })
+    .filter((v): v is { id: number; variant_price: number } => v !== null);
+  return {
+    item_name: item.name,
+    menu_categ_id: Number(item.categoryId),
+    price: item.price,
+    shortCode: toShortCode(item.sku),
+    favorite: item.favourite,
+    // "G" = Goods item: no tax on the bill (owner decision 2026-09-28); "S" otherwise.
+    gst_type: item.goods ? ("G" as const) : ("S" as const),
+    barcode_value: item.barcode ?? "",
+    active: item.active,
+    addons: (item.addonGroupIds ?? []).map(Number),
+    variants,
+    ...(item.dietary ? { sub_categories: item.dietary } : {}),
+    ...(item.description ? { description: item.description } : {}),
+    ...(item.imageUrl ? { imageUrl: item.imageUrl } : {}),
+  };
 }
 
 // Stored by the exe (POST /userPermissionOverrides) as JSON; SQLite can hand
@@ -1643,6 +1696,9 @@ function mapRawUser(u: RawHotelUser): User {
     // new one.
     pin: "",
     ...(u.is_owner ? { isOwner: true } : {}),
+    hasPassword: Boolean(u.has_password),
+    hasPin: Boolean(u.has_pin),
+    ...(u.sync_problem ? { syncProblem: u.sync_problem } : {}),
     permissionOverrides: parseOverrides(u.permission_overrides),
     // permissionOverrides deliberately isn't seeded from the real
     // backend's own hms_user_accesses here (used to be, via
@@ -1687,15 +1743,45 @@ function mapRawDueOrder(o: RawDueOrder): DueBill {
   };
 }
 
+// ---- Kitchen Display stages (billerpe-local-exe controller/kds.js) ---------
+type KdsStage = NonNullable<Kot["items"][number]["stage"]>;
+const KDS_STAGES: KdsStage[] = ["new", "accepted", "preparing", "ready", "served"];
+const stageRank = (s?: KdsStage) => KDS_STAGES.indexOf(s ?? "new");
+const STAGE_FOR_STATUS: Partial<Record<KotStatus, Exclude<KdsStage, "new">>> = {
+  Accepted: "accepted",
+  Preparing: "preparing",
+  Ready: "ready",
+  Served: "served",
+};
+/** A ticket's lane follows its items (owner decision, 2026-09-28): all
+ * served -> Served (off the board), all ready -> Ready, any cooking ->
+ * Preparing, any accepted -> Accepted, else New. Items the exe hasn't
+ * described yet (a round this screen just fired) keep `fallback`. */
+function kotStatusFromItems(items: Kot["items"], fallback: KotStatus): KotStatus {
+  if (!items.length || items.some((i) => !i.stage)) return fallback;
+  const ranks = items.map((i) => stageRank(i.stage));
+  if (ranks.every((r) => r >= 4)) return "Served";
+  if (ranks.every((r) => r >= 3)) return "Ready";
+  if (ranks.some((r) => r >= 2)) return "Preparing";
+  if (ranks.some((r) => r >= 1)) return "Accepted";
+  return "Pending";
+}
+
+/** ISO time -> "DD/MM/YYYY" in this device's local date. */
+function isoToDmy(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
+}
+
 function mapRawCustomer(c: RawCustomer, previousActive?: boolean): Customer {
   return {
     id: String(c.id),
     name: c.name || "",
     phone: c.number,
-    // No order-count or last-visit date in this endpoint's response (see
-    // customerApi's own comment) - nothing to load these from.
-    orders: 0,
-    lastVisit: "—",
+    // From the exe: settled bills for this mobile and the latest one's date.
+    orders: Number(c.orders) || 0,
+    lastVisit: c.lastVisit ? isoToDmy(c.lastVisit) : "—",
     gstin: c.gstin || undefined,
     address: c.address || undefined,
     // "Autofill" has no backend equivalent (no active/enabled column on
@@ -1845,7 +1931,12 @@ function mapRecipeDetail(
   const toLines = (ings: RawRecipeDetail["variants"][number]["raw_materials"]): RecipeLine[] =>
     ings.map((ing) => ({
       type: ing.ingredient_type === "raw_material" ? "raw" : "semi",
-      refId: String(ing.raw_material_id ?? ing.semi_finished_item_id),
+      // A semi-finished line points at the item's store id ("sf-<id>",
+      // mapRawSFI) - a bare "12" matched nothing, so the line showed blank.
+      refId:
+        ing.ingredient_type === "raw_material"
+          ? String(ing.raw_material_id)
+          : `sf-${ing.semi_finished_item_id}`,
       qty: ing.consumption_qty,
     }));
   const base = detail.variants.find((v) => v.variant_id === null);
@@ -1917,7 +2008,8 @@ function mapRawExpenseEntry(e: RawExpenseEntry): Expense {
     amount: Number(e.amount),
     date: `${d}/${m}/${y}`,
     time: `${`${hh}`.padStart(2, "0")}:${mm} ${ap}`,
-    mode: e.paymentMode === "Cash" || e.paymentMode === "UPI" ? e.paymentMode : "Bank",
+    // As recorded - any mode but Cash/UPI used to show as "Bank".
+    mode: e.paymentMode || "Cash",
     note: e.reason,
     ...(e.purchase_payment_id ? { fromPurchase: true } : {}),
     // Was write-only before (user_id was saved but this endpoint never
@@ -2091,6 +2183,7 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       // settled order shouldn't have any kotNumber-0 lines in practice,
       // but UNSENT_ROUND is the correct fallback here too if it ever did.
       kotRound: l.kotNumber || UNSENT_ROUND,
+      ...(l.kotNumber && l.createdAt ? { kotAt: l.createdAt } : {}),
     };
   });
   const payments: PaymentSplit[] = (
@@ -2121,9 +2214,18 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
     customerAddress: detail.hms_user_master?.address || undefined,
     customerGstin: detail.hms_user_master?.gstin || undefined,
     discount: mapRawDiscount(detail),
+    // The manual charges travel with the order, so editing a settled bill
+    // starts from them: without these the edit preview left out a typed
+    // service charge (payment then mismatched the exe's total) and a biller
+    // save cleared a typed packaging charge.
+    ...(detail.packaging_override != null ? { packagingCharge: detail.packaging_override } : {}),
+    ...(detail.service_override != null ? { serviceCharge: detail.service_override } : {}),
     payments,
     businessDate,
     createdAt: formatOrderTimestamp(detail.createdAt, businessDate),
+    ...(detail.opened_at
+      ? { openedAt: formatOrderTimestamp(detail.opened_at, isoToDmy(detail.opened_at)) }
+      : {}),
     settledAt: formatOrderTimestamp(detail.updatedAt, businessDate),
     createdBy: staffName,
     itemised: lines.length > 0,
@@ -2340,6 +2442,7 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
       // from a real fired round 1, and once a real round 1 existed too,
       // held items merged straight into it as if already sent.
       kotRound: l.kotNumber || UNSENT_ROUND,
+      ...(l.kotNumber && l.createdAt ? { kotAt: l.createdAt } : {}),
     };
   });
   const status: Order["status"] =
@@ -3143,6 +3246,48 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return out;
   };
 
+  // The FULL item list of a pickup order as /adminOrder takes it (it
+  // destroys and rebuilds the order's lines from this on every call - see
+  // adminOrder's comment in lib/api.ts). Shared by generating a pickup bill
+  // and settling one, so both put exactly the same bill on the exe.
+  const pickupAdminCart = (target: Order): AdminOrderCart => {
+    const billSettings: BillSettings = {
+      serviceCharge: s.serviceCharge,
+      deliveryChargeRule: s.deliveryChargeRule,
+      packagingChargeRule: s.packagingChargeRule,
+      taxRules: s.taxRules,
+      invoiceFormat: s.invoiceFormat,
+      tables: s.tables,
+      menuItems: s.menuItems,
+    };
+    const totals = orderTotals(target, billSettings);
+    const allMenuItems = target.lines.map((l) => {
+      const mi = s.menuItems.find((m) => m.id === l.itemId);
+      return {
+        ...exeLineIdentity(l),
+        qty: l.qty,
+        price: l.price,
+        discount: 0,
+        addons: buildAddonsPayload(l.addons),
+        comment: l.note ?? "",
+        menu_categ_id: mi ? Number(mi.categoryId) : 0,
+        variantData: variantPayload(l, mi),
+      };
+    });
+    return {
+      items: [{ status: "H", menuItems: allMenuItems }],
+      gst: totals.tax,
+      totalDiscount: totals.discount,
+      grandAmount: totals.grand,
+      myAmount: totals.subtotal,
+      service_charger: totals.service,
+      delivery_charge: totals.delivery,
+      packaging_charge: totals.packaging,
+      ...discountPayload(target, totals),
+      taxes: buildCartTaxes(totals, s.taxRules),
+    };
+  };
+
   // Shared by printBill and generateBill's print option - takes backendId
   // as an explicit argument rather than re-deriving it from `s`, since `s`
   // is this render's immutable snapshot and won't reflect a patch() that
@@ -3283,7 +3428,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ],
             hotel.invoiceFormateBottomText ? [`<p>${hotel.invoiceFormateBottomText}</p>`] : [],
           ];
+      // The exe prints each dish once, merging identical lines across KOT
+      // rounds (billerpe-local-exe helpers/billItems.js) - MenuId tells two
+      // dishes that share a name apart.
       const items = o.lines.map((l) => ({
+        ...(Number(l.itemId) > 0 ? { MenuId: Number(l.itemId) } : {}),
         item_name: l.name,
         qty: l.qty,
         price: l.price,
@@ -3559,6 +3708,62 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }));
   };
 
+
+  // One more of a line that already went to the kitchen (or is on a generated
+  // bill): a new unsent line of the same dish, variant and addons - exactly
+  // what clicking the dish on the menu again does, joining an identical
+  // unsent line if there is one. The price is the menu's current one, like a
+  // click; a custom item (not on the menu) keeps its own.
+  const addSentLineAgain = (order: Order, line: OrderLine, qty: number) => {
+    const mi = s.menuItems.find((m) => m.id === line.itemId);
+    const price = mi
+      ? line.variant
+        ? (mi.variants?.find((v) => v.name === line.variant)?.price ?? mi.price)
+        : mi.price
+      : line.price;
+    const sameDish = (l: OrderLine) =>
+      l.kotRound === UNSENT_ROUND &&
+      l.itemId === line.itemId &&
+      l.name === line.name &&
+      !l.note &&
+      (l.variant ?? "") === (line.variant ?? "") &&
+      JSON.stringify(l.addons ?? []) === JSON.stringify(line.addons ?? []);
+    patch((p) => ({
+      ...p,
+      orders: p.orders.map((o) => {
+        if (o.id !== order.id) return o;
+        const twin = o.lines.find(sameDish);
+        if (twin) {
+          return {
+            ...o,
+            lines: o.lines.map((l) => (l.id === twin.id ? { ...l, qty: roundQty(l.qty + qty) } : l)),
+          };
+        }
+        const fresh: OrderLine = {
+          id: uid("l"),
+          itemId: line.itemId,
+          name: line.name,
+          qty: roundQty(qty),
+          price,
+          kotRound: UNSENT_ROUND,
+          ...(line.variant ? { variant: line.variant } : {}),
+          ...(line.addons?.length ? { addons: line.addons } : {}),
+          ...(line.custom ? { custom: true } : {}),
+          ...(line.routePrinterId ? { routePrinterId: line.routePrinterId } : {}),
+          ...(line.routeKitchenId ? { routeKitchenId: line.routeKitchenId } : {}),
+        };
+        return { ...o, lines: [fresh, ...o.lines] };
+      }),
+    }));
+    log(
+      "Item Added",
+      `Order #${order.orderNo}`,
+      "—",
+      `${roundQty(qty)}× ${line.name}${line.variant ? ` (${line.variant})` : ""} (new line - ${line.name} was already sent)`,
+      undefined,
+      { id: order.id, backendId: order.backendId },
+    );
+  };
   const value: Ctx = {
     ...s,
     currentUser,
@@ -3856,15 +4061,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     changeQty: (orderId, lineId, delta, module) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
-      // Dropping an already-sent line's qty to zero removes it just like
-      // removeLine does - same delete permission applies, or a Cashier-role
-      // user could bypass the Trash-button block just by using the stepper.
+      // More of a dish that already went to the kitchen (or is on a
+      // generated bill) is a NEW line, as if clicked on the menu again - it
+      // used to raise the sent line's qty (owner decision, 2026-09-28).
+      if (order && line && delta > 0 && Number.isFinite(line.kotRound)) {
+        addSentLineAgain(order, line, delta);
+        return true;
+      }
+      // Reducing (or zeroing) a line the kitchen already has needs "Edit or
+      // remove an item after its KOT has been sent" - the owner always has
+      // it, everyone else only if granted (owner decision, 2026-09-28; it
+      // used to need the Billing delete right, and only at zero).
       if (
         line &&
         order &&
-        roundQty(line.qty + delta) <= 0 &&
-        line.kotRound <= order.kotRounds &&
-        guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
+        delta < 0 &&
+        Number.isFinite(line.kotRound) &&
+        guardForbiddenSpecial("orders.editAfterKot", "You don't have permission to edit or remove an item after its KOT is sent. Ask the owner to allow it in Manage Users.")
       ) {
         return false;
       }
@@ -3901,14 +4114,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setLineQty: (orderId, lineId, qty, module) => {
       const order = s.orders.find((o) => o.id === orderId);
       const line = order?.lines.find((l) => l.id === lineId);
+      // Typed more than a sent line had: the difference is a new line (same
+      // rule as the + button above).
+      if (order && line && Number.isFinite(line.kotRound) && roundQty(qty) > line.qty) {
+        addSentLineAgain(order, line, roundQty(qty - line.qty));
+        return false;
+      }
       if (
         line &&
         order &&
-        Math.max(0, roundQty(qty)) <= 0 &&
-        line.kotRound <= order.kotRounds &&
-        guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
+        roundQty(qty) < line.qty &&
+        Number.isFinite(line.kotRound) &&
+        guardForbiddenSpecial("orders.editAfterKot", "You don't have permission to edit or remove an item after its KOT is sent. Ask the owner to allow it in Manage Users.")
       ) {
-        return;
+        return false;
       }
       patch((p) => ({
         ...p,
@@ -3939,6 +4158,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // Hold/Running with zero items blocking the table for everyone else.
         if (newQty <= 0 && order.lines.length === 1) freeEmptyDraft(order);
       }
+      return true;
     },
 
     // Purely local, same as setLineQty/setLineNote - only meant to be
@@ -3960,7 +4180,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       if (order && line) {
-        log("Price Changed", `Order #${order.orderNo}`, `${line.name} ₹${line.price}`, `₹${next}`, undefined, { id: order.id, backendId: order.backendId });
+        log("Price Changed", `Order #${order.orderNo}`, `${line.name} ${cs()}${line.price}`, `${cs()}${next}`, undefined, { id: order.id, backendId: order.backendId });
       }
     },
 
@@ -3984,8 +4204,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         log(
           "Addons Changed",
           `Order #${order.orderNo}`,
-          line.addons?.map((a) => a.name).join(", ") || "—",
-          addons.map((a) => a.name).join(", ") || "—",
+          line.addons?.map(addonLabel).join(", ") || "—",
+          addons.map(addonLabel).join(", ") || "—",
           undefined,
           { id: order.id, backendId: order.backendId },
         );
@@ -4014,8 +4234,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (
         line &&
         order &&
-        line.kotRound <= order.kotRounds &&
-        guardForbidden(module, "delete", "Delete an item already sent to the kitchen")
+        Number.isFinite(line.kotRound) &&
+        guardForbiddenSpecial("orders.editAfterKot", "You don't have permission to edit or remove an item after its KOT is sent. Ask the owner to allow it in Manage Users.")
       ) {
         return false;
       }
@@ -4552,8 +4772,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : x,
         ),
       }));
-      log("Discount Applied", `Order #${o.orderNo}`, "₹0", `₹${amount} (${label})`, undefined, { id: o.id, backendId: o.backendId });
-      toast.success(value ? `Discount applied · ₹${amount}` : "Discount removed");
+      log("Discount Applied", `Order #${o.orderNo}`, `${cs()}0`, `${cs()}${amount} (${label})`, undefined, { id: o.id, backendId: o.backendId });
+      toast.success(value ? `Discount applied · ${cs()}${amount}` : "Discount removed");
       return true;
     },
 
@@ -4627,8 +4847,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         `Order #${o?.orderNo}`,
         "—",
         [
-          packaging !== undefined ? `Packaging ₹${packaging}` : null,
-          service !== undefined ? `Service charge ₹${service}` : null,
+          packaging !== undefined ? `Packaging ${cs()}${packaging}` : null,
+          service !== undefined ? `Service charge ${cs()}${service}` : null,
         ]
           .filter(Boolean)
           .join(" · "),
@@ -4689,6 +4909,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             toast.error(err instanceof Error ? err.message : "Could not save this order");
             return { ok: false };
           }
+        }
+        // The bill itself goes on the exe, unpaid ("Bill Generated"), with
+        // its totals and billed time - it was only a status on this screen,
+        // back to "Running" on any refresh or other device, and could not be
+        // settled like a dine-in bill (owner decision, 2026-09-28).
+        try {
+          const res = await orderApi.adminOrder({
+            order_type: "pickup",
+            order_id: backendId!,
+            bill_only: true,
+            userName: billed.customerName,
+            mobile: billed.customerPhone,
+            gstin: billed.customerGstin,
+            address: billed.customerAddress,
+            cart: pickupAdminCart(billed),
+          });
+          if (res.bill_no && backendId) {
+            billed = {
+              ...billed,
+              billNo: res.bill_no,
+              orderNo: parseBillNoAsOrderNo(res.bill_no, backendId),
+            };
+          }
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not generate this bill");
+          return { ok: false };
         }
         patch((p) => ({
           ...p,
@@ -4946,33 +5192,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           } else {
             // Pickup has no settleBills equivalent - AdminOrder's pickup
             // branch both finalizes the bill and records payment in one
-            // call, and (like generateBill for dine-in) must carry the
-            // FULL accumulated item list since it destroys and rebuilds
-            // OrderDetails from scratch every call - see adminOrder's
-            // comment in lib/api.ts.
-            const billSettings: BillSettings = {
-              serviceCharge: s.serviceCharge,
-              deliveryChargeRule: s.deliveryChargeRule,
-              packagingChargeRule: s.packagingChargeRule,
-              taxRules: s.taxRules,
-              invoiceFormat: s.invoiceFormat,
-              tables: s.tables,
-              menuItems: s.menuItems,
-            };
-            const totals = orderTotals(target, billSettings);
-            const allMenuItems = target.lines.map((l) => {
-              const mi = s.menuItems.find((m) => m.id === l.itemId);
-              return {
-                ...exeLineIdentity(l),
-                qty: l.qty,
-                price: l.price,
-                discount: 0,
-                addons: buildAddonsPayload(l.addons),
-                comment: l.note ?? "",
-                menu_categ_id: mi ? Number(mi.categoryId) : 0,
-                variantData: variantPayload(l, mi),
-              };
-            });
+            // call (for a "Bill Generated" pickup too: its first payment
+            // settles it, deducts its stock and records the cash).
             const res = await orderApi.adminOrder({
               order_type: "pickup",
               order_id: backendId!,
@@ -4985,18 +5206,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               mobile: o.customerPhone,
               gstin: o.customerGstin,
               address: o.customerAddress,
-              cart: {
-                items: [{ status: "H", menuItems: allMenuItems }],
-                gst: totals.tax,
-                totalDiscount: totals.discount,
-                grandAmount: totals.grand,
-                myAmount: totals.subtotal,
-                service_charger: totals.service,
-                delivery_charge: totals.delivery,
-                packaging_charge: totals.packaging,
-                ...discountPayload(o, totals),
-                taxes: buildCartTaxes(totals, s.taxRules),
-              },
+              cart: pickupAdminCart(target),
             });
             // The exe answers with the order's real bill number - the
             // screen's own copy can still be the placeholder one.
@@ -5009,15 +5219,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // A bill settled partly as Due: show its real Due entry (dated by
           // the bill), straight from the exe.
           if (duePortion > 0) void value.loadDueBillsFromServer();
-          log("Bill Settled", `Order #${orderNo}`, o.status, `Settled · ${mode} ₹${total}`, undefined, {
+          log("Bill Settled", `Order #${orderNo}`, o.status, `Settled · ${mode} ${cs()}${total}`, undefined, {
             id: o.id,
             backendId,
           });
           toast.success(`Order #${orderNo} settled`, {
             description:
-              payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") +
-              (tip ? ` · Tip ₹${tip}` : "") +
-              (changeDue > 0 ? ` · Return ₹${changeDue}` : ""),
+              payments.map((p) => `${p.mode} ${cs()}${p.amount}`).join(" + ") +
+              (tip ? ` · Tip ${cs()}${tip}` : "") +
+              (changeDue > 0 ? ` · Return ${cs()}${changeDue}` : ""),
           });
         } catch (err) {
           // Saved but not settled (e.g. the payment was refused): the table
@@ -5293,9 +5503,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.success(`Order #${o.orderNo} updated`, {
           description:
             due > 0
-              ? `₹${due} now due`
+              ? `${cs()}${due} now due`
               : due < 0
-                ? `₹${Math.abs(due)} refund owed to customer`
+                ? `${cs()}${Math.abs(due)} refund owed to customer`
                 : "Fully settled, no balance",
         });
         return true;
@@ -5332,7 +5542,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         try {
           await refundDueApi.settle(target.backendOrderId);
           await value.loadRefundDueOrdersFromServer();
-          toast.success("Refund recorded", { description: `${target.billNo} · ₹${target.amount}` });
+          toast.success("Refund recorded", { description: `${target.billNo} · ${cs()}${target.amount}` });
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not record refund");
         }
@@ -5618,31 +5828,91 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
     },
 
+    // A whole ticket moves a stage. Every stage is kept on the exe per item
+    // (billerpe-local-exe controller/kds.js) and broadcast to every kitchen
+    // screen - it used to live only in this tab and vanished on a refresh
+    // (owner decision, 2026-09-28). The exe also rings the captain and marks
+    // the token Ready once the whole round is ready, as markKotReady did.
     setKotStatus: (kotId, status) => {
+      const kot = s.kots.find((k) => k.id === kotId);
+      if (!kot) return;
+      const stage = STAGE_FOR_STATUS[status];
+      if (!stage) {
+        patch((p) => ({ ...p, kots: p.kots.map((k) => (k.id === kotId ? { ...k, status } : k)) }));
+        return;
+      }
       patch((p) => ({
         ...p,
-        kots: p.kots.map((k) => (k.id === kotId ? { ...k, status } : k)),
+        kots: p.kots.map((k) => {
+          if (k.id !== kotId) return k;
+          const items = k.items.map((i) => (stageRank(i.stage) < stageRank(stage) ? { ...i, stage } : i));
+          return { ...k, items, status: kotStatusFromItems(items, status) };
+        }),
       }));
       toast.success(`KOT marked ${status}`);
-      // Accepted/Preparing stay purely local board state (see this
-      // function's own comment) - only Ready is a real cross-device signal
-      // now: billerpe-local-exe/controller/kot.js#markKotReady persists it
-      // and broadcasts "kotReady" to every other connected device, which is
-      // what the Captain App's item-ready notifications key off.
-      if (status === "Ready") {
-        const kot = s.kots.find((k) => k.id === kotId);
-        if (kot?.backendOrderId && kot.kotNumber) {
-          void orderApi.markKotReady(kot.backendOrderId, kot.kotNumber).catch(() => {
-            // Best-effort: the local board already shows Ready either way,
-            // this only affects other devices' visibility into it.
-          });
-        }
+      if (kot.backendOrderId && kot.kotNumber) {
+        const detailIds = kot.items.map((i) => i.detailId).filter((id): id is number => !!id);
+        void orderApi
+          .kdsStatus({ orderId: kot.backendOrderId, kotNumber: kot.kotNumber, status: stage, detailIds })
+          .then(({ items }) =>
+            value.receiveKdsItemStatus({ orderId: kot.backendOrderId!, kotNumber: kot.kotNumber!, items }),
+          )
+          .catch((err) =>
+            toast.error(err instanceof ApiError ? err.message : "Could not update the kitchen display"),
+          );
       }
+    },
+
+    // One item Ready / Served (owner decision, 2026-09-28): a ticket turns
+    // Ready once all its items are, and leaves the board once all are served.
+    setKdsItemStage: (kotId, detailId, stage) => {
+      const kot = s.kots.find((k) => k.id === kotId);
+      if (!kot?.backendOrderId || !kot.kotNumber) return;
+      patch((p) => ({
+        ...p,
+        kots: p.kots.map((k) => {
+          if (k.id !== kotId) return k;
+          const items = k.items.map((i) =>
+            i.detailId === detailId && stageRank(i.stage) < stageRank(stage) ? { ...i, stage } : i,
+          );
+          return { ...k, items, status: kotStatusFromItems(items, k.status) };
+        }),
+      }));
+      void orderApi
+        .kdsStatus({ orderId: kot.backendOrderId, kotNumber: kot.kotNumber, status: stage, detailIds: [detailId] })
+        .then(({ items }) =>
+          value.receiveKdsItemStatus({ orderId: kot.backendOrderId!, kotNumber: kot.kotNumber!, items }),
+        )
+        .catch((err) =>
+          toast.error(err instanceof ApiError ? err.message : "Could not update the kitchen display"),
+        );
+    },
+
+    receiveKdsItemStatus: (payload) => {
+      const stageOf = new Map(payload.items.map((i) => [i.detailId, i.status]));
+      patch((p) => ({
+        ...p,
+        kots: p.kots.map((k) => {
+          if (k.backendOrderId !== payload.orderId || k.kotNumber !== payload.kotNumber) return k;
+          if (k.status === "Cancelled") return k;
+          const items = k.items.map((i) =>
+            i.detailId && stageOf.has(i.detailId) ? { ...i, stage: stageOf.get(i.detailId) } : i,
+          );
+          return { ...k, items, status: kotStatusFromItems(items, k.status) };
+        }),
+      }));
     },
 
     rejectKot: (kotId, reason) => {
       const k = s.kots.find((x) => x.id === kotId);
       if (!k) return;
+      // Only before the kitchen has accepted it (owner decision, 2026-09-28).
+      if (k.status !== "Pending" && k.status !== "Printed") {
+        toast.error("This KOT is already accepted", {
+          description: "A ticket can only be rejected before the kitchen accepts it.",
+        });
+        return;
+      }
       patch((p) => ({
         ...p,
         kots: p.kots.map((x) => (x.id === kotId ? { ...x, status: "Cancelled" } : x)),
@@ -5680,16 +5950,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             fallbackKitchenName;
           byStation.set(station, [...(byStation.get(station) ?? []), item]);
         });
+        const toItems = (items: KdsTicketPayload["items"]): Kot["items"] =>
+          items.map((item) => ({
+            name: item.name,
+            qty: item.qty,
+            ...(item.comment ? { note: item.comment } : {}),
+            ...(item.detailId ? { detailId: item.detailId } : {}),
+            ...(item.status ? { stage: item.status } : {}),
+          }));
+        // A ticket already on this board (fired from this screen, or seen
+        // before a reconnect) takes the exe's copy: its item ids and where
+        // each item is in the kitchen - the exe keeps the stages now, so a
+        // refresh or another screen shows the same board.
+        let kots = p.kots;
         for (const station of [...byStation.keys()]) {
-          const already = p.kots.some(
+          const existing = kots.find(
             (k) =>
               k.backendOrderId === payload.id &&
               k.kotNumber === payload.kotNumber &&
               k.station === station,
           );
-          if (already) byStation.delete(station);
+          if (!existing) continue;
+          const items = toItems(byStation.get(station)!);
+          kots = kots.map((k) =>
+            k.id === existing.id && k.status !== "Cancelled"
+              ? { ...k, items, status: kotStatusFromItems(items, k.status) }
+              : k,
+          );
+          byStation.delete(station);
         }
-        if (!byStation.size) return p;
+        if (!byStation.size) return kots === p.kots ? p : { ...p, kots };
 
         const table =
           payload.type === "dinin"
@@ -5702,24 +5992,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const tableLabel = payload.token ? `${baseLabel} · Token ${payload.token}` : baseLabel;
         const order = p.orders.find((o) => o.backendId === payload.id);
 
-        const newKots: Kot[] = [...byStation.entries()].map(([station, items], i) => ({
-          id: uid("k"),
-          kotNo: Math.max(...p.kots.map((k) => k.kotNo), 300) + 1 + i,
-          orderId: order?.id ?? `remote-${payload.id}`,
-          tableLabel,
-          round: payload.kotNumber,
-          station,
-          status: "Pending",
-          createdAt: nowStamp(),
-          backendOrderId: payload.id,
-          kotNumber: payload.kotNumber,
-          items: items.map((item) => ({
-            name: item.name,
-            qty: item.qty,
-            ...(item.comment ? { note: item.comment } : {}),
-          })),
-        }));
-        return { ...p, kots: [...newKots, ...p.kots] };
+        const newKots: Kot[] = [...byStation.entries()].map(([station, items], i) => {
+          const kotItems = toItems(items);
+          return {
+            id: uid("k"),
+            kotNo: Math.max(...kots.map((k) => k.kotNo), 300) + 1 + i,
+            orderId: order?.id ?? `remote-${payload.id}`,
+            tableLabel,
+            round: payload.kotNumber,
+            station,
+            status: kotStatusFromItems(kotItems, "Pending"),
+            createdAt: nowStamp(),
+            backendOrderId: payload.id,
+            kotNumber: payload.kotNumber,
+            items: kotItems,
+          };
+        });
+        return { ...p, kots: [...newKots, ...kots] };
       });
     },
 
@@ -5913,7 +6202,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         try {
           await cashSessionApi.open(float);
           await value.loadCashSessionsFromServer();
-          toast.success("Cash session opened", { description: `Opening float ₹${float}` });
+          toast.success("Cash session opened", { description: `Opening float ${cs()}${float}` });
           return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not open cash session");
@@ -5928,7 +6217,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         try {
           await cashSessionApi.addMovement({ type: "Add", amount, reason });
           await value.loadCashSessionsFromServer();
-          toast.success(`₹${amount} added to drawer`, { description: reason });
+          toast.success(`${cs()}${amount} added to drawer`, { description: reason });
           return true;
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not add cash");
@@ -5946,7 +6235,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const balance = open ? open.movements.reduce((sum, m) => sum + m.amount, 0) : 0;
       if (amount > balance) {
         toast.error("Withdrawal blocked", {
-          description: `Amount exceeds the drawer balance of ₹${balance}. No override is available.`,
+          description: `Amount exceeds the drawer balance of ${cs()}${balance}. No override is available.`,
         });
         return false;
       }
@@ -5954,8 +6243,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         try {
           await cashSessionApi.addMovement({ type: "Withdraw", amount, reason });
           await value.loadCashSessionsFromServer();
-          log("Cash Withdrawn", "Cash Session", `₹${balance}`, `₹${balance - amount}`, reason);
-          toast.success(`₹${amount} withdrawn`, { description: reason });
+          log("Cash Withdrawn", "Cash Session", `${cs()}${balance}`, `${cs()}${balance - amount}`, reason);
+          toast.success(`${cs()}${amount} withdrawn`, { description: reason });
         } catch (err) {
           toast.error(err instanceof ApiError ? err.message : "Could not withdraw cash");
         }
@@ -5991,9 +6280,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             date,
           });
           await Promise.all([value.loadExpensesFromServer(), value.loadCashSessionsFromServer()]);
-          log("Expense Added", head?.name ?? "Expense", "—", `₹${amount} · Cash · ${note}`);
+          log("Expense Added", head?.name ?? "Expense", "—", `${cs()}${amount} · Cash · ${note}`);
           toast.success("Expense attached to session", {
-            description: `${head?.name} · ₹${amount}`,
+            description: `${head?.name} · ${cs()}${amount}`,
           });
           return true;
         } catch (err) {
@@ -6020,15 +6309,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           log(
             "Cash Session Closed",
             open.id,
-            `Expected ₹${expected}`,
-            `Counted ₹${counted}`,
+            `Expected ${cs()}${expected}`,
+            `Counted ${cs()}${counted}`,
             reason,
           );
           toast.success("Cash session closed", {
             description:
               counted === expected
                 ? "No variance recorded."
-                : `Variance ₹${counted - expected} recorded with explanation.`,
+                : `Variance ${cs()}${counted - expected} recorded with explanation.`,
           });
           return true;
         } catch (err) {
@@ -6089,9 +6378,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           menus: mappedMenus.length ? mappedMenus : p.menus,
           menuCategories: catagories.map((c) => mapRawMenuCategory(c, fallbackMenuId)),
           menuItems: menu.map((m) => mapRawMenuItem(m, fallbackMenuId)),
-          variantMasters: variants
-            .filter((v) => v.active)
-            .map((v) => mapRawVariant(v, fallbackMenuId)),
+          // Inactive ones too (the Variants screen lists them); billing
+          // filters on `active` - see sellableVariants.
+          variantMasters: variants.map((v) => mapRawVariant(v, fallbackMenuId)),
           addonGroups: addons.map((g) => mapRawAddonGroup(g, fallbackMenuId)),
         }));
       } catch (err) {
@@ -6100,33 +6389,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     upsertMenuItem: (item) => {
       const isNew = !s.menuItems.some((m) => m.id === item.id);
-      const seed = String(Date.now()).slice(-6);
-      // Variant rows carry the item-editor's own local draft id, not the
-      // real Variants master id - resolve each by name against
-      // variantMasters to get the id the backend actually wants. Joi
-      // rejects a variant_price <= 0 (validate.js's menuSchema/
-      // editMenuSchema both require it > 0), so a row left at 0 is
-      // dropped here rather than failing the whole save.
-      const variants = (item.variants ?? [])
-        .map((v) => {
-          const masterId = s.variantMasters.find((m) => m.name === v.name)?.id;
-          return masterId && v.price > 0 ? { id: Number(masterId), variant_price: v.price } : null;
-        })
-        .filter((v): v is { id: number; variant_price: number } => v !== null);
-      const payload = {
-        item_name: item.name,
-        menu_categ_id: Number(item.categoryId),
-        price: item.price,
-        shortCode: toShortCode(item.sku, item.name, seed),
-        favorite: item.favourite,
-        gst_type: "S" as const, // no UI field yet - defaults to the model's own default
-        barcode_value: item.barcode ?? "",
-        addons: (item.addonGroupIds ?? []).map(Number),
-        variants,
-        ...(item.dietary ? { sub_categories: item.dietary } : {}),
-        ...(item.description ? { description: item.description } : {}),
-        ...(item.imageUrl ? { imageUrl: item.imageUrl } : {}),
-      };
+      const menuId = s.menuCategories.find((c) => c.id === item.categoryId)?.menuId;
+      const payload = menuItemPayload(item, s.variantMasters, menuId);
       const run = async () => {
         try {
           if (isNew) {
@@ -6147,14 +6411,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     removeMenuItem: (id) => {
       value.removeMenuItems([id]);
     },
+    // Inactive = still listed here, hidden from billing, Captain App and QR.
+    // Deactivating used to DELETE the items (owner report, 2026-09-28).
     setMenuItemsActive: (ids, active) => {
-      if (!active) {
-        value.removeMenuItems(ids);
-        return;
-      }
-      // /menuRemove soft-deletes (active:false); no reactivate/un-delete
-      // endpoint exists on the backend to undo that.
-      toast.error("Reactivating items isn't supported by the backend yet");
+      const run = async () => {
+        try {
+          const { changed } = await menuApi.setItemsActive(ids.map(Number), active);
+          await value.loadMenuFromServer();
+          toast.success(`${changed} item(s) ${active ? "activated" : "deactivated"}`);
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not change item status");
+        }
+      };
+      void run();
     },
     removeMenuItems: (ids) => {
       const run = async () => {
@@ -6168,82 +6437,89 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       void run();
     },
-    // Wired to the real backend: resolves/creates each row's category then
-    // creates-or-edits the item, looping sequentially (not Promise.all) so
-    // two rows sharing a brand-new category name can't both race the
-    // backend's create-category call and collide on its duplicate-name
-    // check. An existing item is matched by name (case-insensitive, same
-    // rule as the backend's own duplicate-category check) and updated in
-    // place instead of always inserting - re-importing the same CSV twice
-    // used to duplicate every item.
+    // Imports into ONE menu - the one on screen. Resolves/creates each row's
+    // category IN THAT MENU, then creates or updates the item, one row at a
+    // time (two rows sharing a brand-new category must not race its create).
+    // An existing item is the one with the same short code in THIS menu
+    // (owner decision, 2026-09-28): the same code in another menu is a
+    // different item. This used to match categories and items by name across
+    // every menu, so a second menu's import landed in the default menu
+    // (a "Starters" already existed there) and could pull items out of it.
+    // An update keeps what the file does not carry (variants, addons,
+    // description, image); a failing row is reported and the rest go on.
     bulkImportMenuItems: (rows, menuId, onProgress) => {
       const run = async () => {
         let createdCount = 0;
         let updatedCount = 0;
-        try {
-          const categoryIdByName = new Map(
-            s.menuCategories
-              .filter((c) => c.menuId === menuId)
-              .map((c) => [c.name.trim().toLowerCase(), c.id] as const),
-          );
-          const itemIdByName = new Map(
-            s.menuItems.map((i) => [i.name.trim().toLowerCase(), i.id] as const),
-          );
-          const seed = String(Date.now()).slice(-6);
-
-          for (let i = 0; i < rows.length; i++) {
-            const r = rows[i];
-            const catKey = r.categoryName.trim().toLowerCase();
+        const failed: string[] = [];
+        const key = (v: string) => v.trim().toLowerCase();
+        const categoryIdByName = new Map(
+          s.menuCategories
+            .filter((c) => c.menuId === menuId)
+            .map((c) => [key(c.name), c.id] as const),
+        );
+        const menuOfCategory = new Map(s.menuCategories.map((c) => [c.id, c.menuId] as const));
+        const itemByCode = new Map(
+          s.menuItems
+            .filter((i) => menuOfCategory.get(i.categoryId) === menuId && itemShortCode(i.sku))
+            .map((i) => [toShortCode(i.sku), i] as const),
+        );
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          try {
+            const catKey = key(r.categoryName);
             let categoryId = categoryIdByName.get(catKey);
             if (!categoryId) {
-              try {
-                await menuApi.createCategory(r.categoryName.trim(), Number(menuId));
-              } catch {
-                // May already exist server-side (this session's local
-                // category list is stale) - fall through to the lookup
-                // below regardless of why the create call failed.
-              }
+              await menuApi.createCategory(r.categoryName.trim(), Number(menuId));
               const { catagories } = await menuApi.getCategories();
-              const found = catagories.find((x) => x.menu_categ_nm.trim().toLowerCase() === catKey);
+              const found = catagories.find(
+                (x) => key(x.menu_categ_nm) === catKey && String(x.menu_catalog_id) === menuId,
+              );
               if (!found) throw new Error(`Could not create category "${r.categoryName}"`);
               categoryId = String(found.id);
               categoryIdByName.set(catKey, categoryId);
             }
-
-            const payload = {
-              item_name: r.name.trim(),
-              menu_categ_id: Number(categoryId),
+            const code = toShortCode(r.sku);
+            const existing = itemByCode.get(code);
+            // Veg column: "No" makes it Non-Veg; "Yes" keeps a finer veg
+            // choice already on the item (Jain, Vegan...).
+            const dietary: MenuDietary =
+              r.veg === false
+                ? "Non-Veg"
+                : existing?.dietary && existing.dietary !== "Non-Veg"
+                  ? existing.dietary
+                  : "Regular Veg";
+            const item: MenuItem = {
+              ...(existing ?? { id: "", favourite: false }),
+              name: r.name.trim(),
+              categoryId,
               price: r.price,
-              shortCode: toShortCode(r.sku, r.name, `${seed}${i}`),
-              favorite: false,
-              gst_type: "S" as const,
-              barcode_value: "",
-              addons: [] as number[],
-              variants: [] as { id: number; variant_price: number }[],
-            };
-            const nameKey = r.name.trim().toLowerCase();
-            const existingItemId = itemIdByName.get(nameKey);
-            if (existingItemId) {
-              await menuApi.editItem({ ...payload, id: Number(existingItemId) });
+              sku: code,
+              active: r.active ?? existing?.active ?? true,
+              veg: dietary !== "Non-Veg",
+              dietary,
+            } as MenuItem;
+            const payload = menuItemPayload(item, s.variantMasters, menuId);
+            if (existing) {
+              await menuApi.editItem({ ...payload, id: Number(existing.id) });
               updatedCount++;
             } else {
               await menuApi.createItem(payload);
               createdCount++;
             }
-            onProgress?.(i + 1, rows.length);
+          } catch (err) {
+            failed.push(`${r.name}: ${err instanceof Error ? err.message : "failed"}`);
           }
-          await value.loadMenuFromServer();
-          toast.success(`${rows.length} row(s) imported`, {
-            description: `${createdCount} created, ${updatedCount} updated`,
+          onProgress?.(i + 1, rows.length);
+        }
+        await value.loadMenuFromServer();
+        const summary = `${createdCount} created, ${updatedCount} updated`;
+        if (failed.length) {
+          toast.error(`${failed.length} of ${rows.length} row(s) not imported`, {
+            description: `${summary}. ${failed.slice(0, 3).join(" · ")}${failed.length > 3 ? " …" : ""}`,
           });
-        } catch (err) {
-          await value.loadMenuFromServer();
-          toast.error(err instanceof ApiError ? err.message : "Could not import all menu items", {
-            description:
-              createdCount || updatedCount
-                ? `${createdCount + updatedCount} of ${rows.length} row(s) completed before this failed.`
-                : undefined,
-          });
+        } else {
+          toast.success(`${rows.length} row(s) imported`, { description: summary });
         }
       };
       return run();
@@ -6290,6 +6566,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           } else {
             ordered = inView.map((x) => (x.id === c.id ? { ...x, name: c.name } : x));
           }
+          const activeChanged = (isNew ? true : s.menuCategories.find((x) => x.id === c.id)?.active) !== c.active;
           const targetId = isNew ? ordered[ordered.length - 1].id : c.id;
           const withoutTarget = ordered
             .filter((x) => x.id !== targetId)
@@ -6309,7 +6586,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 return !before || before.sortOrder !== x.sortOrder || x.id === targetId;
               })
               .map((x) =>
-                menuApi.editCategory(Number(x.id), x.name, x.sortOrder, Number(c.menuId)),
+                menuApi.editCategory(
+                  Number(x.id),
+                  x.name,
+                  x.sortOrder,
+                  Number(c.menuId),
+                  // The form's Active switch - it used to be dropped here.
+                  x.id === targetId && activeChanged ? c.active : undefined,
+                ),
               ),
           );
           await value.loadMenuFromServer();
@@ -6323,9 +6607,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return run();
     },
     removeMenuCategory: (id) => {
-      if (s.menuItems.some((i) => i.categoryId === id && i.active)) {
+      if (s.menuItems.some((i) => i.categoryId === id)) {
         toast.error("Category is in use", {
-          description: "Deactivate or move its active items first.",
+          description: "Delete or move its items first (inactive items count too).",
         });
         return;
       }
@@ -6341,11 +6625,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     removeMenuCategories: (ids) => {
-      const blocked = ids.filter((id) => s.menuItems.some((i) => i.categoryId === id && i.active));
+      const blocked = ids.filter((id) => s.menuItems.some((i) => i.categoryId === id));
       const removable = ids.filter((id) => !blocked.includes(id));
       if (!removable.length) {
         toast.error("Selected categories are in use", {
-          description: "Deactivate or move their active items first.",
+          description: "Delete or move their items first (inactive items count too).",
         });
         return;
       }
@@ -6357,7 +6641,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             `${removable.length} categor${removable.length === 1 ? "y" : "ies"} removed`,
             {
               description: blocked.length
-                ? `${blocked.length} skipped — still has active item(s).`
+                ? `${blocked.length} skipped — still has item(s).`
                 : undefined,
             },
           );
@@ -6374,7 +6658,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (isNew) {
             await menuApi.createVariant(v.name, true, Number(v.menuId));
           } else {
-            await menuApi.editVariant(Number(v.id), v.name, true, Number(v.menuId));
+            await menuApi.editVariant(Number(v.id), v.name, v.active !== false, Number(v.menuId));
           }
           await value.loadMenuFromServer();
           toast.success("Variant saved", { description: v.name });
@@ -6386,17 +6670,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       return run();
     },
+    // A real delete now (POST /variantRemove); switching a variant off is
+    // setVariantActive - inactive variants stay listed.
     removeVariant: (id) => {
-      // No delete endpoint exists for variants - soft-delete via the edit
-      // endpoint's `active` field instead (it's the same convention used
-      // for tables/categories/items everywhere else in this backend).
-      // loadMenuFromServer only keeps active:true rows, so this disappears
-      // from the list the same way a real delete would.
-      const v = s.variantMasters.find((x) => x.id === id);
-      if (!v) return;
       const run = async () => {
         try {
-          await menuApi.editVariant(Number(id), v.name, false, Number(v.menuId));
+          await menuApi.removeVariant(Number(id));
           await value.loadMenuFromServer();
           toast.success("Variant removed");
         } catch (err) {
@@ -6416,6 +6695,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // option, so every option defaults to "veg" until that's added.
         addons: g.options.map((o) => ({ addon_name: o.name, price: o.price, attributes: "veg" })),
         menu_catalog_id: Number(g.menuId),
+        active: g.active !== false,
       };
       const run = async () => {
         try {
@@ -6434,11 +6714,50 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       return run();
     },
-    removeAddonGroup: () => {
-      // No delete or soft-delete path exists: there's no remove endpoint,
-      // and updatedAddons doesn't accept `active` even though the model
-      // has the column - confirmed by reading the controller, not assumed.
-      toast.error("Removing addon groups isn't supported by the backend yet");
+    removeAddonGroup: (id) => {
+      const run = async () => {
+        try {
+          await menuApi.removeAddonGroup(Number(id));
+          await value.loadMenuFromServer();
+          toast.success("Addon group deleted");
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not delete addon group");
+        }
+      };
+      void run();
+    },
+    setVariantActive: (id, active) => {
+      const v = s.variantMasters.find((x) => x.id === id);
+      if (!v) return;
+      const run = async () => {
+        try {
+          await menuApi.editVariant(Number(id), v.name, active, Number(v.menuId));
+          await value.loadMenuFromServer();
+          toast.success(`Variant ${active ? "activated" : "deactivated"}`, { description: v.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not change variant status");
+        }
+      };
+      void run();
+    },
+    setAddonGroupActive: (id, active) => {
+      const g = s.addonGroups.find((x) => x.id === id);
+      if (!g) return;
+      void value.upsertAddonGroup({ ...g, active });
+    },
+    setMenuCategoryActive: (id, active) => {
+      const c = s.menuCategories.find((x) => x.id === id);
+      if (!c) return;
+      const run = async () => {
+        try {
+          await menuApi.editCategory(Number(id), c.name, c.sortOrder, Number(c.menuId), active);
+          await value.loadMenuFromServer();
+          toast.success(`Category ${active ? "activated" : "deactivated"}`, { description: c.name });
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : "Could not change category status");
+        }
+      };
+      void run();
     },
     loadTablesFromServer: async () => {
       const callId = ++tablesLoadSeq.current;
@@ -6850,6 +7169,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           invoiceFormateApi.getHeaderFooter(),
         ]);
         const { upiId, hotel_logo, hms_res_setting, invoiceFormateIncGst } = settings;
+        // Every amount on every screen follows the outlet's currency.
+        setCurrency(settings.currency_code, settings.currency);
         patch((p) => ({
           ...p,
           restaurant: {
@@ -6864,6 +7185,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             fssaiNo: settings.fssai_no ?? "",
             upiId: upiId ?? "",
             gstCalculation: invoiceFormateIncGst,
+            currencyCode: settings.currency_code || "INR",
+            currencySymbol: settings.currency || "₹",
             // Same filename-only convention as hotel_logo everywhere else
             // on the backend - "placeholder.png"/empty/unset all mean "no
             // real logo uploaded yet", not a literal image to fetch.
@@ -7379,30 +7702,46 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // Role default merged with this user's own permissionOverrides -
         // see resolveEffectiveGrants's own comment for exactly what does
         // and doesn't survive the trip to the backend's 10-area grid.
-        access_name: buildAccessName(
-          resolveEffectiveGrants(u.role, s.rolePermissions, u.permissionOverrides),
-        ),
+        // Not for the owner: their access is fixed (always everything), and
+        // the exe used to refuse an owner save that carried a grid - so the
+        // owner could never change their own PIN (owner report, 2026-09-28).
+        ...(u.isOwner
+          ? {}
+          : {
+              access_name: buildAccessName(
+                resolveEffectiveGrants(u.role, s.rolePermissions, u.permissionOverrides),
+              ),
+            }),
       };
+      // The user's own permission changes (Manage Users > Permission
+      // overrides) are stored on the exe by their own call. Save user never
+      // made it, so a change showed until the next refresh and was then gone
+      // (owner report, 2026-09-28). Sent only when they changed, and never
+      // for the owner (always full access).
+      const storedOverrides = s.users.find((x) => x.id === u.id)?.permissionOverrides;
+      const overridesChanged =
+        !u.isOwner &&
+        JSON.stringify(storedOverrides ?? null) !== JSON.stringify(u.permissionOverrides ?? null);
       const run = async () => {
         try {
           if (isNew) {
             await userApi.createUser(payload);
+            if (overridesChanged && u.permissionOverrides) {
+              // The new login's id is only known once it exists.
+              const { hotelUsers } = await userApi.getUsers();
+              const created = hotelUsers.find((x) => x.number === u.mobile);
+              if (created) await userApi.setPermissionOverrides(created.id, u.permissionOverrides);
+            }
           } else {
             await userApi.editUser({ ...payload, id: Number(u.id) });
+            if (overridesChanged) {
+              await userApi.setPermissionOverrides(Number(u.id), u.permissionOverrides ?? null);
+            }
           }
-          // permissionOverrides is a purely local concept - the backend's
-          // flat UserAccess grid has no "this is a custom override, not
-          // just the role default" flag of its own (see
-          // resolveEffectiveGrants's comment), so nothing about the API
-          // call above persists it. loadUsersFromServer only ever carries
-          // an override forward from whatever's ALREADY in local state;
-          // without patching it in here first, an edited existing user's
-          // override had nothing to carry forward and silently reverted
-          // to "Role default" the moment this save completed - confirmed
-          // live as "override a permission, save, reopen the popup - the
-          // override is gone." Skipped for a brand-new user: its draft id
-          // is a local placeholder, not the real backend id the reload
-          // will assign, so there's no row to patch by id yet.
+          // The overrides are now stored on the exe (setPermissionOverrides
+          // above); patching them in here as well keeps the screen right
+          // until the reload below lands. Skipped for a brand-new user: its
+          // draft id is a local placeholder, not the real backend id.
           if (!isNew) {
             // Same "nothing to carry forward without patching it in first"
             // problem as permissionOverrides just above, for the same
@@ -7462,14 +7801,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         try {
           if (!backendId) {
             await expenseApi.create(payload);
-            log("Expense Added", headName, "—", `₹${e.amount} · ${e.mode} · ${e.note}`);
+            log("Expense Added", headName, "—", `${cs()}${e.amount} · ${e.mode} · ${e.note}`);
           } else {
             await expenseApi.update({ ...payload, id: backendId });
             log(
               "Expense Edited",
               headName,
-              before ? `₹${before.amount} · ${before.mode} · ${before.note}` : "—",
-              `₹${e.amount} · ${e.mode} · ${e.note}`,
+              before ? `${cs()}${before.amount} · ${before.mode} · ${before.note}` : "—",
+              `${cs()}${e.amount} · ${e.mode} · ${e.note}`,
             );
           }
           // An edited Cash expense can move money in the open cash session
@@ -7503,7 +7842,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           log(
             "Expense Deleted",
             headName,
-            existing ? `₹${existing.amount} · ${existing.mode} · ${existing.note}` : "—",
+            existing ? `${cs()}${existing.amount} · ${existing.mode} · ${existing.note}` : "—",
             "—",
             reason,
           );
@@ -7988,12 +8327,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
         await Promise.all([value.loadPurchaseOrdersFromServer(), value.loadSuppliersFromServer()]);
         const notes = [
-          `${po.poNo} · ₹${pay.amount.toLocaleString("en-IN")} · ${pay.mode}`,
+          `${po.poNo} · ${cs()}${pay.amount.toLocaleString(numLocale())} · ${pay.mode}`,
           res?.fromDrawer ? "taken from the cash drawer" : "",
           res?.expenseId ? "added to expenses" : "",
         ].filter(Boolean);
         toast.success("Payment recorded", { description: notes.join(" · ") });
-        log("Purchase Payment", po.poNo, "—", `₹${pay.amount} ${pay.mode}`);
+        log("Purchase Payment", po.poNo, "—", `${cs()}${pay.amount} ${pay.mode}`);
         return true;
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not record the payment");
@@ -8371,7 +8710,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           .map((l) =>
             l.type === "raw"
               ? { raw_material_id: Number(l.refId), consumption_qty: l.qty }
-              : { semi_finished_item_id: Number(l.refId), consumption_qty: l.qty },
+              : // "sf-12" -> 12: Number("sf-12") was NaN, so every recipe
+                // with a semi-finished line was refused by the exe.
+                { semi_finished_item_id: Number(l.refId.replace(/^sf-/, "")), consumption_qty: l.qty },
           );
       // Every group is saved - the base plus one per variant and addon. Only
       // the base used to be; variant and addon groups were dropped.
@@ -8890,6 +9231,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       value.upsertTaxRule({ ...rule, active: !rule.active });
     },
     setInvoiceFormat: (fmt) => {
+      setCurrency(fmt.currencyCode, fmt.currencySymbol);
       patch((p) => ({
         ...p,
         invoiceFormat: fmt,
@@ -8910,11 +9252,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               // never sent, so they vanished on the next refresh and no
               // bill ever printed them.
               gst_no: fmt.gstNo.trim().toUpperCase(),
-              fssai_no: fmt.fssaiNo.replace(/s/g, ""),
+              fssai_no: fmt.fssaiNo.replace(/\s/g, ""),
               is_token_on: TOKEN_SCOPE_TO_CODE[fmt.tokens.tokenFor],
               bill_with_kot: TOKEN_SCOPE_TO_CODE[fmt.tokens.billWithKot],
               bill_with_token: TOKEN_SCOPE_TO_CODE[fmt.tokens.billWithToken],
               saveBehave: fmt.saveBehave,
+              currency: fmt.currencySymbol.trim(),
+              currency_code: fmt.currencyCode,
               invoiceFormateHeaderText:
                 fmt.header.find((l) => l.content === "marketing")?.text ?? "",
               invoiceFormateBottomText:
@@ -9349,13 +9693,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // references this catalogue (same "reject deletion in use" guard as
       // removeMenuCategory below) - checked locally first to avoid a round
       // trip for the common case.
-      if (
-        s.menuCategories.some((c) => c.menuId === id) ||
-        s.variantMasters.some((v) => v.menuId === id) ||
-        s.addonGroups.some((a) => a.menuId === id)
-      ) {
+      // These lists hold everything not deleted, inactive included - so this
+      // names exactly what is left to delete.
+      const left = [
+        [s.menuCategories.filter((c) => c.menuId === id).length, "categories"],
+        [s.variantMasters.filter((v) => v.menuId === id).length, "variants"],
+        [s.addonGroups.filter((a) => a.menuId === id).length, "addon groups"],
+      ]
+        .filter(([n]) => Number(n) > 0)
+        .map(([n, what]) => `${n} ${what}`);
+      if (left.length) {
         toast.error("Menu is in use", {
-          description: "Move or delete its categories, variants and addon groups first.",
+          description: `${target.name} still has ${left.join(", ")} (inactive ones count too). Delete them first.`,
         });
         return;
       }
@@ -9470,8 +9819,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           x.id === orderId ? { ...x, lines: [newLine, ...x.lines] } : x,
         ),
       }));
-      log("Item Added", `Order #${o.orderNo}`, "—", `${qty}× ${name.trim()} (custom) · ₹${price}`, undefined, { id: o.id, backendId: o.backendId });
-      toast.success("Custom item added", { description: `${name.trim()} · ₹${price}` });
+      log("Item Added", `Order #${o.orderNo}`, "—", `${qty}× ${name.trim()} (custom) · ${cs()}${price}`, undefined, { id: o.id, backendId: o.backendId });
+      toast.success("Custom item added", { description: `${name.trim()} · ${cs()}${price}` });
     },
     upsertCustomer: (customer) => {
       const isNew = !customer.id;
@@ -9546,7 +9895,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
       if (received > Math.round(billDue * 100) / 100 + 0.009) {
         toast.error("More than the amount due", {
-          description: `Only ₹${billDue.toLocaleString("en-IN")} is due.`,
+          description: `Only ${cs()}${billDue.toLocaleString(numLocale())} is due.`,
         });
         return Promise.resolve(false);
       }
@@ -9622,18 +9971,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           log(
             fullySettled ? "Due Settled" : "Due Part-Paid",
             bills.map((b) => b.billNo).join(", "),
-            `Due ₹${billDue}`,
+            `Due ${cs()}${billDue}`,
             fullySettled
-              ? `${mode} · ₹${received}`
-              : `${mode} · ₹${received} received · ₹${remaining} still due`,
+              ? `${mode} · ${cs()}${received}`
+              : `${mode} · ${cs()}${received} received · ${cs()}${remaining} still due`,
           );
           toast.success(
             fullySettled
               ? bills.length > 1
                 ? `${bills.length} bills settled`
                 : "Bill settled"
-              : `₹${received.toLocaleString("en-IN")} received · ₹${remaining.toLocaleString("en-IN")} still due`,
-            { description: payments.map((p) => `${p.mode} ₹${p.amount}`).join(" + ") },
+              : `${cs()}${received.toLocaleString(numLocale())} received · ${cs()}${remaining.toLocaleString(numLocale())} still due`,
+            { description: payments.map((p) => `${p.mode} ${cs()}${p.amount}`).join(" + ") },
           );
           return true;
         } catch (err) {

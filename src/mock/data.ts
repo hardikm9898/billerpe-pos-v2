@@ -1882,6 +1882,12 @@ export const REPORT_TYPES = [
     desc: "Discounts applied, with approval flags",
   },
   {
+    id: "due-received",
+    name: "Due Received",
+    group: "Finance",
+    desc: "Payments received against due bills - when, how much, in which mode and by whom",
+  },
+  {
     id: "expense-report",
     name: "Expense Report",
     group: "Finance",

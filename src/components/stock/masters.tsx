@@ -35,6 +35,33 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useStore } from "@/mock/store";
 import type { RawMaterial, SemiFinished, StockUnit, Supplier } from "@/mock/types";
+import { cs, numLocale } from "@/lib/currency";
+
+// Units are free text per outlet ("kg", "Kgs", "Kilogram"...), so only
+// spellings we can tell apart for sure get an automatic conversion.
+const UNIT_BASE: Record<string, [kind: string, factor: number]> = {
+  kg: ["mass", 1000], kgs: ["mass", 1000], kilo: ["mass", 1000], kilogram: ["mass", 1000], kilograms: ["mass", 1000],
+  g: ["mass", 1], gm: ["mass", 1], gms: ["mass", 1], gram: ["mass", 1], grams: ["mass", 1], gr: ["mass", 1],
+  l: ["volume", 1000], lt: ["volume", 1000], ltr: ["volume", 1000], ltrs: ["volume", 1000], litre: ["volume", 1000], liter: ["volume", 1000], litres: ["volume", 1000], liters: ["volume", 1000],
+  ml: ["volume", 1], mls: ["volume", 1], millilitre: ["volume", 1], milliliter: ["volume", 1],
+  dozen: ["count", 12], dz: ["count", 12], doz: ["count", 12],
+  pc: ["count", 1], pcs: ["count", 1], piece: ["count", 1], pieces: ["count", 1], nos: ["count", 1], no: ["count", 1],
+};
+function unitBase(units: StockUnit[], shortName: string): [string, number] | undefined {
+  const u = units.find((x) => x.shortName === shortName);
+  for (const name of [shortName, u?.unitName ?? ""]) {
+    // "Kg." and "kg" are the same unit
+    const hit = UNIT_BASE[name.trim().toLowerCase().replace(/\.$/, "")];
+    if (hit) return hit;
+  }
+  return undefined;
+}
+function knownConversion(units: StockUnit[], purchaseUnit: string, unit: string): number | undefined {
+  const from = unitBase(units, purchaseUnit);
+  const to = unitBase(units, unit);
+  if (!from || !to || from[0] !== to[0]) return undefined;
+  return from[1] / to[1];
+}
 
 const blankMaterial = (): RawMaterial => ({
   id: "",
@@ -71,6 +98,27 @@ export function RawMaterialsScreen() {
 
   const unitOptions = store.units.map((u) => u.shortName);
 
+  // The purchase price is what the user types; the per-consumption-unit
+  // rate is derived from it. It used to be the other way round, so changing
+  // the conversion silently changed the purchase price (owner report,
+  // 2026-09-28).
+  const [purchasePrice, setPurchasePrice] = useState(0);
+  const openMaterial = (m: RawMaterial) => {
+    setPurchasePrice(Math.round(m.rate * m.conversion * 100) / 100);
+    setDraft(m);
+  };
+  const withRate = (m: RawMaterial, price: number): RawMaterial => ({
+    ...m,
+    rate: m.conversion > 0 ? price / m.conversion : 0,
+  });
+  // Changing a unit: same unit = 1; a pair we can recognise = its factor;
+  // anything else = left blank for the user to fill.
+  const withUnits = (m: RawMaterial, purchaseUnit: string, unit: string): RawMaterial => {
+    const conversion =
+      purchaseUnit === unit ? 1 : (knownConversion(store.units, purchaseUnit, unit) ?? 0);
+    return withRate({ ...m, purchaseUnit, unit, conversion }, purchasePrice);
+  };
+
   return (
     <>
       <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -100,7 +148,7 @@ export function RawMaterialsScreen() {
         title="Raw material master"
         description="Purchase unit, consumption unit and conversion drive every downstream screen"
         actions={
-          <Button hidden={!access.create} size="sm" onClick={() => setDraft(blankMaterial())}>
+          <Button hidden={!access.create} size="sm" onClick={() => openMaterial(blankMaterial())}>
             <Plus className="size-4" /> Add material
           </Button>
         }
@@ -173,7 +221,7 @@ export function RawMaterialsScreen() {
               key: "edit",
               header: "",
               cell: (m) => (
-                <Button size="sm" variant="ghost" onClick={() => setDraft({ ...m })}>
+                <Button size="sm" variant="ghost" onClick={() => openMaterial({ ...m })}>
                   <Pencil className="size-4" />
                 </Button>
               ),
@@ -195,7 +243,7 @@ export function RawMaterialsScreen() {
               <HealthBar stock={m.stock} reorder={m.reorderLevel} />
               <div className="flex items-center justify-between">
                 <ConversionChip m={m} />
-                <Button size="sm" variant="ghost" onClick={() => setDraft({ ...m })}>
+                <Button size="sm" variant="ghost" onClick={() => openMaterial({ ...m })}>
                   <Pencil className="size-4" /> Edit
                 </Button>
               </div>
@@ -231,13 +279,13 @@ export function RawMaterialsScreen() {
                     {...matForm.fieldProps("price")}
                     min={0}
                     type="number"
-                    value={Math.round(draft.rate * draft.conversion * 100) / 100}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        rate: Number(e.target.value || 0) / (draft.conversion || 1),
-                      })
-                    }
+                    value={purchasePrice || ""}
+                    placeholder="0"
+                    onChange={(e) => {
+                      const price = Math.max(0, Number(e.target.value) || 0);
+                      setPurchasePrice(price);
+                      setDraft(withRate(draft, price));
+                    }}
                   />
                 </FieldRow>
               </div>
@@ -246,7 +294,7 @@ export function RawMaterialsScreen() {
                   <Select
                     value={draft.purchaseUnit}
                     onValueChange={(v) => {
-                      setDraft({ ...draft, purchaseUnit: v });
+                      setDraft(withUnits(draft, v, draft.unit));
                       matForm.clearError("purchaseUnit");
                     }}
                   >
@@ -266,7 +314,7 @@ export function RawMaterialsScreen() {
                   <Select
                     value={draft.unit}
                     onValueChange={(v) => {
-                      setDraft({ ...draft, unit: v });
+                      setDraft(withUnits(draft, draft.purchaseUnit, v));
                       matForm.clearError("unit");
                     }}
                   >
@@ -297,11 +345,20 @@ export function RawMaterialsScreen() {
                       error={matForm.error("conversion")}
                     >
                       <div className="flex items-center gap-2">
+                        {/* The purchase price you typed stays put; only the
+                            per-unit cost follows the conversion. */}
                         <Input
                           type="number"
-                          value={draft.conversion}
+                          min={0}
+                          placeholder="e.g. 1000"
+                          value={draft.conversion || ""}
                           onChange={(e) =>
-                            setDraft({ ...draft, conversion: Number(e.target.value || 1) })
+                            setDraft(
+                              withRate(
+                                { ...draft, conversion: Math.max(0, Number(e.target.value) || 0) },
+                                purchasePrice,
+                              ),
+                            )
                           }
                         />
                         <span className="text-sm text-muted-foreground">{draft.unit}</span>
@@ -377,13 +434,19 @@ export function RawMaterialsScreen() {
                   {
                     key: "price",
                     label: "Purchase price",
-                    value: draft.rate,
+                    value: purchasePrice,
                     valid: (v) => typeof v !== "number" || v >= 0,
                     message: "Purchase price can't be negative",
                   },
                 ]);
                 if (!valid) return;
-                if (await store.upsertRawMaterial(draft)) setDraft(null);
+                // Same unit both ways = 1:1, even if an older record kept a
+                // hidden conversion from before the units were made equal.
+                const toSave = withRate(
+                  { ...draft, conversion: draft.unit === draft.purchaseUnit ? 1 : draft.conversion },
+                  purchasePrice,
+                );
+                if (await store.upsertRawMaterial(toSave)) setDraft(null);
               }}
             >
               Save material
@@ -752,8 +815,8 @@ export function SemiFinishedScreen() {
                     <div className="min-w-0">
                       <p className="truncate font-semibold">{sf.name}</p>
                       <p className="num mt-0.5 text-xs text-muted-foreground">
-                        {fmtQty(sf.stock)} {sf.unit} in stock · cost ₹
-                        {(Math.round(cost * 100) / 100).toLocaleString("en-IN")} / {sf.unit}
+                        {fmtQty(sf.stock)} {sf.unit} in stock · cost {cs()}
+                        {(Math.round(cost * 100) / 100).toLocaleString(numLocale())} / {sf.unit}
                       </p>
                     </div>
                     <div className="flex shrink-0 items-center gap-1">

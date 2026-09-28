@@ -51,8 +51,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { menuApi, type RawProductImage } from "@/lib/api";
 import { downloadTextFile, parseCsv, toCsv } from "@/lib/csv";
 import { cn } from "@/lib/utils";
-import { useStore } from "@/mock/store";
+import { toShortCode, useStore } from "@/mock/store";
 import type { MenuDietary, MenuItem, VariantOption } from "@/mock/types";
+import { cs } from "@/lib/currency";
 
 interface ImportRow {
   idx: number;
@@ -63,20 +64,29 @@ interface ImportRow {
   veg: boolean;
   active: boolean;
   isNewCategory: boolean;
+  /** name of the item on this menu with the same short code - the row updates it */
+  updates?: string;
   error?: string;
 }
 
 const CSV_TEMPLATE_HEADERS = ["Name", "Category", "Price", "Short code", "Veg", "Active"];
 const CSV_TEMPLATE_SAMPLE = [
   ["Paneer Tikka", "Punjabi Mains", "260", "PT01", "Yes", "Yes"],
-  ["Egg Fry", "Starters", "180", "", "No", "Yes"],
+  ["Egg Fry", "Starters", "180", "EF01", "No", "Yes"],
 ];
 
-function parseImportRows(text: string, existingCategories: { name: string }[]): ImportRow[] {
+// existingByCode: this menu's items by short code - a row with one of those
+// codes updates that item instead of adding a new one.
+function parseImportRows(
+  text: string,
+  existingCategories: { name: string }[],
+  existingByCode: Map<string, string>,
+): ImportRow[] {
   const table = parseCsv(text);
   const dataRows = table.slice(1); // skip header
   const knownCategoryNames = new Set(existingCategories.map((c) => c.name.toLowerCase()));
   const seenNewCategoryNames = new Set<string>();
+  const codeRow = new Map<string, number>();
   return dataRows.map(
     ([name = "", category = "", price = "", sku = "", veg = "", active = ""], idx) => {
       const priceNum = Number(price.trim());
@@ -87,16 +97,25 @@ function parseImportRows(text: string, existingCategories: { name: string }[]): 
         !knownCategoryNames.has(lower) &&
         !seenNewCategoryNames.has(lower);
       if (isNewCategory) seenNewCategoryNames.add(lower);
+      // Short code is required and unique within the menu (owner decision,
+      // 2026-09-28) - it is also how a row finds the item it updates.
+      const code = sku.trim().toUpperCase();
+      const firstRow = codeRow.get(code);
+      if (code && firstRow === undefined) codeRow.set(code, idx);
       let error: string | undefined;
       if (!name.trim()) error = "Missing name";
       else if (!categoryName) error = "Missing category";
       else if (!price.trim() || Number.isNaN(priceNum) || priceNum <= 0) error = "Invalid price";
+      else if (!code || code === "ALL") error = "Missing short code";
+      else if (!/^[A-Z0-9]{1,10}$/.test(code)) error = "Short code: letters and numbers, up to 10";
+      else if (firstRow !== undefined) error = `Short code repeats row ${firstRow + 1}`;
       return {
         idx,
         name: name.trim(),
         categoryName,
         price: priceNum,
-        sku: sku.trim() || undefined,
+        sku: code || undefined,
+        updates: code ? existingByCode.get(code) : undefined,
         veg: veg.trim().toLowerCase() !== "no",
         active: active.trim().toLowerCase() !== "no",
         isNewCategory,
@@ -136,6 +155,9 @@ function MenuItemsPage() {
   const store = useStore();
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("all");
+  // Inactive items stay on this list (owner decision 2026-09-28) - this
+  // narrows it to one status.
+  const [status, setStatus] = useState<"all" | "active" | "inactive">("all");
   const [draft, setDraft] = useState<MenuItem | null>(null);
   const form = useFormCheck();
   const formOpen = !!draft;
@@ -184,14 +206,15 @@ function MenuItemsPage() {
   const rows = useMemo(() => {
     const onMenu = store.menuItems
       .filter((i) => categoriesById.get(i.categoryId)?.menuId === viewMenuId)
-      .filter((i) => cat === "all" || i.categoryId === cat);
+      .filter((i) => cat === "all" || i.categoryId === cat)
+      .filter((i) => status === "all" || (status === "active") === i.active);
     // Name OR short code (owner request, 2026-09-22) - searchMenuItems is the
     // biller's own item search, so typing a code finds the same item here.
     return q ? searchMenuItems(onMenu, q) : onMenu;
-  }, [store.menuItems, categoriesById, viewMenuId, cat, q]);
+  }, [store.menuItems, categoriesById, viewMenuId, cat, status, q]);
   const paged = usePagedRows(rows, 10);
 
-  useEffect(() => setSelected([]), [q, cat]);
+  useEffect(() => setSelected([]), [q, cat, status]);
   useEffect(() => {
     setCat("all");
     setSelected([]);
@@ -228,7 +251,6 @@ function MenuItemsPage() {
     const menuLabel = viewMenu?.name ?? "Menu";
     const csvRows = store.menuItems
       .filter((i) => categoriesById.get(i.categoryId)?.menuId === viewMenuId)
-      .filter((i) => i.active)
       .map((i) => [
         i.name,
         catName(i.categoryId),
@@ -325,8 +347,19 @@ function MenuItemsPage() {
               {menuCategories.map((c) => (
                 <SelectItem key={c.id} value={c.id}>
                   {c.name}
+                  {c.active ? "" : " (inactive)"}
                 </SelectItem>
               ))}
+            </SelectContent>
+          </Select>
+          <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
+            <SelectTrigger className="sm:w-40" aria-label="Status">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All statuses</SelectItem>
+              <SelectItem value="active">Active</SelectItem>
+              <SelectItem value="inactive">Inactive</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -454,7 +487,7 @@ function MenuItemsPage() {
                   <Switch
                     checked={i.active}
                     onClick={(e) => e.stopPropagation()}
-                    onCheckedChange={(v) => store.upsertMenuItem({ ...i, active: v })}
+                    onCheckedChange={(v) => store.setMenuItemsActive([i.id], v)}
                   />
                 ),
               },
@@ -473,7 +506,7 @@ function MenuItemsPage() {
                     <Switch
                       checked={i.active}
                       onClick={(e) => e.stopPropagation()}
-                      onCheckedChange={(v) => store.upsertMenuItem({ ...i, active: v })}
+                      onCheckedChange={(v) => store.setMenuItemsActive([i.id], v)}
                     />
                   </div>
                 </div>
@@ -532,7 +565,7 @@ function MenuItemsPage() {
               </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label required>Base price (₹)</Label>
+                  <Label required>Base price ({cs()})</Label>
                   <Input
                     {...form.fieldProps("price")}
                     type="number"
@@ -564,13 +597,21 @@ function MenuItemsPage() {
 
               <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-1.5">
-                  <Label>Short code (optional)</Label>
+                  <Label required>Short code</Label>
+                  {/* Required and unique within this menu (owner decision,
+                      2026-09-28). Letters and numbers, up to 10, upper-case.
+                      An older item's placeholder "all" shows as empty. */}
                   <Input
-                    value={draft.sku ?? ""}
-                    onChange={(e) => setDraft({ ...draft, sku: e.target.value.slice(0, 5) })}
-                    maxLength={5}
+                    {...form.fieldProps("sku")}
+                    value={itemShortCode(draft.sku) ?? ""}
+                    onChange={(e) => {
+                      setDraft({ ...draft, sku: toShortCode(e.target.value) });
+                      form.clearError("sku");
+                    }}
+                    maxLength={10}
                     placeholder="e.g. PT260"
                   />
+                  <FieldError message={form.error("sku")} />
                 </div>
                 <div className="space-y-1.5">
                   <Label>Barcode (optional)</Label>
@@ -638,6 +679,22 @@ function MenuItemsPage() {
                     />
                   </div>
                 ))}
+                {/* Old BillerPe's Goods / Service item type (owner decision,
+                    2026-09-28): a Goods item carries no tax on the bill. */}
+                <div className="flex items-center justify-between gap-3 rounded-xl border border-border px-3 py-2.5 sm:col-span-2">
+                  <div>
+                    <span className="text-sm font-medium">Goods item (no tax)</span>
+                    <p className="text-xs text-muted-foreground">
+                      e.g. packaged water or soft drinks sold at MRP. Off = service item, taxed
+                      normally.
+                    </p>
+                  </div>
+                  <Switch
+                    aria-label="Goods item (no tax)"
+                    checked={!!draft.goods}
+                    onCheckedChange={(v) => setDraft({ ...draft, goods: v })}
+                  />
+                </div>
               </div>
 
               <div className="rounded-xl border border-border p-3">
@@ -687,6 +744,7 @@ function MenuItemsPage() {
                           {menuVariantMasters.map((m) => (
                             <SelectItem key={m.id} value={m.name}>
                               {m.name}
+                              {m.active === false ? " (inactive)" : ""}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -694,7 +752,7 @@ function MenuItemsPage() {
                       <Input
                         type="number"
                         min={0}
-                        placeholder="Price ₹"
+                        placeholder={`Price ${cs()}`}
                         aria-label="Variant price"
                         value={row.price}
                         onChange={(e) => {
@@ -749,6 +807,7 @@ function MenuItemsPage() {
                         )}
                       >
                         {g.name}
+                        {g.active === false ? " (inactive)" : ""}
                       </button>
                     );
                   })}
@@ -786,8 +845,25 @@ function MenuItemsPage() {
                 disabled={!(draft?.id ? access.edit : access.create)}
                 onClick={async () => {
                   if (!draft) return;
+                  const code = toShortCode(itemShortCode(draft.sku));
+                  const codeTakenBy = store.menuItems.find(
+                    (i) =>
+                      i.id !== draft.id &&
+                      categoriesById.get(i.categoryId)?.menuId ===
+                        categoriesById.get(draft.categoryId)?.menuId &&
+                      toShortCode(i.sku) === code,
+                  );
                   const ok = form.check([
                     { key: "name", label: "Item name", value: draft.name },
+                    {
+                      key: "sku",
+                      label: "Short code",
+                      value: code,
+                      valid: (v) => !!v && v !== "ALL" && !codeTakenBy,
+                      message: codeTakenBy
+                        ? `Already used by ${codeTakenBy.name} in this menu`
+                        : "Enter a short code",
+                    },
                     {
                       key: "categoryId",
                       label: "Category",
@@ -799,7 +875,7 @@ function MenuItemsPage() {
                       label: "Base price",
                       value: draft.price,
                       valid: (v) => typeof v === "number" && v > 0,
-                      message: "Base price must be more than ₹0",
+                      message: `Base price must be more than ${cs()}0`,
                     },
                   ]);
                   if (!ok) return;
@@ -866,7 +942,13 @@ function MenuItemsPage() {
                 const reader = new FileReader();
                 reader.onload = () => {
                   const text = String(reader.result ?? "");
-                  setImportRows(parseImportRows(text, menuCategories));
+                  const onThisMenu = new Set(menuCategories.map((c) => c.id));
+                  const byCode = new Map(
+                    store.menuItems
+                      .filter((i) => onThisMenu.has(i.categoryId) && itemShortCode(i.sku))
+                      .map((i) => [toShortCode(i.sku), i.name] as const),
+                  );
+                  setImportRows(parseImportRows(text, menuCategories, byCode));
                 };
                 reader.readAsText(file);
                 e.target.value = "";
@@ -928,7 +1010,12 @@ function MenuItemsPage() {
                       r.error ? (
                         <span className="text-xs font-medium text-primary">{r.error}</span>
                       ) : (
-                        <StatusBadge status="Active" />
+                        <span className="flex flex-col gap-0.5">
+                          <StatusBadge status={r.active ? "Active" : "Inactive"} />
+                          <span className="text-[11px] text-muted-foreground">
+                            {r.updates ? `Updates ${r.updates}` : "New item"}
+                          </span>
+                        </span>
                       ),
                   },
                 ]}
