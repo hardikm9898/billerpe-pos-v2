@@ -270,7 +270,7 @@ function SystemPage() {
             />
             <StatCard
               label="Offline days remaining"
-              value={Math.max(0, status.sync.maxOfflineDays - status.sync.daysSinceSync)}
+              value={Math.max(0, status.sync.maxOfflineDays - status.sync.daysSinceSync).toFixed(2)}
               tone={status.sync.transactionsBlocked ? "primary" : "default"}
               hint={status.sync.transactionsBlocked ? "Billing is currently blocked" : undefined}
             />
