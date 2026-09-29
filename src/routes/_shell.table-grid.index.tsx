@@ -16,6 +16,7 @@ import {
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 
+import { SettleCustomerLine } from "@/components/billing/settle-customer-line";
 import { Money, Page, PageHeader, SectionCard, StatusBadge } from "@/components/kit";
 import {
   PaymentSplitEditor,
@@ -672,6 +673,12 @@ function TableGridPage() {
                         shown as change to return.
                       </DialogDescription>
                     </DialogHeader>
+                    {order ? (
+                      <SettleCustomerLine
+                        order={order}
+                        hasDue={splits.some((p) => p.mode === "Due" && p.amount > 0)}
+                      />
+                    ) : null}
                     <PaymentSplitEditor
                       splits={splits}
                       onChange={setSplits}

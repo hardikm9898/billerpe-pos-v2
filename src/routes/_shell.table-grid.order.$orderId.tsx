@@ -2,6 +2,7 @@ import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
 import { addonLabel } from "@/mock/format";
 import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
 import { byCategoryOrder, isSellable, sellableItem } from "@/lib/sellable";
+import { SettleCustomerLine } from "@/components/billing/settle-customer-line";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { CustomerHistoryPanel } from "@/components/billing/customer-history";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -1464,6 +1465,10 @@ function OrderCartPage() {
               </div>
             </div>
           ) : null}
+          <SettleCustomerLine
+            order={order}
+            hasDue={editSplits.some((p) => p.mode === "Due" && p.amount > 0)}
+          />
           <PaymentSplitEditor
             splits={editSplits}
             onChange={setEditSplits}
@@ -1542,6 +1547,10 @@ function OrderCartPage() {
             </div>
           ) : null}
 
+          <SettleCustomerLine
+            order={order}
+            hasDue={splits.some((p) => p.mode === "Due" && p.amount > 0)}
+          />
           <PaymentSplitEditor
             splits={splits}
             onChange={setSplits}

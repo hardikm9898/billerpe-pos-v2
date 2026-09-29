@@ -849,12 +849,13 @@ interface Ctx extends State {
    * the discount is refused: more than 100%, or a flat amount above the
    * bill - owner rule, 2026-09-22. */
   applyDiscount: (orderId: string, label: string, type: "percent" | "flat", value: number) => boolean;
+  /** Empty name + phone = "Remove customer". */
   setCustomer: (
     orderId: string,
     name: string,
     phone: string,
     extra?: { address?: string; gstin?: string },
-  ) => void;
+  ) => Promise<void>;
   /** `service` is the manual service charge (₹) - only meaningful when the
    * service charge is not automatic for the order's type (serviceIsManual). */
   setCharges: (orderId: string, packaging: number | undefined, service?: number) => void;
@@ -4777,10 +4778,54 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return true;
     },
 
-    setCustomer: (orderId, name, phone, extra) => {
+    setCustomer: async (orderId, name, phone, extra) => {
       const draft = ensureRealOrder(orderId);
       const o = s.orders.find((x) => x.id === orderId) ?? draft;
       if (!o) return;
+      // "Remove customer" (owner list 2026-09-29 #4). It used to clear only
+      // this screen: a KOT / Save with no customer never cleared it on the
+      // exe, so the next refresh brought the customer back. An open order
+      // loses it on the exe now; a settled bill being edited loses it when
+      // the edit is saved (so Cancel keeps it); a draft never had one there.
+      if (!name.trim() && !phone.trim()) {
+        if (!o.editingSettledOrderId && o.backendId) {
+          try {
+            await orderApi.removeCustomer(o.backendId);
+          } catch (err) {
+            toast.error(err instanceof ApiError ? err.message : "Could not remove the customer");
+            return;
+          }
+        }
+        patch((p) => ({
+          ...p,
+          orders: p.orders.map((x) =>
+            x.id === orderId
+              ? {
+                  ...x,
+                  customerName: undefined,
+                  customerPhone: undefined,
+                  customerAddress: undefined,
+                  customerGstin: undefined,
+                  ...(x.editingSettledOrderId ? { customerRemoved: true } : {}),
+                }
+              : x,
+          ),
+        }));
+        log(
+          "Customer Removed",
+          `Order #${o.orderNo}`,
+          `${o.customerName ?? ""} · ${o.customerPhone ?? ""}`,
+          "—",
+          undefined,
+          { id: o.id, backendId: o.backendId },
+        );
+        toast.success(
+          o.editingSettledOrderId
+            ? "Customer will be removed when you save the changes"
+            : "Customer removed from this order",
+        );
+        return;
+      }
       patch((p) => ({
         ...p,
         orders: p.orders.map((o) =>
@@ -4791,6 +4836,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 customerPhone: phone,
                 customerAddress: extra?.address,
                 customerGstin: extra?.gstin,
+                customerRemoved: false,
               }
             : o,
         ),
@@ -5491,6 +5537,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ...discountPayload(o, totals),
           service_charge: totals.service,
           ...(payment ? { payment } : {}),
+          ...(o.customerRemoved && !o.customerPhone ? { removeCustomer: true } : {}),
         });
         patch((p) => ({ ...p, orders: p.orders.filter((x) => x.id !== localOrderId) }));
         await Promise.all([value.loadOrderHistoryFromServer(), value.loadRawMaterialsFromServer()]);

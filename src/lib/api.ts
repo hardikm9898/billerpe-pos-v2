@@ -319,6 +319,8 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "GET", test: (p) => p === "/refundDue" },
     { method: "POST", test: (p) => p === "/refundDue" },
     { method: "POST", test: (p) => p === "/orderRemove" },
+    // "Remove customer" on an open order (controller/customer.js#removeOrderCustomer).
+    { method: "POST", test: (p) => p === "/order/removeCustomer" },
 
     // KDS - kitchen list/config. The /kds socket namespace itself isn't
     // path-routed here (kdsSocket.ts connects directly to EXE_BASE_URL,
@@ -2049,6 +2051,13 @@ export const orderApi = {
   holdOrder: (payload: KotPayload) =>
     apiPost<{ message?: string; orderId: number; bill_no?: string }>("/holdOrder", payload),
 
+  // POST /order/removeCustomer (billerpe-local-exe/controller/customer.js) -
+  // takes the customer off a running / held / billed order at once; a KOT or
+  // Save with an empty customer never cleared it (owner list 2026-09-29 #4).
+  // The customer stays in Customer Data. Settled bills: editSettledOrderApi.
+  removeCustomer: (orderId: number) =>
+    apiPost<{ removed: boolean }>("/order/removeCustomer", { order_id: orderId }),
+
   // POST /kotReady (billerpe-local-exe/controller/kot.js#markKotReady) -
   // marks every still-in-kitchen line of one fired round ready and broadcasts
   // it to every other connected device (Captain App notifications, other Web
@@ -2809,6 +2818,9 @@ export const editSettledOrderApi = {
       address?: string;
       gstin?: string;
     };
+    /** "Remove customer" while editing: applied with this save (refused if
+     * the edited bill still has an amount due). */
+    removeCustomer?: boolean;
   }) => apiPost<{ message?: string; due: number }>("/editSettledOrder", params),
 };
 

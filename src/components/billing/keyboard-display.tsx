@@ -1,6 +1,7 @@
 import { FieldError, discountProblem, useFormCheck } from "@/lib/formCheck";
 import { itemShortCode, searchMenuItems } from "@/lib/menuSearch";
 import { isSellable, sellableItem } from "@/lib/sellable";
+import { SettleCustomerLine } from "@/components/billing/settle-customer-line";
 import { TablePicker } from "@/components/billing/table-picker";
 import { CustomerDetailsDialog } from "@/components/billing/customer-details-dialog";
 import { splitCheck } from "@/lib/payments";
@@ -2319,6 +2320,11 @@ function SettleDialog({
             <UpiQrPanel upiId={store.invoiceFormat.upiId} amount={upiAmount} />
           ) : null}
         </div>
+
+        <SettleCustomerLine
+          order={order}
+          hasDue={splits.some((p) => p.mode === "Due" && p.amount > 0)}
+        />
 
         <ul className="space-y-2">
           {splits.map((p, i) => (

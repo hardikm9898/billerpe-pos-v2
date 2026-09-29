@@ -344,6 +344,9 @@ export interface Order {
    * of the normal billing actions, and tells saveSettledOrderEdits which
    * real order to PATCH. */
   editingSettledOrderId?: number;
+  /** On an edit copy of a settled bill: "Remove customer" was pressed; the
+   * edit save takes the customer off (owner list 2026-09-29 #4). */
+  customerRemoved?: boolean;
 }
 
 export interface RefundDue {
