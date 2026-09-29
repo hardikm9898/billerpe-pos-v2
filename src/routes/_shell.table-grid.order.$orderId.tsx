@@ -532,7 +532,7 @@ function OrderCartPage() {
         </div>
 
         <div className="flex min-h-0 flex-1">
-          <div className="flex w-36 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2 scrollbar-slim">
+          <div className="flex w-40 shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border p-2 scrollbar-slim">
             {[
               { id: "all", name: "All" },
               { id: "fav", name: "★ Favourites" },
@@ -541,8 +541,13 @@ function OrderCartPage() {
               <button
                 key={c.id}
                 onClick={() => setCategoryId(c.id)}
+                title={c.name}
+                // shrink-0: in this scrolling column a long category list
+                // squashed every button to a sliver instead of scrolling
+                // (owner report 2026-09-29, 35+ categories). Long names wrap
+                // to two lines.
                 className={cn(
-                  "truncate rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors",
+                  "shrink-0 break-words rounded-lg px-3 py-2 text-left text-sm font-medium leading-snug transition-colors line-clamp-2",
                   categoryId === c.id
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:bg-surface-muted",
