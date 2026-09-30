@@ -272,6 +272,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "GET", test: (p) => p.startsWith("/customer/getAll") },
     { method: "POST", test: (p) => p === "/customer/create" },
     { method: "PUT", test: (p) => p === "/customer/update" },
+    { method: "POST", test: (p) => p === "/customer/delete" },
     // Support tickets - the exe forwards them to the cloud itself.
     { method: "POST", test: (p) => p === "/support/ticket" },
     { method: "GET", test: (p) => p.startsWith("/support/tickets") },
@@ -2896,6 +2897,12 @@ export const customerApi = {
 
   update: (params: { id: number; name: string; number: string; gstin: string; address: string }) =>
     apiPut<{ message?: string }>("/customer/update", params),
+
+  // controller/customer.js#deleteCustomerData: the customer (every record with
+  // that mobile) leaves Customer Data and every OPEN order; settled bills keep
+  // the name. Refused while they owe a due.
+  remove: (id: number) =>
+    apiPost<{ deleted: number; ordersCleared: number }>("/customer/delete", { id }),
 
   // controller/customer.js#getLastOrderForCustomer (GET /customer/
   // lastOrder) - "repeat this customer's last order" suggestion for the

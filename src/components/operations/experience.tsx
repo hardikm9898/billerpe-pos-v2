@@ -9,6 +9,7 @@ import {
   QrCode,
   Rows3,
   Search,
+  Trash2,
   UserRound,
 } from "lucide-react";
 import QRCode from "qrcode";
@@ -43,7 +44,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ApiError, hotelApi, qrOrderApi } from "@/lib/api";
+import { ApiError, customerApi, hotelApi, qrOrderApi } from "@/lib/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { encryptHotelId, encryptQrPayload, qrBaseUrl } from "@/lib/publicMenu";
 import { cn } from "@/lib/utils";
 import { useStore } from "@/mock/store";
@@ -610,8 +621,55 @@ export function CustomerSection() {
   }, [q, store.customers]);
   const paged = usePagedRows(rows, 10);
 
+  // Delete (owner list 2026-09-29 #4): leaves the list and every open order;
+  // settled bills keep the name. The exe refuses it while the customer owes a due.
+  const canDelete = store.can("ops-experience", "delete");
+  const [deleting, setDeleting] = useState<Customer | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const confirmDelete = async () => {
+    if (!deleting) return;
+    setDeleteBusy(true);
+    try {
+      const r = await customerApi.remove(Number(deleting.id));
+      toast.success(
+        r.ordersCleared
+          ? `${deleting.name} deleted and removed from ${r.ordersCleared} open order${r.ordersCleared === 1 ? "" : "s"}`
+          : `${deleting.name} deleted`,
+      );
+      setDeleting(null);
+      await store.loadCustomersFromServer();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not delete this customer");
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
+      <AlertDialog open={!!deleting} onOpenChange={(o) => !o && !deleteBusy && setDeleting(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {deleting?.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              They leave Customer Data and every open order (running, held, bill generated). Settled
+              bills keep the name. Typing this mobile again later starts a new customer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteBusy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deleteBusy}
+              onClick={(e) => {
+                e.preventDefault();
+                void confirmDelete();
+              }}
+            >
+              {deleteBusy ? "Deleting…" : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <Notice tone="info" title="Typing a mobile number at billing autofills from this list">
         Name, GSTIN and address flow straight onto the invoice, so keeping GSTIN accurate matters
         for corporate guests.
@@ -697,9 +755,22 @@ export function CustomerSection() {
               key: "act",
               header: "",
               cell: (c) => (
-                <Button size="sm" variant="outline" onClick={() => setDraft(c)}>
-                  Edit
-                </Button>
+                <div className="flex justify-end gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setDraft(c)}>
+                    Edit
+                  </Button>
+                  {canDelete ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-destructive"
+                      aria-label={`Delete ${c.name}`}
+                      onClick={() => setDeleting(c)}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  ) : null}
+                </div>
               ),
             },
           ]}
