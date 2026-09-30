@@ -3047,7 +3047,8 @@ export type RawExeUpdateStatus = {
   packaged: boolean;
   /** the newer version the cloud offers, if any */
   available: string | null;
-  status: "idle" | "downloading" | "ready" | "installing" | "error";
+  /** waiting = the BillerPe server is sending the update to other outlets first */
+  status: "idle" | "downloading" | "waiting" | "ready" | "installing" | "error";
   version: string | null;
   bytes: number;
   total: number;

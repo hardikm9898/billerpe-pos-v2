@@ -211,6 +211,12 @@ function ServerUpdateCard() {
               <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
             </div>
           </div>
+        ) : info.status === "waiting" ? (
+          <p>
+            Version <span className="num">{info.version}</span> is waiting for its turn to download
+            - the BillerPe server sends it to a few restaurants at a time. Nothing to do; it
+            continues by itself.
+          </p>
         ) : info.ready ? (
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
             <p>
