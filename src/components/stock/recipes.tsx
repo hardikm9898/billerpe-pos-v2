@@ -838,8 +838,7 @@ export function ProductionScreen() {
               {shortages.length ? (
                 <p className="rounded-lg bg-warning-soft px-3 py-2 text-xs text-warning">
                   {shortages.length} material{shortages.length > 1 ? "s" : ""} short of the required
-                  quantity. Stock will clamp at zero and the shortfall is flagged — negative stock
-                  policy is still an open decision.
+                  quantity. The batch can't be recorded until there is enough in stock.
                 </p>
               ) : null}
               <FieldRow label="Notes">

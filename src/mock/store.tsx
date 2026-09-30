@@ -16,7 +16,7 @@ import { splitCheck } from "@/lib/payments";
 import QRCode from "qrcode";
 
 import { OFFLINE_SETTINGS, ROLE_PERMISSION_DEFAULTS, ROLE_SPECIAL_DEFAULTS } from "./data";
-import { addonLabel, nowStamp, realToday, isoToDMY, dmyToIso } from "./format";
+import { addonLabel, nowStamp, stampOf, realToday, isoToDMY, dmyToIso } from "./format";
 import {
   ApiError,
   API_BASE_URL,
@@ -1030,6 +1030,8 @@ interface Ctx extends State {
   loadRequisitionsFromServer: () => Promise<void>;
   loadWastageFromServer: () => Promise<void>;
   loadSemiFinishedFromServer: () => Promise<void>;
+  /** Production history, from the exe's stock journal. */
+  loadProductionRunsFromServer: () => Promise<void>;
   loadRecipesFromServer: () => Promise<void>;
   loadExpenseHeadsFromServer: () => Promise<void>;
   /** Full-range load for Dashboard/Expense Heads/the expense report - NOT
@@ -7592,6 +7594,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         );
       }
     },
+    loadProductionRunsFromServer: async () => {
+      try {
+        const { runs } = await semiFinishedApi.productionHistory();
+        const productionRuns: ProductionRun[] = (runs ?? []).map((r) => ({
+          id: `pr-${r.id}`,
+          semiId: `sf-${r.semi_finished_item_id}`,
+          qty: Number(r.qty) || 0,
+          cost: Math.round((Number(r.cost) || 0) * 100) / 100,
+          at: stampOf(new Date(r.createdAt)),
+          by: r.user ?? "—",
+          ...(r.note ? { notes: r.note } : {}),
+        }));
+        patch((p) => ({ ...p, productionRuns }));
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not load production history");
+      }
+    },
     loadRecipesFromServer: async () => {
       try {
         const { recipes: summaries } = await recipeApi.getAllLinked();
@@ -8709,72 +8728,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void run();
     },
     semiUnitCost,
-    recordProduction: (semiId, qty, notes) => {
+    // The exe makes the batch (uses the raw materials, adds the prep stock,
+    // writes the run to its stock journal) and may refuse it - e.g. a
+    // material is short. Nothing changes here until it has answered: this
+    // used to add the run and the stock in this tab first, so a refused
+    // batch still showed, and every run vanished on refresh (list 6 issue 7).
+    recordProduction: async (semiId, qty, notes) => {
       const sf = s.semiFinished.find((x) => x.id === semiId);
-      if (!sf || qty <= 0) return Promise.resolve(false);
-      const who = currentUser.name;
-      const cost = semiUnitCost(semiId) * qty;
-      patch((p) => {
-        const moves: StockMovement[] = [];
-        const rawMaterials = p.rawMaterials.map((m) => {
-          const c = sf.components.find((x) => x.materialId === m.id);
-          if (!c) return m;
-          const used = c.qty * qty;
-          moves.push(movement("Production Out", "raw", m.id, -used, -used * m.rate, sf.name, who));
-          return { ...m, stock: Math.max(0, m.stock - used) };
+      if (!sf || qty <= 0) return false;
+      const backendId = semiId ? Number(semiId.replace("sf-", "")) : undefined;
+      if (!backendId) {
+        toast.error("This item hasn't been saved to the server yet", {
+          description: "Save it first, then record production.",
         });
-        moves.push(movement("Production In", "semi", sf.id, qty, cost, "Production run", who));
-        return {
-          ...p,
-          rawMaterials,
-          semiFinished: p.semiFinished.map((x) =>
-            x.id === semiId ? { ...x, stock: Math.round((x.stock + qty) * 1000) / 1000 } : x,
-          ),
-          productionRuns: [
-            {
-              id: uid("pr"),
-              semiId,
-              qty,
-              cost: Math.round(cost * 100) / 100,
-              at: nowStamp(),
-              by: who,
-              ...(notes ? { notes } : {}),
-            },
-            ...p.productionRuns,
-          ],
-          stockMovements: [...moves, ...p.stockMovements],
-        };
-      });
+        return false;
+      }
+      try {
+        await semiFinishedApi.recordProduction({
+          semi_finished_item_id: backendId,
+          produced_qty: qty,
+          ...(notes ? { notes } : {}),
+        });
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not record production");
+        return false;
+      }
       log("Production Recorded", sf.name, "—", `${qty} ${sf.unit}`);
       toast.success("Production recorded", {
         description: `${qty} ${sf.unit} of ${sf.name} · raw materials consumed`,
       });
-
-      const backendId = semiId ? Number(semiId.replace("sf-", "")) : undefined;
-      if (!backendId) {
-        toast.error("This item hasn't been saved to the server yet", {
-          description: "Save it first, then record production - stock won't sync until then.",
-        });
-        return Promise.resolve(false);
-      }
-      const run = async () => {
-        try {
-          await semiFinishedApi.recordProduction({
-            semi_finished_item_id: backendId,
-            produced_qty: qty,
-            ...(notes ? { notes } : {}),
-          });
-          await value.loadSemiFinishedFromServer();
-          await value.loadRawMaterialsFromServer();
-          return true;
-        } catch (err) {
-          toast.error(
-            err instanceof ApiError ? err.message : "Recorded locally but the backend sync failed",
-          );
-          return false;
-        }
-      };
-      return run();
+      await Promise.all([
+        value.loadSemiFinishedFromServer(),
+        value.loadRawMaterialsFromServer(),
+        value.loadProductionRunsFromServer(),
+      ]);
+      return true;
     },
     upsertRecipe: (r) => {
       if (!r.menuItemId) {

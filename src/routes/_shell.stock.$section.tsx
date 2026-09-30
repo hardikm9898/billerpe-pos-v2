@@ -111,7 +111,7 @@ type Loader = keyof ReturnType<typeof useStore>;
 const SECTION_LOADERS: Record<string, Loader[]> = {
   suppliers: ["loadSuppliersFromServer", "loadPurchaseOrdersFromServer"],
   "semi-finished": ["loadSemiFinishedFromServer"],
-  production: ["loadSemiFinishedFromServer"],
+  production: ["loadSemiFinishedFromServer", "loadProductionRunsFromServer"],
   "purchase-orders": ["loadPurchaseOrdersFromServer", "loadSuppliersFromServer"],
   "franchise-requisitions": ["loadRequisitionsFromServer"],
   wastage: ["loadWastageFromServer"],

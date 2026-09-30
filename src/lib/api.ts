@@ -355,6 +355,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "PUT", test: (p) => p === "/semiFinished/edit" },
     { method: "DELETE", test: (p) => p.startsWith("/semiFinished/delete") },
     { method: "POST", test: (p) => p === "/semiFinished/production" },
+    { method: "GET", test: (p) => p.startsWith("/semiFinished/productionHistory") },
 
     // Phase F: expense + cash session.
     { method: "POST", test: (p) => p === "/expense/addExpenseHead" },
@@ -3801,6 +3802,20 @@ export const semiFinishedApi = {
       "/semiFinished/production",
       params,
     ),
+  // Past runs, from the exe's stock journal (newest first).
+  productionHistory: () =>
+    apiGet<{ runs: RawProductionRun[] }>("/semiFinished/productionHistory?limit=500"),
+};
+
+export type RawProductionRun = {
+  id: number;
+  semi_finished_item_id: number;
+  qty: number;
+  cost: number;
+  note: string;
+  user: string | null;
+  business_date: string;
+  createdAt: string;
 };
 
 export type RawRecipeIngredient = {

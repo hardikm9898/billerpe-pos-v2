@@ -14,11 +14,17 @@ export const compactInr = (value: number) =>
       : `${cs()}${value}`;
 
 export function nowStamp() {
-  const d = new Date();
+  return stampOf(new Date());
+}
+
+/** "DD/MM/YYYY hh:mm am" for any moment - same shape as nowStamp. */
+export function stampOf(d: Date) {
+  const dd = `${d.getDate()}`.padStart(2, "0");
+  const mo = `${d.getMonth() + 1}`.padStart(2, "0");
   const hh = d.getHours() % 12 || 12;
   const mm = `${d.getMinutes()}`.padStart(2, "0");
   const ap = d.getHours() >= 12 ? "pm" : "am";
-  return `${realToday()} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
+  return `${dd}/${mo}/${d.getFullYear()} ${`${hh}`.padStart(2, "0")}:${mm} ${ap}`;
 }
 
 // Real current time-of-day, in minutes since midnight - was hardcoded to
