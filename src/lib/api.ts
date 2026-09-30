@@ -2424,6 +2424,15 @@ export type RawOrderHeader = {
   /** Discount INPUT the exe recomputes from ("pr" = percent of subtotal). */
   discount_type?: "fix" | "pr" | null;
   discount_value?: number | null;
+  /** The bill's stored taxes. Column names are the other way round: amount =
+   * the RATE, tax_value = the rupees charged (exe helpers/orderTotals.js). */
+  hms_order_tax_msts?: {
+    hmsTaxTypeMstId: number | null;
+    amount: number;
+    tax_type: string;
+    tax_value: number;
+    hms_tax_type_mst?: { tax_name?: string } | null;
+  }[];
   /** Explicit per-order packaging override, null when the rule applies. */
   packaging_override?: number | null;
   /** The cashier's manual service charge, null when none was entered. */

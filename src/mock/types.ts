@@ -338,6 +338,11 @@ export interface Order {
    * changed - consumers of order history should read this instead of
    * calling orderTotals() for these orders. */
   backendTotals?: { grand: number; tax: number; discount: number; serviceCharge: number };
+  /** The taxes this bill was actually charged (the exe's OrderTax rows) - on
+   * settled history and its edit copy. Shown, reprinted and used for an edit
+   * instead of today's tax setup: a bill taken while GST was off has none
+   * (list 6 issue 10). Undefined = not known, today's setup is used. */
+  billedTaxes?: { id: string; name: string; rate: number; type: "pr" | "fix"; amount: number }[];
   /** Set only on a local, editable copy of an already-settled order (see
    * store.startEditSettledOrder) - the value is that real order's
    * backendId. Lets the order screen show "Save changes"/"Cancel" instead

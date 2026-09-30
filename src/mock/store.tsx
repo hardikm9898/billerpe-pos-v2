@@ -519,7 +519,8 @@ export interface BillTotals {
   service: number;
   delivery: number;
   packaging: number;
-  taxLines: { id: string; name: string; amount: number }[];
+  /** rate/type: set when the line comes from the bill's own stored taxes. */
+  taxLines: { id: string; name: string; amount: number; rate?: number; type?: "pr" | "fix" }[];
   tax: number;
   /** Signed delta applied to reach `grand` from the raw paise-precision sum - positive means rounded up, negative means rounded down. */
   roundOff: number;
@@ -574,6 +575,29 @@ function toEngineTax(rule: TaxRule, menuItems: BillSettings["menuItems"]): Engin
   };
 }
 
+// A bill's own stored taxes as engine taxes - the same rule as the exe's
+// helpers/orderTotals.js#billedTaxConfig, so an edit's preview matches what
+// the exe saves: the rates it was charged, no order-type/area filter (that
+// was decided when it was billed), a dish-limited tax keeps today's dish list.
+function billedConfig(billed: NonNullable<Order["billedTaxes"]>, settings: BillSettings) {
+  return {
+    gstOn: billed.length > 0,
+    taxTypes: billed.map((b) => {
+      const rule = settings.taxRules.find((r) => r.id === b.id);
+      return {
+        id: b.id,
+        name: b.name,
+        type: b.type,
+        rate: b.rate,
+        active: true,
+        orderTypes: [],
+        tableCategIds: [],
+        menuIds: rule ? toEngineTax(rule, settings.menuItems).menuIds : [],
+      };
+    }),
+  };
+}
+
 /** True when the service charge is ON but NOT automatic for this order's
  * type - the cashier then enters it by hand on the order (owner rule,
  * 2026-09-22; same test as billEngine.ts#serviceIsAutomatic). */
@@ -618,6 +642,7 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
   const tableCategId = order.tableId
     ? (settings.tables?.find((t) => t.id === order.tableId)?.categoryId ?? null)
     : null;
+  const billed = order.billedTaxes;
   const totals = computeBill({
     lines,
     orderType: order.type === "Dine In" ? "dinin" : "pickup",
@@ -626,19 +651,48 @@ export function orderTotals(order: Order | undefined, settings: BillSettings): B
     packagingOverride: order.packagingCharge,
     serviceOverride: order.serviceCharge,
     config: {
-      gstOn: settings.invoiceFormat.gstCalculation,
-      taxTypes: settings.taxRules.map((r) => toEngineTax(r, settings.menuItems)),
+      ...(billed
+        ? billedConfig(billed, settings)
+        : {
+            gstOn: settings.invoiceFormat.gstCalculation,
+            taxTypes: settings.taxRules.map((r) => toEngineTax(r, settings.menuItems)),
+          }),
       serviceCharge: toEngineCharge(settings.serviceCharge),
       packagingRule: toEngineCharge(settings.packagingChargeRule),
     },
   });
+  // Not being edited: exactly what was charged, not a recomputation.
+  if (billed && !order.editingSettledOrderId) {
+    return {
+      subtotal: totals.subtotal,
+      discount: totals.discount,
+      service: totals.service,
+      delivery: totals.delivery,
+      packaging: totals.packaging,
+      taxLines: billed.map((b) => ({
+        id: b.id,
+        name: b.name,
+        amount: b.amount,
+        rate: b.rate,
+        type: b.type,
+      })),
+      tax: Math.round(billed.reduce((sum, b) => sum + b.amount, 0) * 100) / 100,
+      roundOff: totals.roundOff,
+      grand: totals.grandAmount,
+    };
+  }
   return {
     subtotal: totals.subtotal,
     discount: totals.discount,
     service: totals.service,
     delivery: totals.delivery,
     packaging: totals.packaging,
-    taxLines: totals.taxLines.map((t) => ({ id: String(t.id), name: t.name, amount: t.amount })),
+    taxLines: totals.taxLines.map((t) => ({
+      id: String(t.id),
+      name: t.name,
+      amount: t.amount,
+      ...(billed ? { rate: t.tax_value, type: t.tax_type } : {}),
+    })),
     tax: totals.tax,
     roundOff: totals.roundOff,
     grand: totals.grandAmount,
@@ -2255,6 +2309,17 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       discount: detail.totalDiscount,
       serviceCharge: detail.service_charge,
     },
+    ...(Array.isArray(detail.hms_order_tax_msts)
+      ? {
+          billedTaxes: detail.hms_order_tax_msts.map((t) => ({
+            id: String(t.hmsTaxTypeMstId ?? ""),
+            name: t.hms_tax_type_mst?.tax_name || "Tax",
+            rate: Number(t.amount) || 0,
+            type: t.tax_type === "fix" ? ("fix" as const) : ("pr" as const),
+            amount: Number(t.tax_value) || 0,
+          })),
+        }
+      : {}),
   };
 }
 
@@ -3466,8 +3531,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const rule = s.taxRules.find((r) => r.id === tx.id);
         return {
           hms_tax_type_mst: { tax_name: tx.name },
-          amount: rule?.value ?? 0,
-          tax_type: rule?.type === "percent" ? ("pr" as const) : ("fix" as const),
+          // A bill's own stored rate when it has one (a reprint of an old
+          // bill prints the rate it was charged, not today's).
+          amount: tx.rate ?? rule?.value ?? 0,
+          tax_type: tx.type ?? (rule?.type === "percent" ? ("pr" as const) : ("fix" as const)),
           tax_value: tx.amount,
         };
       });
