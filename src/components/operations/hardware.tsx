@@ -67,9 +67,16 @@ export function KitchenSection() {
     return `${cat} ${t.name}`.trim();
   };
 
-  const unassigned = store.menuCategories.filter(
-    (c) => !store.kitchens.some((k) => k.menuCategoryIds.includes(c.id)),
-  );
+  // A kitchen with no categories picked takes ALL of them, so nothing is
+  // unrouted then (the warning used to list every category even so - owner
+  // report 2026-09-29). Inactive categories can't be ordered and don't count.
+  const routable = store.menuCategories.filter((c) => c.active);
+  const takesAll = store.kitchens.some((k) => k.menuCategoryIds.length === 0);
+  const unassigned = takesAll
+    ? []
+    : routable.filter(
+        (c) => !store.kitchens.some((k) => k.menuCategoryIds.map(String).includes(String(c.id))),
+      );
 
   return (
     <div className="space-y-4">
@@ -91,9 +98,11 @@ export function KitchenSection() {
       </div>
 
       <Notice tone="info" title="A kitchen is a destination, not a device">
-        When a KOT is generated, the item's menu category is matched against these kitchens to
-        decide which KDS screen it appears on. A category with no match routes to the default
-        kitchen —{" "}
+        When a KOT is generated, each item is matched against these kitchens (menu category, table
+        section, order type) to decide which KDS screen it appears on. If several kitchens take an
+        item, only the one set up most specifically for it shows it - a Bar kitchen for Drinks takes
+        the drinks away from a kitchen set to all categories. KOT printers follow the same rule. A
+        category with no match routes to the default kitchen —{" "}
         <span className="font-semibold">
           {store.kitchens.find((k) => k.isDefault)?.name ?? store.kitchens[0]?.name ?? "none set"}
         </span>
@@ -102,10 +111,7 @@ export function KitchenSection() {
 
       <div className="grid gap-3 sm:grid-cols-3">
         <StatCard label="Kitchens" value={String(store.kitchens.length)} tone="primary" />
-        <StatCard
-          label="Categories routed"
-          value={String(store.menuCategories.length - unassigned.length)}
-        />
+        <StatCard label="Categories routed" value={String(routable.length - unassigned.length)} />
         <StatCard
           label="Unrouted categories"
           value={String(unassigned.length)}

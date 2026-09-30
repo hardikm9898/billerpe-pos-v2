@@ -706,10 +706,20 @@ function buildCartTaxes(totals: BillTotals, taxRules: TaxRule[]) {
   });
 }
 
-/** Category is the single source of truth for kitchen routing — falls back to the default kitchen. */
+/**
+ * The kitchen an item of this category shows on - only a label/fallback: the
+ * exe routes the real tickets (helpers/kotPrinterRouting.js, which also
+ * weighs tables and order types). Same "most specific wins" rule (owner
+ * decision 2026-09-29): a kitchen listing this category beats one set to
+ * all categories, and the one listing the fewest categories wins.
+ */
 export function resolveKitchen(kitchens: Kitchen[], categoryId: string): Kitchen | undefined {
+  const listing = kitchens
+    .filter((k) => k.menuCategoryIds.map(String).includes(String(categoryId)))
+    .sort((a, b) => a.menuCategoryIds.length - b.menuCategoryIds.length);
   return (
-    kitchens.find((k) => k.menuCategoryIds.includes(categoryId)) ??
+    listing[0] ??
+    kitchens.find((k) => k.menuCategoryIds.length === 0) ??
     kitchens.find((k) => k.isDefault) ??
     kitchens[0]
   );
