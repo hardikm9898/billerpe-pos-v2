@@ -1,6 +1,6 @@
 import { FieldError, isMobile10, useFormCheck } from "@/lib/formCheck";
 import { createFileRoute } from "@tanstack/react-router";
-import { KeyRound, ListOrdered, RefreshCw, ServerCog } from "lucide-react";
+import { Download, KeyRound, ListOrdered, RefreshCw, ServerCog } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -18,7 +18,14 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
-import { ApiError, localServerApi, registerThisPc, type RawSyncProblem } from "@/lib/api";
+import {
+  ApiError,
+  exeUpdateApi,
+  localServerApi,
+  registerThisPc,
+  type RawExeUpdateStatus,
+  type RawSyncProblem,
+} from "@/lib/api";
 import { useStore } from "@/mock/store";
 
 export const Route = createFileRoute("/_shell/system/")({
@@ -107,7 +114,9 @@ function SyncProblemsCard({ reloadKey }: { reloadKey: number }) {
                       : "rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] font-medium text-destructive"
                   }
                 >
-                  {p.retryable ? "Retrying automatically" : "Needs a change - not retried until edited"}
+                  {p.retryable
+                    ? "Retrying automatically"
+                    : "Needs a change - not retried until edited"}
                 </span>
               </div>
               <p className="mt-1 text-xs text-muted-foreground">
@@ -118,6 +127,139 @@ function SyncProblemsCard({ reloadKey }: { reloadKey: number }) {
           ))}
         </ul>
       )}
+    </SectionCard>
+  );
+}
+
+// This server's own software update (billerpe-local-exe services/exeUpdate.js,
+// owner decision 2026-09-30): a newer version downloads by itself, installs
+// at night when nobody is billing, or now with "Restart & update".
+function ServerUpdateCard() {
+  const store = useStore();
+  const [info, setInfo] = useState<RawExeUpdateStatus | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [installing, setInstalling] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () =>
+      exeUpdateApi
+        .status()
+        .then((s) => alive && setInfo(s))
+        .catch(() => {});
+    void load();
+    const id = setInterval(load, 10000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  // After "Restart & update": wait for the server to answer with the new
+  // version, then reload so this screen runs against it.
+  useEffect(() => {
+    if (!installing) return;
+    const started = Date.now();
+    const id = setInterval(async () => {
+      const running = await exeUpdateApi.runningVersion();
+      if (running === installing) {
+        clearInterval(id);
+        toast.success(`BillerPe server updated to ${installing}`);
+        window.location.reload();
+      } else if (Date.now() - started > 4 * 60 * 1000) {
+        clearInterval(id);
+        setInstalling(null);
+        toast.error("The update did not finish", {
+          description: "The previous version keeps running. Details are on this page.",
+        });
+      }
+    }, 3000);
+    return () => clearInterval(id);
+  }, [installing]);
+
+  async function install() {
+    setConfirmOpen(false);
+    try {
+      const { version } = await exeUpdateApi.apply();
+      setInstalling(version);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not start the update");
+    }
+  }
+
+  if (!info) return null;
+  const pct = info.total ? Math.floor((info.bytes / info.total) * 100) : 0;
+  const failed = info.lastResult && !info.lastResult.ok ? info.lastResult : null;
+  return (
+    <SectionCard title="Server software" bodyClassName="p-3 sm:p-4">
+      <div data-exe-update className="space-y-3 text-sm">
+        <p>
+          Running version <span className="num font-semibold">{info.current}</span>
+          {info.available ? null : <span className="text-muted-foreground"> · up to date</span>}
+        </p>
+        {installing ? (
+          <p className="font-medium text-primary">
+            Installing {installing} - BillerPe restarts and this page reloads by itself…
+          </p>
+        ) : info.status === "downloading" ? (
+          <div>
+            <p>
+              Downloading version <span className="num">{info.version}</span> in the background -{" "}
+              <span className="num">{pct}%</span>
+            </p>
+            <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-surface-muted">
+              <div className="h-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        ) : info.ready ? (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+            <p>
+              Version <span className="num font-semibold">{info.version}</span> is ready.{" "}
+              {info.autoInstall !== false
+                ? `It installs by itself tonight (${info.night}) when nobody is billing - or now, in about 20 seconds.`
+                : "It did not install on this PC last time, so it will not try again by itself - press Restart & update to retry."}
+            </p>
+            {store.can("system", "edit") && info.packaged ? (
+              <Button size="sm" onClick={() => setConfirmOpen(true)}>
+                <Download className="size-4" /> Restart & update now
+              </Button>
+            ) : null}
+          </div>
+        ) : info.status === "error" ? (
+          <p className="text-warning">
+            Downloading {info.version} failed ({info.error}). It retries by itself.
+          </p>
+        ) : null}
+        {failed ? (
+          <Notice tone="warning" title={`Installing ${failed.version} did not work`}>
+            {failed.reason}. Version {info.current} keeps running.
+          </Notice>
+        ) : null}
+        {!info.packaged ? (
+          <p className="text-xs text-muted-foreground">
+            This is a development copy of the server - updates are never installed on it.
+          </p>
+        ) : null}
+      </div>
+
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Restart & update now?</DialogTitle>
+            <DialogDescription>
+              BillerPe stops for about 20 seconds while version {info.version} is installed. Open
+              tables and bills are kept; every counter, kitchen screen and captain phone reconnects
+              by itself. If the new version does not start, the current one is put back.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
+              Not now
+            </Button>
+            <Button onClick={() => void install()}>Restart & update</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </SectionCard>
   );
 }
@@ -351,6 +493,8 @@ function SystemPage() {
               </div>
             </dl>
           </SectionCard>
+
+          <ServerUpdateCard />
 
           <SyncProblemsCard reloadKey={syncRuns} />
         </>

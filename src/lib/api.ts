@@ -257,6 +257,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
 
     { method: "GET", test: (p) => p === "/offlineHotelUser" },
     { method: "GET", test: (p) => p === "/syncProblems" },
+    // The exe's own automatic update (billerpe-local-exe services/exeUpdate.js).
+    { method: "GET", test: (p) => p === "/exeUpdate/status" },
+    { method: "POST", test: (p) => p === "/exeUpdate/apply" },
     { method: "POST", test: (p) => p === "/user" },
     { method: "POST", test: (p) => p === "/userUpdate" },
     { method: "GET", test: (p) => p === "/singleHotel" },
@@ -3037,6 +3040,42 @@ export type RawLocalServerStatus =
       tables: { total: number; free: number; running: number };
       orders: { today: number };
     };
+/** billerpe-local-exe services/exeUpdate.js#getStatus */
+export type RawExeUpdateStatus = {
+  current: string;
+  /** false = a development copy, which never installs updates */
+  packaged: boolean;
+  /** the newer version the cloud offers, if any */
+  available: string | null;
+  status: "idle" | "downloading" | "ready" | "installing" | "error";
+  version: string | null;
+  bytes: number;
+  total: number;
+  error: string | null;
+  ready: boolean;
+  /** false once this version failed to install here (no night retry); absent on an older exe */
+  autoInstall?: boolean;
+  lastResult: { ok: boolean; version: string; from: string; reason: string } | null;
+  /** "02:00-06:00" */
+  night: string;
+};
+
+export const exeUpdateApi = {
+  status: () => apiGet<RawExeUpdateStatus>("/exeUpdate/status"),
+  apply: () => apiPost<{ version: string; message: string }>("/exeUpdate/apply", {}),
+  /** The version /health reports - null while the server is restarting. */
+  runningVersion: async (): Promise<string | null> => {
+    try {
+      const res = await fetch(`${EXE_BASE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { version?: unknown };
+      return typeof body.version === "string" ? body.version : null;
+    } catch {
+      return null;
+    }
+  },
+};
+
 export const localServerApi = {
   getStatus: () => apiGetRaw<RawLocalServerStatus>("/localServerStatus"),
   forceSync: () => apiPostRaw<{ ok: boolean }>("/localServerForceSync", {}),
