@@ -916,6 +916,8 @@ interface Ctx extends State {
   setKdsItemStage: (kotId: string, detailId: number, stage: "ready" | "served") => void;
   receiveKdsTicket: (payload: KdsTicketPayload) => void;
   receiveKdsOrderComplete: (backendOrderId: number) => void;
+  /** The exe's full open-ticket snapshot (lib/kdsSocket.ts onSnapshot). */
+  receiveKdsSnapshot: (openOrderIds: Set<number>) => void;
   /** A stage change made on any kitchen screen (lib/kdsSocket.ts). */
   receiveKdsItemStatus: (payload: KdsItemStatusPayload) => void;
   /* reservations */
@@ -6078,6 +6080,24 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         kots: p.kots.map((k) =>
           k.backendOrderId === backendOrderId && k.status !== "Served" && k.status !== "Cancelled"
+            ? { ...k, status: "Served" as const }
+            : k,
+        ),
+      }));
+    },
+
+    // "orderComplete" only reaches a board that is open at that moment. A
+    // bill settled while this tab was on another screen left its ticket
+    // here until a refresh (list 6 issue 6), so when the board (re)opens,
+    // anything the exe no longer lists as open is done.
+    receiveKdsSnapshot: (openOrderIds) => {
+      patch((p) => ({
+        ...p,
+        kots: p.kots.map((k) =>
+          k.backendOrderId != null &&
+          !openOrderIds.has(k.backendOrderId) &&
+          k.status !== "Served" &&
+          k.status !== "Cancelled"
             ? { ...k, status: "Served" as const }
             : k,
         ),

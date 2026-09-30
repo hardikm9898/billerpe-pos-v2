@@ -278,6 +278,8 @@ function findNavModule(pathname: string): PermissionModule | PermissionModule[] 
 
 export function AppShell({ children }: { children: ReactNode }) {
   const store = useStore();
+  const storeRef = useRef(store);
+  storeRef.current = store;
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [open, setOpen] = useState<Popover>("none");
@@ -374,8 +376,22 @@ export function AppShell({ children }: { children: ReactNode }) {
     // The menu edited on another screen (category order, prices, items):
     // re-read once after a burst of saves, not once per save.
     let menuTimer: ReturnType<typeof setTimeout> | null = null;
+    // An order changed on ANY device (settled, billed, KOT, cancelled): the
+    // running orders every screen shows are re-read - the Dashboard kept a
+    // bill settled elsewhere as "running" until a refresh (owner list
+    // 2026-09-29 #6), because only the Tables screen listened. One reload
+    // per burst of changes.
+    let ordersTimer: ReturnType<typeof setTimeout> | null = null;
+    const reloadOrders = () => {
+      if (ordersTimer) clearTimeout(ordersTimer);
+      // storeRef, not `store`: this listener lives for the whole session, and
+      // the store captured when it started only knows the orders of that
+      // moment - an order settled elsewhere would never count as gone.
+      ordersTimer = setTimeout(() => void storeRef.current.loadTablesFromServer(), 400);
+    };
     const disconnect = connectChangeFeed({
-      onChange: () => {},
+      onChange: reloadOrders,
+      onTableChange: reloadOrders,
       // The exe prints every KOT itself (billerpe-local-exe/services/
       // kotAutoPrint.js), including rounds fired from a captain's phone or
       // an accepted QR order - so a failed print is announced on every
@@ -417,6 +433,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     });
     return () => {
       if (menuTimer) clearTimeout(menuTimer);
+      if (ordersTimer) clearTimeout(ordersTimer);
       disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

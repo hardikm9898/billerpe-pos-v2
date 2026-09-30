@@ -116,9 +116,9 @@ function TableGridPage() {
   // to show up here. The poll stays as the self-healing fallback for a
   // dropped/reconnecting socket, so this is additive, not a replacement.
   useEffect(() => {
+    // Order and table changes are reloaded app-wide (components/app/AppShell.tsx).
     const disconnect = connectChangeFeed({
-      onChange: () => void store.loadTablesFromServer(),
-      onTableChange: () => void store.loadTablesFromServer(),
+      onChange: () => {},
       onConnect: () => void store.loadTablesFromServer(),
       onConfigChange: (entities) => {
         if (entities.some((e) => e.startsWith("menu") || e === "variants" || e === "addons")) {

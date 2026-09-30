@@ -71,6 +71,7 @@ function KdsPage() {
       onTicket: (ticket) => store.receiveKdsTicket(ticket),
       onOrderComplete: (orderId) => store.receiveKdsOrderComplete(orderId),
       onItemStatus: (payload) => store.receiveKdsItemStatus(payload),
+      onSnapshot: (ids) => store.receiveKdsSnapshot(ids),
       onKitchensResolved: setKitchenCount,
     });
     return disconnect;

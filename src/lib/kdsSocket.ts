@@ -69,6 +69,10 @@ export function connectKdsSocket(handlers: {
    * kitchen there is no room to broadcast into, so the board can never
    * receive anything and should say so rather than look merely idle. */
   onKitchensResolved?: (count: number) => void;
+  /** Every kitchen's snapshot has arrived: these are ALL the orders that are
+   * still open on the exe. A ticket this tab holds for any other order was
+   * settled (or billed) while this board wasn't listening. */
+  onSnapshot?: (openOrderIds: Set<number>) => void;
 }): () => void {
   const socket: Socket = io(`${EXE_BASE_URL}/kds`, {
     transports: ["websocket"],
@@ -78,6 +82,11 @@ export function connectKdsSocket(handlers: {
       cb(token ? { token } : {});
     },
   });
+
+  // One "initialOrders" per joined kitchen, each only that kitchen's
+  // tickets - their union is the whole open list.
+  let snapshotsPending = 0;
+  let snapshotIds = new Set<number>();
 
   const joinAllKitchens = async () => {
     try {
@@ -89,6 +98,8 @@ export function connectKdsSocket(handlers: {
       const { kitchen } = await kitchenApi.getKitchens();
       const kitchens = kitchen ?? [];
       handlers.onKitchensResolved?.(kitchens.length);
+      snapshotsPending = kitchens.length;
+      snapshotIds = new Set();
       kitchens.forEach((k) => socket.emit("joinKitchen", { kitchenId: k.id }));
     } catch {
       // Lookup failed (exe briefly unreachable) - the board keeps whatever
@@ -108,8 +119,12 @@ export function connectKdsSocket(handlers: {
   // receiving end (store's backendOrderId+kotNumber check), not here.
   socket.on("initialOrders", (data: KdsTicketPayload[]) => {
     (Array.isArray(data) ? data : []).forEach((order) => {
-      if (order && typeof order.id === "number") handlers.onTicket(order);
+      if (order && typeof order.id === "number") {
+        snapshotIds.add(order.id);
+        handlers.onTicket(order);
+      }
     });
+    if (snapshotsPending > 0 && --snapshotsPending === 0) handlers.onSnapshot?.(snapshotIds);
   });
 
   socket.on("newOrder", (data: KdsTicketPayload) => {
