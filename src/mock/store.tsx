@@ -1515,6 +1515,8 @@ const KOT_CONTENT_TO_KEYWORD: Record<Exclude<KotLineContent, "text">, string> = 
   "bill-no": "bill_no",
   "token-number": "token_number",
   "kot-number": "kot_number",
+  // Who punched the KOT, printed "Staff: <name>" (owner list 2026-09-30 #4).
+  "staff-name": "staff_name",
   "billerpe-branding": "billerpe_branding",
 };
 const KEYWORD_TO_KOT_CONTENT: Partial<Record<string, KotLineContent>> = Object.fromEntries(

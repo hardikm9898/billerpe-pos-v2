@@ -1251,6 +1251,7 @@ const KOT_CONTENT_LABEL: Record<string, string> = {
   "bill-no": "Bill no.",
   "token-number": "Token number",
   "kot-number": "KOT number",
+  "staff-name": "Staff name (who punched the KOT)",
   "billerpe-branding": "BillerPe branding",
   text: "Custom text",
 };
@@ -1326,6 +1327,8 @@ export function KotFormatSection() {
         return `Token No.: ${KOT_PREVIEW_CTX.tokenNumber}`;
       case "kot-number":
         return `KOT #${KOT_PREVIEW_CTX.kotNumber}`;
+      case "staff-name":
+        return `Staff: ${store.currentUser.name || "Ramesh"}`;
       case "billerpe-branding":
         return "Powered by BillerPe";
       default:

@@ -858,6 +858,7 @@ export type KotLineContent =
   | "bill-no"
   | "token-number"
   | "kot-number"
+  | "staff-name"
   | "billerpe-branding"
   | "text";
 
