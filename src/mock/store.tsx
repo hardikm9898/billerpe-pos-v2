@@ -1169,6 +1169,8 @@ interface Ctx extends State {
   loadServerStatusFromServer: () => Promise<void>;
   forceSyncServer: () => Promise<void>;
   upsertPrinter: (p: Printer) => Promise<boolean>;
+  /** Adds one entry to the notification bell (deduped by id). */
+  addNotification: (n: Omit<AppNotification, "at" | "read">) => void;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   toggleNotificationSetting: (trigger: string, channel: "whatsapp" | "sms" | "inApp") => void;
@@ -9162,6 +9164,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       return run();
     },
+    addNotification: (n) =>
+      patch((p) =>
+        p.notifications.some((x) => x.id === n.id)
+          ? p
+          : { ...p, notifications: [{ ...n, at: nowStamp(), read: false }, ...p.notifications].slice(0, 100) },
+      ),
     markNotificationRead: (id) =>
       patch((p) => ({
         ...p,

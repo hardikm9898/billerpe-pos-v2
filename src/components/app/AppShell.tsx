@@ -45,6 +45,8 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { startQrInbox } from "@/lib/qrInbox";
+import { money } from "@/lib/currency";
+import { showStaffAlert } from "@/components/app/staff-alert";
 import { cn } from "@/lib/utils";
 import { connectionStateLabels } from "@/mock/data";
 import { realToday } from "@/mock/format";
@@ -392,6 +394,29 @@ export function AppShell({ children }: { children: ReactNode }) {
     const disconnect = connectChangeFeed({
       onChange: reloadOrders,
       onTableChange: reloadOrders,
+      // A captain asked for a bill / the kitchen rejected an item: rings and
+      // pops up for whoever handles billing - cashier, manager, owner (owner
+      // list 2026-09-30 #6) - and goes into the notification bell.
+      onStaffAlert: (event) => {
+        const s = storeRef.current;
+        if (!s.can("biller", "view")) return;
+        const description = [event.body, event.amount ? money(event.amount) : ""]
+          .filter(Boolean)
+          .join(" · ");
+        s.addNotification({ id: event.id, title: event.title, body: description, kind: "order" });
+        showStaffAlert({
+          id: event.id,
+          kind: event.kind,
+          title: event.title,
+          description,
+          actionLabel: "Open order",
+          onAction: () => {
+            const local = storeRef.current.orders.find((o) => o.backendId === event.orderId);
+            if (local) navigate({ to: "/table-grid/order/$orderId", params: { orderId: local.id } });
+            else navigate({ to: "/table-grid" });
+          },
+        });
+      },
       // The exe prints every KOT itself (billerpe-local-exe/services/
       // kotAutoPrint.js), including rounds fired from a captain's phone or
       // an accepted QR order - so a failed print is announced on every

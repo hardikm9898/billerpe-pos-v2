@@ -32,6 +32,17 @@ export type KotPrintStatusEvent = {
   results: { printer: string; ok: boolean; error?: string }[];
 };
 
+/** Something staff must act on (billerpe-local-exe connection/socket.js#emitStaffAlert). */
+export type StaffAlertEvent = {
+  id: string;
+  kind: "bill-request" | "kitchen-reject";
+  title: string;
+  body?: string;
+  amount?: number;
+  orderId?: number;
+  tableId?: number | null;
+};
+
 export type ChangeFeedHandlers = {
   onChange: (orderId: number, event: ChangeFeedEvent) => void;
   /** Table status/structure changed with no single order behind it (move, reservation hold, edit). */
@@ -42,6 +53,8 @@ export type ChangeFeedHandlers = {
   onQrOrdersChange?: () => void;
   /** The exe finished printing a fired KOT round itself (billerpe-local-exe/services/kotAutoPrint.js). */
   onKotPrintStatus?: (event: KotPrintStatusEvent) => void;
+  /** A captain asked for a bill, the kitchen rejected an item - ring and show it. */
+  onStaffAlert?: (event: StaffAlertEvent) => void;
   /** Fired on every (re)connect - the caller should do one full refresh to cover anything missed. */
   onConnect?: () => void;
 };
@@ -74,6 +87,9 @@ export function connectChangeFeed(
     if (data && Array.isArray(data.entities)) h.onConfigChange?.(data.entities);
   });
   socket.on("qrOrdersChanged", () => h.onQrOrdersChange?.());
+  socket.on("staffAlert", (data: StaffAlertEvent) => {
+    if (data && typeof data.id === "string") h.onStaffAlert?.(data);
+  });
   socket.on("kotPrintStatus", (data: KotPrintStatusEvent) => {
     if (data && Array.isArray(data.results)) h.onKotPrintStatus?.(data);
   });

@@ -1,4 +1,4 @@
-import { toast } from "sonner";
+import { showStaffAlert } from "@/components/app/staff-alert";
 
 import { qrOrderApi, type RawPendingQrOrder } from "./api";
 import { connectChangeFeed } from "./changeFeedSocket";
@@ -45,15 +45,16 @@ export async function refreshQrInbox(): Promise<void> {
     // were already waiting before this tab opened.
     if (seenIds) {
       const fresh = r.qrOrders.filter((o) => !seenIds!.has(o.id));
-      if (fresh.length) {
-        playQrOrderAlert();
-        for (const o of fresh) {
-          toast(`New QR order — ${o.table_name ?? "table"}`, {
-            description: `${o.customer_name || "Guest"} · ${o.items.length} item${o.items.length === 1 ? "" : "s"}`,
-            duration: 15000,
-            ...(onOpenInbox ? { action: { label: "View", onClick: () => onOpenInbox?.() } } : {}),
-          });
-        }
+      // Rings and stays on screen until opened or closed (owner list
+      // 2026-09-30 #6) - components/app/staff-alert.tsx.
+      for (const o of fresh) {
+        showStaffAlert({
+          id: `qr-order-${o.id}`,
+          kind: "qr-order",
+          title: `New QR order — ${o.table_name ?? "table"}`,
+          description: `${o.customer_name || "Guest"} · ${o.items.length} item${o.items.length === 1 ? "" : "s"}`,
+          ...(onOpenInbox ? { actionLabel: "View", onAction: () => onOpenInbox?.() } : {}),
+        });
       }
     }
     seenIds = new Set(r.qrOrders.map((o) => o.id));
@@ -81,34 +82,4 @@ export function startQrInbox(opts: { onOpen: () => void }): () => void {
     seenIds = null;
     publish([]);
   };
-}
-
-// A short double-beep via the Web Audio API - no asset file needed. Browsers
-// only allow audio after a user gesture, which a POS screen has almost
-// immediately; the toast still shows if the sound is blocked.
-function playQrOrderAlert() {
-  try {
-    const AudioCtxCtor =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioCtxCtor) return;
-    const ctx = new AudioCtxCtor();
-    const beep = (startAt: number) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = 880;
-      gain.gain.setValueAtTime(0.001, ctx.currentTime + startAt);
-      gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + startAt + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startAt + 0.35);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ctx.currentTime + startAt);
-      osc.stop(ctx.currentTime + startAt + 0.35);
-    };
-    beep(0);
-    beep(0.45);
-  } catch {
-    // ignore - the toast still shows regardless
-  }
 }
