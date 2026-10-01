@@ -2253,6 +2253,8 @@ function mapRawOrderHistoryEntry(detail: RawOrderDetail, staffName: string): Ord
       // but UNSENT_ROUND is the correct fallback here too if it ever did.
       kotRound: l.kotNumber || UNSENT_ROUND,
       ...(l.kotNumber && l.createdAt ? { kotAt: l.createdAt } : {}),
+      // Saved on the exe as held - see OrderLine.held.
+      ...(l.kotNumber ? {} : { held: true }),
     };
   });
   const payments: PaymentSplit[] = (
@@ -2453,20 +2455,28 @@ function mergeServerOrder(local: Order, fresh: Order): Order {
   if (local.status === "Settled" || local.status === "Cancelled" || local.editingSettledOrderId) {
     return local;
   }
-  // Holding an order PERSISTS its un-fired lines (controller/holdOrder.js
-  // writes them as status "in-progress"), so the server copy that comes
-  // back IS this order's local draft, not a second set of items. Keeping
-  // both showed every held item twice - as a phantom "KOT 1" plus an
-  // un-sent copy before held lines mapped to UNSENT_ROUND, and as plain
-  // doubled lines after. Local drafts only survive while the server is
-  // holding none of its own, which is exactly the "typed but never sent
-  // anywhere" case this preservation exists for.
-  const serverHasUnsent = fresh.lines.some((l) => l.kotRound === UNSENT_ROUND);
-  const draftLines = serverHasUnsent ? [] : local.lines.filter((l) => l.kotRound === UNSENT_ROUND);
-  const hasDraft = draftLines.length > 0;
+  // Un-sent lines. Holding an order PERSISTS its un-fired lines (controller/
+  // holdOrder.js writes them as status "in-progress"), so:
+  //   - lines typed here and never saved (no `held` flag) are this screen's
+  //     own draft and always survive a refresh;
+  //   - lines saved as held are the server's: while the exe still holds
+  //     un-sent lines it is the truth for them (an edit made here to one it
+  //     still has, matched by id, is kept); once it holds none, they were
+  //     fired as a KOT or removed on another device and must go. Keeping
+  //     them showed the held dish twice and a wrong total after the Captain
+  //     App re-opened a held table and sent a KOT (owner list 2026-09-30 #3)
+  //     - and the old rule ("server has un-sent lines -> drop every local
+  //     draft") also threw away items just typed here on a held order.
+  const localUnsent = local.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+  const typedHere = localUnsent.filter((l) => !l.held);
+  const serverUnsent = fresh.lines.filter((l) => l.kotRound === UNSENT_ROUND);
+  const keptHeld = serverUnsent.map((sl) => localUnsent.find((l) => l.held && l.id === sl.id) ?? sl);
+  const draftLines = [...typedHere, ...keptHeld];
+  const firedLines = fresh.lines.filter((l) => l.kotRound !== UNSENT_ROUND);
+  const hasDraft = typedHere.length > 0;
   return {
     ...local,
-    lines: [...draftLines, ...fresh.lines],
+    lines: [...draftLines, ...firedLines],
     kotRounds: fresh.kotRounds,
     status: fresh.status,
     backendId: fresh.backendId,
@@ -2523,6 +2533,8 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
       // held items merged straight into it as if already sent.
       kotRound: l.kotNumber || UNSENT_ROUND,
       ...(l.kotNumber && l.createdAt ? { kotAt: l.createdAt } : {}),
+      // Saved on the exe as held - see OrderLine.held.
+      ...(l.kotNumber ? {} : { held: true }),
     };
   });
   const status: Order["status"] =
@@ -4438,7 +4450,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           patch((p) => ({
             ...p,
             orders: p.orders.map((x) =>
-              x.id === orderId ? { ...x, status: "Hold", backendId, orderNo, billNo } : x,
+              x.id === orderId
+                ? {
+                    ...x,
+                    status: "Hold",
+                    backendId,
+                    orderNo,
+                    billNo,
+                    // Saved on the exe now - see OrderLine.held.
+                    lines: x.lines.map((l) => (l.kotRound === UNSENT_ROUND ? { ...l, held: true } : l)),
+                  }
+                : x,
             ),
             tables: p.tables.map((t) => (t.id === o.tableId ? { ...t, status: "Hold" } : t)),
           }));

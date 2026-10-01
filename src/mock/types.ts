@@ -244,6 +244,11 @@ export interface OrderLine {
    * hms_kitchen_settings id) - only asked when the outlet has more than one. */
   routePrinterId?: number;
   routeKitchenId?: number;
+  /** An un-sent line that is SAVED on the exe as held (an order put on Hold
+   * here or on the Captain App). Once the exe no longer holds any un-sent
+   * line, a held line was fired or removed elsewhere - it is not a draft
+   * still being typed here (owner list 2026-09-30 #3). */
+  held?: boolean;
 }
 
 export interface PaymentSplit {
