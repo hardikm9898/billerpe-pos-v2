@@ -125,6 +125,26 @@ function totalsOf(o: Order, store: ReturnType<typeof useStore>) {
   };
 }
 
+
+/** How well an order matches a search, best = 0. Same ranks as the exe
+ * (billerpe-local-exe controller/order.js#getOrdersByBillNo). */
+function searchRank(o: Order, query: string): number {
+  const q = query.trim().toLowerCase();
+  const bill = (o.billNo ?? String(o.orderNo)).toLowerCase();
+  if (bill === q) return 0;
+  if (bill.startsWith(q)) return 1;
+  if (bill.includes(q)) return 2;
+  const phone = o.customerPhone ?? "";
+  if (phone === q) return 3;
+  if (phone.startsWith(q)) return 4;
+  if (phone.includes(q)) return 5;
+  const name = (o.customerName ?? "").toLowerCase();
+  if (name.startsWith(q)) return 6;
+  if (name.includes(q)) return 7;
+  if (o.tableLabel.toLowerCase().includes(q)) return 8;
+  return 9;
+}
+
 export const Route = createFileRoute("/_shell/orders/")({
   head: () => ({
     meta: [
@@ -218,7 +238,10 @@ function OrdersPage() {
     () =>
       mergedOrders
         .slice()
-        .sort((a, b) => b.orderNo - a.orderNo)
+        // A search lists the best match first - bill number, then mobile,
+        // then customer name, then table (owner list 2026-09-30 #10); the
+        // exe ranks the history pages the same way. Otherwise newest first.
+        .sort((a, b) => (q ? searchRank(a, q) - searchRank(b, q) : 0) || b.orderNo - a.orderNo)
         .filter((o) => status === "All" || o.status === status)
         .filter((o) => {
           if (!q) return true;
