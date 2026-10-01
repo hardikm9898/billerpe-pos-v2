@@ -50,8 +50,10 @@ function HelpPage() {
             <Phone className="size-4" />
           </span>
           <div>
-            <p className="text-sm font-semibold num">1800 200 4455</p>
-            <p className="text-xs text-muted-foreground">Priority POS helpline · 9 AM – 1 AM</p>
+            <a href="tel:+919737100886" className="text-sm font-semibold num hover:underline">
+              +91 97371 00886
+            </a>
+            <p className="text-xs text-muted-foreground">BillerPe customer care</p>
           </div>
         </div>
         <div className="flex items-center gap-3 rounded-xl border border-border bg-surface p-4 shadow-card">
@@ -59,7 +61,9 @@ function HelpPage() {
             <Mail className="size-4" />
           </span>
           <div>
-            <p className="text-sm font-semibold">support@billerpe.in</p>
+            <a href="mailto:support@billerpe.com" className="text-sm font-semibold hover:underline">
+              support@billerpe.com
+            </a>
             <p className="text-xs text-muted-foreground">Response within one business day</p>
           </div>
         </div>
