@@ -308,10 +308,9 @@ export interface Order {
    * (createdBy) - only ever set once, at settlement (store.settleOrder).
    * See uat-backend-v2/model/order.js's own comment. */
   tip?: number;
-  /** Owner-visible "reprinted N times" counter (Task 5) - incremented only
-   * by the explicit "Reprint bill" action (store.printBill), never the
-   * first bill-generation print. See
-   * billerpe-local-exe/model/order.js's own comment. */
+  /** Owner-visible "reprinted N times" counter (Task 5) - every print after
+   * the bill's first one, whichever screen printed it (the exe decides, see
+   * billerpe-local-exe/model/order.js bill_printed_at). */
   billPrintCount?: number;
   /** Real per-day, per-hotel running kitchen token number (Order.token on
    * the backend, uat-backend-v2/controller/kto.js's generateToken) - 0/

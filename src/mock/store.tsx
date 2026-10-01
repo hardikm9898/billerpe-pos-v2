@@ -3469,6 +3469,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // `extras`: only on the bill's first print (Generate Bill) - see
   // BillExtras. `pdfOnly`: "Save" with Save behaviour = PDF - skip the
   // printer and open the bill as a PDF straight away.
+  // Every printed copy of a bill is reported to the exe, which counts only
+  // the ones AFTER the first as reprints (billerpe-local-exe controller/
+  // order.js#incrementBillPrintCount). Only the Reprint button used to
+  // report, so a bill first printed through it - one the Captain App
+  // requested, or one saved without printing - showed as already
+  // reprinted (owner list 2026-09-30 #5). Never blocks the print.
+  const recordBillPrint = async (backendId: number) => {
+    try {
+      const { billPrintCount } = await orderHistoryApi.incrementBillPrintCount(backendId);
+      patch((p) => ({
+        ...p,
+        orders: p.orders.map((x) => (x.backendId === backendId ? { ...x, billPrintCount } : x)),
+        orderHistory: p.orderHistory.map((x) =>
+          x.backendId === backendId ? { ...x, billPrintCount } : x,
+        ),
+      }));
+    } catch {
+      // Best-effort only - a reprint count miss is never worth surfacing.
+    }
+  };
+
   const doPrintBill = async (
     o: Order,
     backendId: number,
@@ -3591,6 +3612,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ...(opts.extras ? { billExtras: opts.extras } : {}),
         });
         toast.success(`Bill sent to ${printer}`);
+        void recordBillPrint(backendId);
         const failedExtras = (extras ?? []).filter((x) => !x.ok);
         if (failedExtras.length) {
           toast.error(
@@ -3631,6 +3653,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       });
       const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
       window.open(URL.createObjectURL(blob), "_blank");
+      void recordBillPrint(backendId);
       toast.success(
         opts.pdfOnly
           ? "Bill saved - opened as a PDF"
@@ -10256,24 +10279,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast.error("Order isn't synced with the server yet");
         return;
       }
-      const printed = await doPrintBill(o, o.backendId);
-      if (!printed) return;
-      // Owner-visible reprint counter (Task 5) - only this explicit
-      // "Reprint bill" action counts, never the first bill-generation
-      // print (generateBill's own doPrintBill calls bypass this). Never
-      // blocks or surfaces an error on the print itself.
-      try {
-        const { billPrintCount } = await orderHistoryApi.incrementBillPrintCount(o.backendId);
-        patch((p) => ({
-          ...p,
-          orders: p.orders.map((x) => (x.id === orderId ? { ...x, billPrintCount } : x)),
-          orderHistory: p.orderHistory.map((x) =>
-            x.id === orderId ? { ...x, billPrintCount } : x,
-          ),
-        }));
-      } catch {
-        // Best-effort only - a reprint count miss is never worth surfacing.
-      }
+      // doPrintBill reports the print; the exe decides whether it is the
+      // bill's first print or a reprint (recordBillPrint).
+      await doPrintBill(o, o.backendId);
     },
     printKot: async (orderId, round) => {
       const o =

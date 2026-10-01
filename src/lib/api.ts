@@ -2506,9 +2506,9 @@ export const orderHistoryApi = {
       `/searchOrder/all?page=${page}&limit=${limit}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
     ),
   getDetail: (id: number) => apiGet<{ order: RawOrderDetail }>(`/order/${id}`),
-  /** Owner-visible bill-reprint counter (Task 5) - fires only from the
-   * explicit "Reprint bill" action, never the first bill-generation print.
-   * Best-effort: a failure here must never block the actual print. */
+  /** Reports one printed copy of a bill (every print, store.recordBillPrint).
+   * The exe counts only copies after the first as reprints. Best-effort: a
+   * failure here must never block the actual print. */
   incrementBillPrintCount: (id: number) =>
     apiPost<{ billPrintCount: number }>(`/order/${id}/reprintCount`, {}),
 };
