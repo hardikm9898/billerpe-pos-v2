@@ -119,6 +119,92 @@ function LoginPage() {
     { id: "pin", label: "PIN", icon: KeyRound },
   ];
 
+  // Each sign-in box is a real form: Enter in any of its fields signs in /
+  // registers, same as clicking the button (owner list 2026-09-30 #13).
+  const submitRegister = async () => {
+    if (regLoading) return;
+    const valid = form.check([
+      {
+        key: "regMobile",
+        label: "Mobile number",
+        value: regMobile,
+        valid: isMobile10,
+        message: "Enter the owner's 10-digit mobile number",
+      },
+      { key: "regPassword", label: "Password", value: regPassword },
+    ]);
+    if (!valid) return;
+    setRegLoading(true);
+    try {
+      const { pulled } = await registerThisPc(regMobile, regPassword);
+      store.registerDevice();
+      void refreshServerState();
+      const menuCount = Number(pulled?.["menuItems"] ?? 0);
+      const tableCount = Number(pulled?.["tables"] ?? 0);
+      toast.success("Device registered", {
+        description: `Pulled ${menuCount} menu item(s), ${tableCount} table(s) - sign in below.`,
+      });
+    } catch (err) {
+      toast.error(describeAuthError(err));
+    } finally {
+      setRegLoading(false);
+    }
+  };
+  const submitPassword = async () => {
+    if (pwLoading) return;
+    const valid = form.check([
+      {
+        key: "pwMobile",
+        label: "Mobile number",
+        value: pwMobile,
+        valid: isMobile10,
+        message: "Enter your 10-digit mobile number",
+      },
+      { key: "pw", label: "Password", value: password },
+    ]);
+    if (!valid) return;
+    setPwLoading(true);
+    try {
+      const { token } = await authApi.restaurantLogin(pwMobile, password, getBrowserDeviceId());
+      if (token) setStoredAuthToken(token);
+      doLogin(await store.syncCurrentUser());
+    } catch (err) {
+      handleLoginError(err, store.resetDeviceRegistration);
+    } finally {
+      setPwLoading(false);
+    }
+  };
+  const submitPin = async () => {
+    if (pinLoading) return;
+    const valid = form.check([
+      {
+        key: "pinMobile",
+        label: "Mobile number",
+        value: pinMobile,
+        valid: isMobile10,
+        message: "Enter your 10-digit mobile number",
+      },
+      {
+        key: "pin",
+        label: "PIN",
+        value: pin,
+        valid: (v) => /^\d{4,6}$/.test(String(v ?? "")),
+        message: "Enter your 4-6 digit PIN",
+      },
+    ]);
+    if (!valid) return;
+    setPinLoading(true);
+    try {
+      const { token } = await authApi.pinLogin(pinMobile, pin, getBrowserDeviceId());
+      if (token) setStoredAuthToken(token);
+      doLogin(await store.syncCurrentUser());
+    } catch (err) {
+      handleLoginError(err, store.resetDeviceRegistration);
+    } finally {
+      setPinLoading(false);
+    }
+  };
+
   return (
     <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
       <div className="relative hidden flex-col justify-between bg-sidebar p-10 text-sidebar-foreground lg:flex">
@@ -191,7 +277,13 @@ function LoginPage() {
                   </p>
                 </div>
               </div>
-              <div className="mt-3 space-y-3">
+              <form
+                className="mt-3 space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void submitRegister();
+                }}
+              >
                 <div>
                   <Label htmlFor="regMobile" required>
                     Owner/admin mobile number
@@ -221,42 +313,11 @@ function LoginPage() {
                   />
                   <FieldError message={form.error("regPassword")} />
                 </div>
-                <Button
-                  className="w-full"
-                  disabled={regLoading}
-                  onClick={async () => {
-                    const valid = form.check([
-                      {
-                        key: "regMobile",
-                        label: "Mobile number",
-                        value: regMobile,
-                        valid: isMobile10,
-                        message: "Enter the owner's 10-digit mobile number",
-                      },
-                      { key: "regPassword", label: "Password", value: regPassword },
-                    ]);
-                    if (!valid) return;
-                    setRegLoading(true);
-                    try {
-                      const { pulled } = await registerThisPc(regMobile, regPassword);
-                      store.registerDevice();
-                      void refreshServerState();
-                      const menuCount = Number(pulled?.["menuItems"] ?? 0);
-                      const tableCount = Number(pulled?.["tables"] ?? 0);
-                      toast.success("Device registered", {
-                        description: `Pulled ${menuCount} menu item(s), ${tableCount} table(s) - sign in below.`,
-                      });
-                    } catch (err) {
-                      toast.error(describeAuthError(err));
-                    } finally {
-                      setRegLoading(false);
-                    }
-                  }}
-                >
+                <Button className="w-full" type="submit" disabled={regLoading}>
                   <ShieldCheck className="size-4" />{" "}
                   {regLoading ? "Registering…" : "Register Device"}
                 </Button>
-              </div>
+              </form>
             </div>
           ) : null}
 
@@ -283,7 +344,13 @@ function LoginPage() {
 
           <fieldset disabled={!registered} className="mt-5 space-y-4">
             {tab === "password" ? (
-              <>
+              <form
+                className="space-y-4"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void submitPassword();
+                }}
+              >
                 <div>
                   <Label htmlFor="pwMobile" required>
                     Mobile number
@@ -313,37 +380,7 @@ function LoginPage() {
                   />
                   <FieldError message={form.error("pw")} />
                 </div>
-                <Button
-                  className="w-full"
-                  disabled={pwLoading}
-                  onClick={async () => {
-                    const valid = form.check([
-                      {
-                        key: "pwMobile",
-                        label: "Mobile number",
-                        value: pwMobile,
-                        valid: isMobile10,
-                        message: "Enter your 10-digit mobile number",
-                      },
-                      { key: "pw", label: "Password", value: password },
-                    ]);
-                    if (!valid) return;
-                    setPwLoading(true);
-                    try {
-                      const { token } = await authApi.restaurantLogin(
-                        pwMobile,
-                        password,
-                        getBrowserDeviceId(),
-                      );
-                      if (token) setStoredAuthToken(token);
-                      doLogin(await store.syncCurrentUser());
-                    } catch (err) {
-                      handleLoginError(err, store.resetDeviceRegistration);
-                    } finally {
-                      setPwLoading(false);
-                    }
-                  }}
-                >
+                <Button className="w-full" type="submit" disabled={pwLoading}>
                   <LogIn className="size-4" /> {pwLoading ? "Signing in…" : "Login"}
                 </Button>
                 <button
@@ -353,11 +390,17 @@ function LoginPage() {
                 >
                   Forgot Password?
                 </button>
-              </>
+              </form>
             ) : null}
 
             {tab === "pin" ? (
-              <>
+              <form
+                className="space-y-4"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void submitPin();
+                }}
+              >
                 <div>
                   <Label htmlFor="pinMobile" required>
                     Mobile number
@@ -393,46 +436,10 @@ function LoginPage() {
                     Verified against the live BillerPe backend (uat-backend) - not demo data.
                   </p>
                 </div>
-                <Button
-                  className="w-full"
-                  disabled={pinLoading}
-                  onClick={async () => {
-                    const valid = form.check([
-                      {
-                        key: "pinMobile",
-                        label: "Mobile number",
-                        value: pinMobile,
-                        valid: isMobile10,
-                        message: "Enter your 10-digit mobile number",
-                      },
-                      {
-                        key: "pin",
-                        label: "PIN",
-                        value: pin,
-                        valid: (v) => /^\d{4,6}$/.test(String(v ?? "")),
-                        message: "Enter your 4-6 digit PIN",
-                      },
-                    ]);
-                    if (!valid) return;
-                    setPinLoading(true);
-                    try {
-                      const { token } = await authApi.pinLogin(
-                        pinMobile,
-                        pin,
-                        getBrowserDeviceId(),
-                      );
-                      if (token) setStoredAuthToken(token);
-                      doLogin(await store.syncCurrentUser());
-                    } catch (err) {
-                      handleLoginError(err, store.resetDeviceRegistration);
-                    } finally {
-                      setPinLoading(false);
-                    }
-                  }}
-                >
+                <Button className="w-full" type="submit" disabled={pinLoading}>
                   <KeyRound className="size-4" /> {pinLoading ? "Checking…" : "Unlock"}
                 </Button>
-              </>
+              </form>
             ) : null}
           </fieldset>
 
