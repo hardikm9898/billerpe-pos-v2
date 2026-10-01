@@ -226,6 +226,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/kdsStatus" },
     // Open tickets per kitchen (dashboard "Kitchen load") - billerpe-local-exe controller/kds.js.
     { method: "GET", test: (p) => p === "/kds/openTickets" },
+    { method: "POST", test: (p) => p === "/kdsReject" },
     // Token display + manual reset (billerpe-local-exe/controller/tokenBoard.js).
     { method: "GET", test: (p) => p === "/tokenBoard" },
     { method: "POST", test: (p) => p === "/tokenBoard/status" },
@@ -2076,6 +2077,17 @@ export const orderApi = {
 
   /** Kitchen Display stage for a ticket's items or one item (billerpe-local-
    * exe controller/kds.js) - kept on the exe, so every screen agrees. */
+  /** The kitchen rejects one item, several, or a whole new ticket (billerpe-
+   * local-exe controller/kds.js#rejectKdsItems) - the staff who punched it
+   * and every cashier / manager screen are alerted. */
+  kdsReject: (params: { orderId: number; kotNumber: number; detailIds: number[]; reason: string }) =>
+    apiPost<{ items: { detailId: number; status: KdsItemStage }[]; rejected: number }>("/kdsReject", {
+      order_id: params.orderId,
+      kotNumber: params.kotNumber,
+      detailIds: params.detailIds,
+      reason: params.reason,
+    }),
+
   /** Tickets each kitchen has open right now - the same ones the kitchen
    * boards show (billerpe-local-exe controller/kds.js). */
   kdsOpenTickets: () =>
@@ -2477,6 +2489,9 @@ export type RawOrderLine = {
   hms_menu_mst?: { item_name?: string };
   /** when the line was written - for a fired line, when its KOT round went out */
   createdAt?: string;
+  /** Kitchen Display stage; "rejected" = the kitchen refused it. */
+  kds_status?: string | null;
+  kds_reject_reason?: string | null;
 };
 
 export type RawOrderDetail = RawOrderHeader & {
@@ -3103,7 +3118,8 @@ export const localServerApi = {
 };
 
 /** An item's stage on the Kitchen Display, as the exe stores it. */
-export type KdsItemStage = "new" | "accepted" | "preparing" | "ready" | "served";
+/** "rejected": refused by the kitchen before accepting (POST /kdsReject). */
+export type KdsItemStage = "new" | "accepted" | "preparing" | "ready" | "served" | "rejected";
 
 export type RawSyncProblem = {
   entity: string;

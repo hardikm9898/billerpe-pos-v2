@@ -41,6 +41,8 @@ export type StaffAlertEvent = {
   amount?: number;
   orderId?: number;
   tableId?: number | null;
+  /** The staff member this is about (the one who punched a rejected item). */
+  targetUserId?: number | null;
 };
 
 export type ChangeFeedHandlers = {

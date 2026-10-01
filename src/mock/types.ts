@@ -244,6 +244,9 @@ export interface OrderLine {
    * hms_kitchen_settings id) - only asked when the outlet has more than one. */
   routePrinterId?: number;
   routeKitchenId?: number;
+  /** The kitchen rejected this line (KDS, before accepting) - why. It stays on
+   * the bill until staff remove it (owner list 2026-09-30 #18). */
+  kitchenRejected?: string;
   /** An un-sent line that is SAVED on the exe as held (an order put on Hold
    * here or on the Captain App). Once the exe no longer holds any un-sent
    * line, a held line was fired or removed elsewhere - it is not a draft
@@ -389,7 +392,7 @@ export interface Kot {
     detailId?: number;
     /** Where it is on the Kitchen Display, kept on the exe. The ticket's own
      * status follows its items (kotStatusFromItems). */
-    stage?: "new" | "accepted" | "preparing" | "ready" | "served";
+    stage?: "new" | "accepted" | "preparing" | "ready" | "served" | "rejected";
   }[];
   /** uat-backend's hms_order_msts.id this round belongs to, paired with
    * kotNumber as the dedupe key against live /kds socket pushes for the

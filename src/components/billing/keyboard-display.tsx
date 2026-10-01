@@ -1319,6 +1319,14 @@ function CartGroup({
                   </span>
                 ) : null}
               </p>
+              {l.kitchenRejected ? (
+                <span
+                  data-kitchen-rejected
+                  className="inline-flex rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold text-destructive"
+                >
+                  Rejected by kitchen · {l.kitchenRejected}
+                </span>
+              ) : null}
               <p className="num flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
                 {editable ? (
                   <span className="inline-flex items-center gap-0.5">

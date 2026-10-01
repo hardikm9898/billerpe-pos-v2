@@ -14,6 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/operations/shared";
@@ -41,6 +42,12 @@ export const Route = createFileRoute("/_shell/kds")({
   component: KdsPage,
 });
 
+/** Quick reasons, same idea as rejecting a QR order's items. */
+const REJECT_REASONS = ["Out of stock", "Not available right now", "Kitchen closed", "Other"];
+
+/** A ticket's items still with the kitchen - rejected ones leave the board. */
+const liveItems = (k: Kot) => k.items.filter((i) => i.stage !== "rejected");
+
 const flow: Record<string, KotStatus> = {
   Pending: "Accepted",
   Printed: "Accepted",
@@ -55,6 +62,18 @@ function KdsPage() {
   const stations = ["All", ...store.kitchens.map((k) => k.name)];
   const [rejectTarget, setRejectTarget] = useState<Kot | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  const [rejectOther, setRejectOther] = useState("");
+  // Which of the ticket's items are being rejected (exe line ids) - one,
+  // several or all of them (owner list 2026-09-30 #18).
+  const [rejectIds, setRejectIds] = useState<number[]>([]);
+  const [rejectBusy, setRejectBusy] = useState(false);
+  const openReject = (k: Kot) => {
+    setRejectReason("");
+    setRejectOther("");
+    setRejectIds(liveItems(k).map((i) => i.detailId).filter((id): id is number => !!id));
+    setRejectTarget(k);
+  };
+  const reason = rejectReason === "Other" ? rejectOther.trim() : rejectReason;
   // null = not determined yet. 0 means this hotel has no kitchen configured,
   // in which case the exe has no room to broadcast a KOT into and this board
   // can never receive anything - worth saying outright instead of letting it
@@ -148,10 +167,7 @@ function KdsPage() {
                     kot={k}
                     onAdvance={() => store.setKotStatus(k.id, flow[k.status]!)}
                     onItemStage={(detailId, stage) => store.setKdsItemStage(k.id, detailId, stage)}
-                    onReject={() => {
-                      setRejectReason("");
-                      setRejectTarget(k);
-                    }}
+                    onReject={() => openReject(k)}
                   />
                 ))}
                 {!items.length ? <EmptyState compact icon={ChefHat} title="Nothing here" /> : null}
@@ -161,34 +177,86 @@ function KdsPage() {
         })}
       </div>
 
-      <Dialog open={!!rejectTarget} onOpenChange={(o) => !o && setRejectTarget(null)}>
+      <Dialog open={!!rejectTarget} onOpenChange={(o) => !o && !rejectBusy && setRejectTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Reject KOT #{rejectTarget?.kotNo}</DialogTitle>
+            <DialogTitle>Reject from KOT #{rejectTarget?.kotNo}</DialogTitle>
             <DialogDescription>
-              {rejectTarget?.tableLabel} · {rejectTarget?.items.map((i) => i.name).join(", ")}.
-              Front-of-house is notified - they still need to remove it from the bill themselves.
+              {rejectTarget?.tableLabel} · tick what the kitchen cannot make. The staff who punched it
+              and the cashier are alerted; they remove it from the bill.
             </DialogDescription>
           </DialogHeader>
+          <div className="space-y-1.5" data-reject-items>
+            {rejectTarget
+              ? liveItems(rejectTarget).map((i, idx) => {
+                  const id = i.detailId;
+                  const on = id != null && rejectIds.includes(id);
+                  return (
+                    <label
+                      key={id ?? idx}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-sm",
+                        on ? "border-primary bg-primary-soft" : "border-border",
+                        id == null && "cursor-not-allowed opacity-50",
+                      )}
+                    >
+                      <Checkbox
+                        checked={on}
+                        disabled={id == null}
+                        onCheckedChange={(v) =>
+                          id != null &&
+                          setRejectIds((cur) => (v ? [...cur, id] : cur.filter((x) => x !== id)))
+                        }
+                      />
+                      <span className="num font-semibold">{i.qty}×</span>
+                      <span className="min-w-0 flex-1 truncate">{i.name}</span>
+                    </label>
+                  );
+                })
+              : null}
+          </div>
           <div className="space-y-1.5">
-            <Label htmlFor="rejectReason">Reason</Label>
-            <Input
-              id="rejectReason"
-              placeholder="Out of stock"
-              value={rejectReason}
-              onChange={(e) => setRejectReason(e.target.value)}
-            />
+            <Label>Reason</Label>
+            <div className="flex flex-wrap gap-1.5">
+              {REJECT_REASONS.map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  onClick={() => setRejectReason(r)}
+                  className={cn(
+                    "rounded-full border px-3 py-1 text-xs font-medium",
+                    rejectReason === r ? "border-primary bg-primary text-primary-foreground" : "border-border",
+                  )}
+                >
+                  {r}
+                </button>
+              ))}
+            </div>
+            {rejectReason === "Other" ? (
+              <Input
+                autoFocus
+                placeholder="Type the reason"
+                value={rejectOther}
+                onChange={(e) => setRejectOther(e.target.value)}
+              />
+            ) : null}
           </div>
           <DialogFooter>
             <Button
               variant="destructive"
-              onClick={() => {
+              disabled={rejectBusy || !rejectIds.length || !reason}
+              onClick={async () => {
                 if (!rejectTarget) return;
-                store.rejectKot(rejectTarget.id, rejectReason.trim() || "Out of stock");
-                setRejectTarget(null);
+                setRejectBusy(true);
+                const ok = await store.rejectKot(rejectTarget.id, reason, rejectIds);
+                setRejectBusy(false);
+                if (ok) setRejectTarget(null);
               }}
             >
-              <Ban className="size-4" /> Reject KOT
+              <Ban className="size-4" />{" "}
+              {rejectIds.length && rejectTarget && rejectIds.length === liveItems(rejectTarget).length
+                ? "Reject whole KOT"
+                : `Reject ${rejectIds.length} item${rejectIds.length === 1 ? "" : "s"}`}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -236,7 +304,7 @@ function KotCard({
       </div>
 
       <ul className="mt-2 space-y-1">
-        {kot.items.map((i, idx) => (
+        {liveItems(kot).map((i, idx) => (
           <li
             key={i.detailId ?? idx}
             data-kds-item={i.detailId}

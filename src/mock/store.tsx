@@ -965,7 +965,8 @@ interface Ctx extends State {
    * Cancelled and notifies front-of-house, who still has to separately
    * remove it from the actual bill (KDS state is its own local board, not
    * tied to real order/billing state - see setKotStatus's own comment). */
-  rejectKot: (kotId: string, reason?: string) => void;
+  /** Kitchen rejects some or all of a new ticket's items (by exe line id). */
+  rejectKot: (kotId: string, reason: string, detailIds: number[]) => Promise<boolean>;
   /** Ready / Served for ONE item of a ticket (the ticket follows its items). */
   setKdsItemStage: (kotId: string, detailId: number, stage: "ready" | "served") => void;
   receiveKdsTicket: (payload: KdsTicketPayload) => void;
@@ -1831,8 +1832,11 @@ const STAGE_FOR_STATUS: Partial<Record<KotStatus, Exclude<KdsStage, "new">>> = {
  * Preparing, any accepted -> Accepted, else New. Items the exe hasn't
  * described yet (a round this screen just fired) keep `fallback`. */
 function kotStatusFromItems(items: Kot["items"], fallback: KotStatus): KotStatus {
-  if (!items.length || items.some((i) => !i.stage)) return fallback;
-  const ranks = items.map((i) => stageRank(i.stage));
+  // Rejected items are off the board; a ticket with nothing else left is done.
+  const live = items.filter((i) => i.stage !== "rejected");
+  if (items.length && !live.length) return "Cancelled";
+  if (!live.length || live.some((i) => !i.stage)) return fallback;
+  const ranks = live.map((i) => stageRank(i.stage));
   if (ranks.every((r) => r >= 4)) return "Served";
   if (ranks.every((r) => r >= 3)) return "Ready";
   if (ranks.some((r) => r >= 2)) return "Preparing";
@@ -2538,6 +2542,7 @@ function mapRawLiveOrder(detail: RawOrderDetail, staffName: string, tableId?: st
       ...(l.kotNumber && l.createdAt ? { kotAt: l.createdAt } : {}),
       // Saved on the exe as held - see OrderLine.held.
       ...(l.kotNumber ? {} : { held: true }),
+      ...(l.kds_status === "rejected" ? { kitchenRejected: l.kds_reject_reason || "Rejected" } : {}),
     };
   });
   const status: Order["status"] =
@@ -6029,13 +6034,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ...p,
         kots: p.kots.map((k) => {
           if (k.id !== kotId) return k;
-          const items = k.items.map((i) => (stageRank(i.stage) < stageRank(stage) ? { ...i, stage } : i));
+          const items = k.items.map((i) =>
+            i.stage !== "rejected" && stageRank(i.stage) < stageRank(stage) ? { ...i, stage } : i,
+          );
           return { ...k, items, status: kotStatusFromItems(items, status) };
         }),
       }));
       toast.success(`KOT marked ${status}`);
       if (kot.backendOrderId && kot.kotNumber) {
-        const detailIds = kot.items.map((i) => i.detailId).filter((id): id is number => !!id);
+        const detailIds = kot.items
+          .filter((i) => i.stage !== "rejected")
+          .map((i) => i.detailId)
+          .filter((id): id is number => !!id);
         void orderApi
           .kdsStatus({ orderId: kot.backendOrderId, kotNumber: kot.kotNumber, status: stage, detailIds })
           .then(({ items }) =>
@@ -6087,32 +6097,41 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
     },
 
-    rejectKot: (kotId, reason) => {
+    // The kitchen refuses one item, several, or the whole new ticket (owner
+    // list 2026-09-30 #18). Kept on the exe: every board drops them, the
+    // order line shows "Rejected by kitchen", and the staff who punched it
+    // plus every cashier / manager screen get a sound + pop-up (the exe's
+    // staffAlert). It used to change only this tab - nobody was told.
+    rejectKot: async (kotId, reason, detailIds) => {
       const k = s.kots.find((x) => x.id === kotId);
-      if (!k) return;
+      if (!k) return false;
       // Only before the kitchen has accepted it (owner decision, 2026-09-28).
       if (k.status !== "Pending" && k.status !== "Printed") {
         toast.error("This KOT is already accepted", {
           description: "A ticket can only be rejected before the kitchen accepts it.",
         });
-        return;
+        return false;
       }
-      patch((p) => ({
-        ...p,
-        kots: p.kots.map((x) => (x.id === kotId ? { ...x, status: "Cancelled" } : x)),
-        notifications: [
-          {
-            id: uid("n"),
-            title: "Kitchen rejected an item",
-            body: `${k.tableLabel} · Round ${k.round} · ${k.items.map((i) => i.name).join(", ")}${reason ? ` — ${reason}` : ""}`,
-            at: nowStamp(),
-            read: false,
-            kind: "order",
-          },
-          ...p.notifications,
-        ],
-      }));
-      toast.success("KOT rejected", { description: reason || undefined });
+      if (!k.backendOrderId || !k.kotNumber || !detailIds.length) {
+        toast.error("This ticket is still loading", { description: "Try again in a moment." });
+        return false;
+      }
+      try {
+        const { items } = await orderApi.kdsReject({
+          orderId: k.backendOrderId,
+          kotNumber: k.kotNumber,
+          detailIds,
+          reason,
+        });
+        value.receiveKdsItemStatus({ orderId: k.backendOrderId, kotNumber: k.kotNumber, items });
+        toast.success(detailIds.length === 1 ? "Item rejected" : `${detailIds.length} items rejected`, {
+          description: `${k.tableLabel} · front-of-house has been alerted`,
+        });
+        return true;
+      } catch (err) {
+        toast.error(err instanceof ApiError ? err.message : "Could not reject");
+        return false;
+      }
     },
 
     // Live push from another device/tab's KDS socket connection (see

@@ -724,6 +724,16 @@ function OrderCartPage() {
                               ) : null}
                               <div className="min-w-0">
                                 <p className="truncate text-sm font-medium">{l.name}</p>
+                                {/* The kitchen refused it (KDS) - staff remove it from the
+                                    bill (owner list 2026-09-30 #18). */}
+                                {l.kitchenRejected ? (
+                                  <span
+                                    data-kitchen-rejected
+                                    className="mt-0.5 inline-flex rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold text-destructive"
+                                  >
+                                    Rejected by kitchen · {l.kitchenRejected}
+                                  </span>
+                                ) : null}
                                 <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
                                   {l.variant ? `${l.variant} · ` : ""}
                                   {editable ? (

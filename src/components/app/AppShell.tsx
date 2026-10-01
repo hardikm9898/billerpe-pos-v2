@@ -399,7 +399,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       // list 2026-09-30 #6) - and goes into the notification bell.
       onStaffAlert: (event) => {
         const s = storeRef.current;
-        if (!s.can("biller", "view")) return;
+        // Billing staff hear every alert; anyone else only one about their
+        // own KOT (the kitchen rejected what they punched - owner list
+        // 2026-09-30 #18).
+        const mine = event.targetUserId != null && String(event.targetUserId) === s.currentUser.id;
+        if (!s.can("biller", "view") && !mine) return;
         const description = [event.body, event.amount ? money(event.amount) : ""]
           .filter(Boolean)
           .join(" · ");
