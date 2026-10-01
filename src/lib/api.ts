@@ -224,6 +224,8 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // write + cross-device broadcast the Captain App's notifications need.
     { method: "POST", test: (p) => p === "/kotReady" },
     { method: "POST", test: (p) => p === "/kdsStatus" },
+    // Open tickets per kitchen (dashboard "Kitchen load") - billerpe-local-exe controller/kds.js.
+    { method: "GET", test: (p) => p === "/kds/openTickets" },
     // Token display + manual reset (billerpe-local-exe/controller/tokenBoard.js).
     { method: "GET", test: (p) => p === "/tokenBoard" },
     { method: "POST", test: (p) => p === "/tokenBoard/status" },
@@ -2073,6 +2075,13 @@ export const orderApi = {
 
   /** Kitchen Display stage for a ticket's items or one item (billerpe-local-
    * exe controller/kds.js) - kept on the exe, so every screen agrees. */
+  /** Tickets each kitchen has open right now - the same ones the kitchen
+   * boards show (billerpe-local-exe controller/kds.js). */
+  kdsOpenTickets: () =>
+    apiGet<{ kitchens: { kitchenId: number; kitchenName: string; tickets: number }[] }>(
+      "/kds/openTickets",
+    ),
+
   kdsStatus: (params: {
     orderId: number;
     kotNumber: number;

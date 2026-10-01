@@ -5456,8 +5456,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           // the id-rename comment above) rather than the now-retired
           // draft-table- id, so a later lookup like `kots.filter(k =>
           // k.orderId === order.id)` still finds them.
+          // A settled order's tickets are done (finished orders leave every
+          // KDS) - they stayed "open" here until a refresh.
           kots: p.kots.map((k) =>
-            k.orderId === orderId ? { ...k, orderId: `o-final-${bid}` } : k,
+            k.orderId === orderId
+              ? {
+                  ...k,
+                  orderId: `o-final-${bid}`,
+                  ...(k.status !== "Cancelled" ? { status: "Served" as const } : {}),
+                }
+              : k,
           ),
           cashSessions: p.cashSessions.map((cs) =>
             cs.status === "Open" && cashPortion !== 0
@@ -7092,7 +7100,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 : x,
             ),
             kots: p.kots.map((k) =>
-              k.backendOrderId === backendId ? { ...k, orderId: `o-final-${backendId}` } : k,
+              k.backendOrderId === backendId
+                ? {
+                    ...k,
+                    orderId: `o-final-${backendId}`,
+                    ...(k.status !== "Cancelled" ? { status: "Served" as const } : {}),
+                  }
+                : k,
             ),
           }));
         } catch {

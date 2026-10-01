@@ -28,6 +28,7 @@ import {
 import { Button } from "@/components/ui/button";
 import {
   ApiError,
+  orderApi,
   reportApi,
   type RawDayWisePeriod,
   type RawItemWiseRow,
@@ -219,6 +220,36 @@ function DashboardPage() {
     };
   }, [isoFrom, isoTo]);
 
+  // Kitchen load: the tickets each kitchen has open on the exe right now -
+  // the same ones the kitchen boards show. It used to count only the KOTs
+  // this browser tab had punched itself, so a settled table stayed counted
+  // until a refresh, and after a refresh every open KOT (from the Captain
+  // App, another POS, or before the refresh) was missing (owner list
+  // 2026-09-30 #2). Re-read whenever the live orders change (AppShell
+  // reloads them on every order change from any device), plus a slow poll.
+  const [kitchenLoad, setKitchenLoad] = useState<Map<string, number> | null>(null);
+  const ordersVersion = store.orders;
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      orderApi
+        .kdsOpenTickets()
+        .then(({ kitchens }) => {
+          if (!cancelled) setKitchenLoad(new Map(kitchens.map((k) => [k.kitchenName, k.tickets])));
+        })
+        .catch((err) => {
+          if (!cancelled) console.error("[dashboard] Could not load kitchen load:", err instanceof ApiError ? err.message : err);
+        });
+    const t = setTimeout(load, 300);
+    const poll = setInterval(load, 20000);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+      clearInterval(poll);
+    };
+  }, [ordersVersion]);
+  const openKotCount = kitchenLoad ? [...kitchenLoad.values()].reduce((a, b) => a + b, 0) : 0;
+
   // "Top ordered items" reads the SAME call the Item-wise Sales report reads
   // (controller/reports.js#itemAndCategoryWiseSales), which aggregates every
   // order line in the range in SQL. It used to be summed here from
@@ -291,7 +322,6 @@ function DashboardPage() {
   );
   const occupiedTables = store.tables.filter((t) => t.status !== "Free").length;
   const lowStock = store.rawMaterials.filter((m) => m.stock <= m.reorderLevel);
-  const openKots = store.kots.filter((k) => !["Served", "Cancelled"].includes(k.status));
 
   const paymentMix = useMemo(() => {
     if (!totalRow) return [] as [string, number][];
@@ -499,7 +529,7 @@ function DashboardPage() {
           value={<AnimatedNumber value={running.length} />}
           icon={Users}
           tone={running.length ? "info" : "default"}
-          hint={`${openKots.length} KOTs in kitchen · ${occupiedTables}/${store.tables.length} tables occupied`}
+          hint={`${openKotCount} KOTs in kitchen · ${occupiedTables}/${store.tables.length} tables occupied`}
         />
       </div>
 
@@ -659,7 +689,7 @@ function DashboardPage() {
             {store.kitchens
               .map((k) => k.name)
               .map((station) => {
-                const n = openKots.filter((k) => k.station === station).length;
+                const n = kitchenLoad?.get(station) ?? 0;
                 const busy = n >= 2;
                 return (
                   <li key={station}>
