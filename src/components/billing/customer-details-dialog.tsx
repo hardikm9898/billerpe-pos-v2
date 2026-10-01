@@ -57,6 +57,9 @@ export function CustomerDetailsDialog({
   const [highlight, setHighlight] = useState(0);
   const [listOpen, setListOpen] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
+  // Name/address/GSTIN were filled in by this dialog from a saved customer
+  // (not typed) - a fresher copy from the exe may replace them.
+  const autoFilled = useRef(false);
   const nameRef = useRef<HTMLInputElement>(null);
   const addressRef = useRef<HTMLInputElement>(null);
   const gstinRef = useRef<HTMLInputElement>(null);
@@ -77,6 +80,7 @@ export function CustomerDetailsDialog({
     setHighlight(0);
     setListOpen(false);
     setShowErrors(false);
+    autoFilled.current = false;
     // Only when the dialog opens - not while the user is typing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -86,12 +90,16 @@ export function CustomerDetailsDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phone, open]);
 
-  // Asks the exe too once a few digits are in, so customers beyond the
-  // list held in memory are found as well.
-  const [remote, setRemote] = useState<Customer[]>([]);
+  // Asks the exe once a few digits are in. Its answer is the truth: the
+  // list held in memory was loaded when this screen opened, so a GSTIN or
+  // address added since (another device, the Captain App, an order) was
+  // missing, and a customer whose Autofill was switched off elsewhere was
+  // still suggested (owner list 2026-09-30 #7). The exe leaves out
+  // customers with Autofill off (suggest=1).
+  const [remote, setRemote] = useState<{ digits: string; list: Customer[] } | null>(null);
   useEffect(() => {
-    if (!open || phone.length < 4) {
-      setRemote([]);
+    if (!open || phone.length < 3) {
+      setRemote(null);
       return;
     }
     let cancelled = false;
@@ -100,9 +108,10 @@ export function CustomerDetailsDialog({
         .searchByMobile(phone)
         .then(({ numbers }) => {
           if (cancelled) return;
-          setRemote(
-            numbers
-              .filter((c) => c.number)
+          setRemote({
+            digits: phone,
+            list: numbers
+              .filter((c) => c.number && c.autofill !== false)
               .map((c) => ({
                 id: `remote-${c.id}`,
                 name: c.name ?? "",
@@ -112,24 +121,41 @@ export function CustomerDetailsDialog({
                 orders: 0,
                 lastVisit: "",
               })),
-          );
+          });
         })
         .catch(() => {
           // Suggestions only - the in-memory list still works.
         });
-    }, 250);
+    }, 200);
     return () => {
       cancelled = true;
       clearTimeout(t);
     };
   }, [phone, open]);
 
+  // The exe's answer for what is typed now; until it arrives, the list held
+  // in memory (Autofill on only) so suggestions appear at once.
+  const fresh = remote && remote.digits === phone ? remote.list : null;
   const activeCustomers = useMemo(() => {
-    const byPhone = new Map<string, Customer>();
-    for (const c of store.customers) if (c.active !== false && c.phone) byPhone.set(c.phone, c);
-    for (const c of remote) if (!byPhone.has(c.phone)) byPhone.set(c.phone, c);
-    return [...byPhone.values()];
-  }, [store.customers, remote]);
+    if (fresh) return fresh;
+    return store.customers.filter((c) => c.active !== false && c.phone);
+  }, [store.customers, fresh]);
+
+  // A full number that is a saved customer fills in by itself once the
+  // exe's copy is in - never over details typed by hand, but over ones this
+  // dialog filled from an older copy.
+  useEffect(() => {
+    if (!fresh || phone.length !== 10) return;
+    if ((name || address || gstin) && !autoFilled.current) return;
+    const exact = fresh.find((c) => c.phone.replace(/\D/g, "").slice(-10) === phone);
+    if (!exact) return;
+    setName(exact.name ?? "");
+    setAddress(exact.address ?? "");
+    setGstin((exact.gstin ?? "").toUpperCase());
+    autoFilled.current = true;
+    setListOpen(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fresh, phone]);
 
   // Numbers containing what was typed, those starting with it first.
   const suggestions = useMemo(() => {
@@ -145,6 +171,7 @@ export function CustomerDetailsDialog({
     setName(c.name ?? "");
     setAddress(c.address ?? "");
     setGstin((c.gstin ?? "").toUpperCase());
+    autoFilled.current = true;
     setListOpen(false);
     // Straight on to the next field, ready to confirm or edit.
     requestAnimationFrame(() => nameRef.current?.focus());
@@ -157,12 +184,13 @@ export function CustomerDetailsDialog({
     setListOpen(true);
     // A full number that is a saved customer fills in by itself - but never
     // over details already typed for someone else.
-    if (digits.length === 10 && !name && !address && !gstin) {
+    if (digits.length === 10 && ((!name && !address && !gstin) || autoFilled.current)) {
       const exact = activeCustomers.find((c) => c.phone.replace(/\D/g, "").slice(-10) === digits);
       if (exact) {
         setName(exact.name ?? "");
         setAddress(exact.address ?? "");
         setGstin((exact.gstin ?? "").toUpperCase());
+        autoFilled.current = true;
         setListOpen(false);
       }
     }
@@ -297,7 +325,10 @@ export function CustomerDetailsDialog({
               onKeyDown={enterTo(addressRef)}
               autoComplete="off"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                autoFilled.current = false;
+                setName(e.target.value);
+              }}
               placeholder="Customer name"
             />
           </div>
@@ -310,7 +341,10 @@ export function CustomerDetailsDialog({
               onKeyDown={enterTo(gstinRef)}
               autoComplete="off"
               value={address}
-              onChange={(e) => setAddress(e.target.value)}
+              onChange={(e) => {
+                autoFilled.current = false;
+                setAddress(e.target.value);
+              }}
               placeholder="Optional"
             />
           </div>
@@ -324,7 +358,10 @@ export function CustomerDetailsDialog({
               value={gstin}
               aria-invalid={(showErrors && !!gstinError) || undefined}
               maxLength={15}
-              onChange={(e) => setGstin(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, ""))}
+              onChange={(e) => {
+                autoFilled.current = false;
+                setGstin(e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, ""));
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();

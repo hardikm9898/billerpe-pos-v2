@@ -278,6 +278,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     { method: "POST", test: (p) => p === "/customer/create" },
     { method: "PUT", test: (p) => p === "/customer/update" },
     { method: "POST", test: (p) => p === "/customer/delete" },
+    { method: "POST", test: (p) => p === "/customer/autofill" },
     // Support tickets - the exe forwards them to the cloud itself.
     { method: "POST", test: (p) => p === "/support/ticket" },
     { method: "GET", test: (p) => p.startsWith("/support/tickets") },
@@ -2869,6 +2870,8 @@ export type RawCustomer = {
   orders?: number;
   /** The latest settled bill's time (ISO), null when none. */
   lastVisit?: string | null;
+  /** Customer Data's Autofill switch - off = never suggested while billing. */
+  autofill?: boolean;
 };
 
 // /customer/getAll (controller/user.js's getNumberSuggestion, reused under
@@ -2909,7 +2912,8 @@ export const customerApi = {
   // suggestions reach past the first 500 held in memory.
   searchByMobile: (digits: string) =>
     apiGet<{ numbers: RawCustomer[]; total: number }>(
-      `/customer/getAll?limit=8&search=${encodeURIComponent(digits)}`,
+      // suggest=1: customers with Autofill off are left out.
+      `/customer/getAll?limit=8&suggest=1&search=${encodeURIComponent(digits)}`,
     ),
 
   // Rejects a duplicate number outright (its own findOne check) - not
@@ -2925,6 +2929,10 @@ export const customerApi = {
   // the name. Refused while they owe a due.
   remove: (id: number) =>
     apiPost<{ deleted: number; ordersCleared: number }>("/customer/delete", { id }),
+
+  /** Customer Data's Autofill switch, kept on the exe for the mobile. */
+  setAutofill: (id: number, autofill: boolean) =>
+    apiPost<{ autofill: boolean }>("/customer/autofill", { id, autofill }),
 
   // controller/customer.js#getLastOrderForCustomer (GET /customer/
   // lastOrder) - "repeat this customer's last order" suggestion for the

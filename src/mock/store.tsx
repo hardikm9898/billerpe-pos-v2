@@ -1847,7 +1847,7 @@ function isoToDmy(iso: string): string {
   return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
 }
 
-function mapRawCustomer(c: RawCustomer, previousActive?: boolean): Customer {
+function mapRawCustomer(c: RawCustomer): Customer {
   return {
     id: String(c.id),
     name: c.name || "",
@@ -1857,10 +1857,9 @@ function mapRawCustomer(c: RawCustomer, previousActive?: boolean): Customer {
     lastVisit: c.lastVisit ? isoToDmy(c.lastVisit) : "—",
     gstin: c.gstin || undefined,
     address: c.address || undefined,
-    // "Autofill" has no backend equivalent (no active/enabled column on
-    // the customer model) - stays purely local, carried over across
-    // reloads by id rather than reset to true every time.
-    active: previousActive ?? true,
+    // Customer Data's "Autofill" switch, kept on the exe (it used to live
+    // only in this tab's memory - owner list 2026-09-30 #7).
+    active: c.autofill !== false,
   };
 }
 
@@ -7477,11 +7476,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     loadCustomersFromServer: async () => {
       try {
         const { numbers } = await customerApi.getAll();
-        const previousActiveById = new Map(s.customers.map((c) => [c.id, c.active]));
-        patch((p) => ({
-          ...p,
-          customers: numbers.map((c) => mapRawCustomer(c, previousActiveById.get(String(c.id)))),
-        }));
+        patch((p) => ({ ...p, customers: numbers.map((c) => mapRawCustomer(c)) }));
       } catch (err) {
         toast.error(err instanceof ApiError ? err.message : "Could not load customers from server");
       }
@@ -10048,11 +10043,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       };
       return run();
     },
-    toggleCustomer: (id) =>
-      patch((p) => ({
-        ...p,
-        customers: p.customers.map((c) => (c.id === id ? { ...c, active: c.active === false } : c)),
-      })),
+    // Autofill on/off is saved on the exe for that mobile, so every screen
+    // and device stops (or starts) suggesting it.
+    toggleCustomer: (id) => {
+      const c = s.customers.find((x) => x.id === id);
+      if (!c) return;
+      const next = c.active === false;
+      const setActive = (active: boolean) =>
+        patch((p) => ({
+          ...p,
+          customers: p.customers.map((x) => (x.id === id ? { ...x, active } : x)),
+        }));
+      setActive(next);
+      void customerApi.setAutofill(Number(id), next).catch((err) => {
+        setActive(!next);
+        toast.error(err instanceof ApiError ? err.message : "Could not change Autofill");
+      });
+    },
     settleDueBills: (ids, payments) => {
       if (guardBlocked()) return Promise.resolve(false);
       // Any mode collects a due - Cash/UPI/Card or the outlet's own (Paytm,

@@ -69,6 +69,7 @@ export const ROUTE_PERMISSIONS: Record<string, RouteRule> = {
   "POST /rolePermissionDefault": ["permissions","edit"],
   "POST /rolePermissionDefaultSpecial": ["permissions","edit"],
   "POST /customer/delete": ["ops-experience","delete"],
+  "POST /customer/autofill": ["ops-experience","edit"],
   "POST /adminOrder": ["biller","create"],
   "POST /kotOrder": ["biller","create"],
   "POST /holdOrder": ["biller","create"],
