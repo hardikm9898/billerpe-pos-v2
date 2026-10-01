@@ -545,16 +545,19 @@ function OrderCartPage() {
                 title={c.name}
                 // shrink-0: in this scrolling column a long category list
                 // squashed every button to a sliver instead of scrolling
-                // (owner report 2026-09-29, 35+ categories). Long names wrap
-                // to two lines.
+                // (owner report 2026-09-29, 35+ categories).
                 className={cn(
-                  "shrink-0 break-words rounded-lg px-3 py-2 text-left text-sm font-medium leading-snug transition-colors line-clamp-2",
+                  "shrink-0 rounded-lg px-3 py-2 text-left text-sm font-medium leading-snug transition-colors",
                   categoryId === c.id
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:bg-surface-muted",
                 )}
               >
-                {c.name}
+                {/* Long names: two lines, then "..." - the full name is the
+                    tooltip. The clamp is on this span because a <button>
+                    ignores it: the third line spilled half-visible over the
+                    next category (owner list 2026-09-30 #12). */}
+                <span className="line-clamp-2 break-words">{c.name}</span>
               </button>
             ))}
           </div>
