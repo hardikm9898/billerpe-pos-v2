@@ -263,6 +263,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // The exe's own automatic update (billerpe-local-exe services/exeUpdate.js).
     { method: "GET", test: (p) => p === "/exeUpdate/status" },
     { method: "POST", test: (p) => p === "/exeUpdate/apply" },
+    // Operations -> Apps & Downloads (billerpe-local-exe controller/appDownloads.js).
+    { method: "GET", test: (p) => p === "/appDownloads" },
+    { method: "POST", test: (p) => p === "/appDownloads/link" },
     { method: "POST", test: (p) => p === "/user" },
     { method: "POST", test: (p) => p === "/userUpdate" },
     { method: "GET", test: (p) => p === "/singleHotel" },
@@ -3119,6 +3122,34 @@ export const localServerApi = {
 
 /** An item's stage on the Kitchen Display, as the exe stores it. */
 /** "rejected": refused by the kitchen before accepting (POST /kdsReject). */
+/** One published download (billerpe-local-exe controller/appDownloads.js). */
+export type RawAppDownload = {
+  app: "exe-installer" | "captain-app";
+  version: string;
+  fileName: string;
+  size: number;
+  sha256: string;
+  notes: string | null;
+  publishedAt: string;
+  /** Already downloaded to this outlet's server PC. */
+  cached: boolean;
+};
+
+export const appDownloadsApi = {
+  list: () =>
+    apiGet<{ exeVersion: string; downloads: RawAppDownload[]; lanUrls: string[]; problem?: string }>(
+      "/appDownloads",
+    ),
+  /** A download link (token) for the newest version: a path on the local
+   * server for this browser, and the same link on each LAN address for the
+   * phone QR code. */
+  link: (app: RawAppDownload["app"]) =>
+    apiPost<{ path: string; lanUrls: string[]; version: string; expiresInMinutes: number }>(
+      "/appDownloads/link",
+      { app },
+    ),
+};
+
 export type KdsItemStage = "new" | "accepted" | "preparing" | "ready" | "served" | "rejected";
 
 export type RawSyncProblem = {

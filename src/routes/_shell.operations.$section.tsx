@@ -1,3 +1,4 @@
+import { DownloadsSection } from "@/components/operations/downloads";
 import { useStore } from "@/mock/store";
 import { READ_ONLY_NOTE } from "@/lib/access";
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
@@ -110,6 +111,8 @@ function renderSection(slug: string) {
       return <PrinterSection />;
     case "kot-format":
       return <KotFormatSection />;
+    case "downloads":
+      return <DownloadsSection />;
     case "display":
       return <DisplaySection />;
     case "menu-setting":

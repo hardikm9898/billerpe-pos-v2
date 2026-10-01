@@ -127,6 +127,14 @@ export const OPS_SECTIONS: OpsSection[] = [
     desc: "Customer details, order type, restaurant identity, token/KOT number and custom text",
     affects: "Every printed and reprinted kitchen ticket",
   },
+  {
+    slug: "downloads",
+    name: "Apps & Downloads",
+    short: "Downloads",
+    group: "hardware",
+    desc: "Newest BillerPe Local Server installer and Captain App, with a QR code for phones",
+    affects: "Installing the server PC and captains' phones",
+  },
 
   {
     slug: "display",

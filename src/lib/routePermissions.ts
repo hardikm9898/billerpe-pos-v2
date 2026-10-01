@@ -86,6 +86,8 @@ export const ROUTE_PERMISSIONS: Record<string, RouteRule> = {
   "POST /kotReady": ["kds","edit"],
   "POST /kdsStatus": ["kds","edit"],
   "POST /kdsReject": ["kds","edit"],
+  "GET /appDownloads": ["ops-hardware","view"],
+  "POST /appDownloads/link": ["ops-hardware","view"],
   "POST /tokenBoard/status": ["biller","edit"],
   "POST /token/reset": ["ops-billing","edit"],
   "POST /getDueOrders": ["ops-ledger","view"],
