@@ -3751,8 +3751,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         // reservation rather than making staff retype the same name/
         // number they already gave when booking. store.setCustomer can
         // still overwrite this normally if the actual walk-in differs.
-        customerName: table.reservedGuestName,
-        customerPhone: table.reservedGuestPhone,
+        // Only while the table is held for them: a guest left on a table
+        // after their bill was settled was pre-filled onto the next
+        // walk-in, and came back after "Remove customer" (owner list
+        // 2026-10-02 #6).
+        ...(table.status === "Reserved"
+          ? { customerName: table.reservedGuestName, customerPhone: table.reservedGuestPhone }
+          : {}),
       };
     }
     if (id.startsWith("draft-pickup-")) {
