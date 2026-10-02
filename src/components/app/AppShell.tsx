@@ -431,7 +431,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         if (!failed.length) return;
         const table = event.tableId != null ? store.tableById(String(event.tableId)) : undefined;
         toast.error(`KOT #${event.kotNumber}${table ? ` for ${table.name}` : ""} did not print`, {
-          description: `Printer: ${failed.map((f) => f.printer).join(", ")}. Check the printer, then reprint the KOT from the order.`,
+          // The exe says why (offline, not installed, out of paper...).
+          description: `${failed.map((f) => f.error || `Printer: ${f.printer}`).join(" · ")}. Fix the printer, then reprint the KOT from the order.`,
           duration: 15000,
         });
       },

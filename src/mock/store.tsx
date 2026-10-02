@@ -3503,6 +3503,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   ): Promise<boolean> => {
     try {
       const hotel = await hotelApi.getSettings();
+      let printFailure: string | null = null;
       const t = o.backendTotals
         ? {
             ...orderTotals(o, s),
@@ -3639,8 +3640,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           );
         }
         return true;
-      } catch {
-        // Fall through to the PDF-preview path below.
+      } catch (err) {
+        // Fall through to the PDF-preview path below - remembering why, so
+        // staff are told the real reason (printer offline, not installed,
+        // out of paper...) instead of "no local printer configured"
+        // (owner list 2026-10-02 #5).
+        if (!opts.pdfOnly && err instanceof ApiError && !/No invoice printer is configured/i.test(err.message)) {
+          printFailure = err.message;
+        }
       }
 
       const { pdf } = await orderApi.generateInvoicePdf({
@@ -3674,11 +3681,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const blob = new Blob([new Uint8Array(pdf.data)], { type: "application/pdf" });
       window.open(URL.createObjectURL(blob), "_blank");
       void recordBillPrint(backendId);
-      toast.success(
-        opts.pdfOnly
-          ? "Bill saved - opened as a PDF"
-          : "Bill ready to print (no local printer configured - opened as a PDF instead)",
-      );
+      if (printFailure) {
+        toast.error("The bill did not print - opened as a PDF instead", {
+          description: printFailure,
+          duration: 15000,
+        });
+      } else {
+        toast.success(
+          opts.pdfOnly
+            ? "Bill saved - opened as a PDF"
+            : "Bill ready to print (no local printer configured - opened as a PDF instead)",
+        );
+      }
       return true;
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Could not generate the bill PDF");
@@ -3703,7 +3717,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const results = res.results ?? [];
         const failed = results.filter((r) => !r.ok);
         if (failed.length) {
-          toast.error(`KOT failed to print on: ${failed.map((f) => f.printer).join(", ")}`);
+          toast.error(`KOT failed to print on: ${failed.map((f) => f.printer).join(", ")}`, {
+            description: failed.map((f) => f.error).filter(Boolean).join(" · "),
+            duration: 15000,
+          });
         } else {
           toast.success(`KOT sent to ${results.map((r) => r.printer).join(", ")}`);
         }
