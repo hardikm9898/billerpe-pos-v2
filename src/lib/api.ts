@@ -3247,6 +3247,8 @@ export const localPrintApi = {
     token: number;
     customerName?: string;
     customerNumber?: string;
+    address?: string;
+    gstin?: string;
     items: unknown[];
     totalQty: number;
     subtotal: number;

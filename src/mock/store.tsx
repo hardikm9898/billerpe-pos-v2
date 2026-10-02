@@ -3602,6 +3602,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           token: o.token ?? 0,
           customerName: o.customerName,
           customerNumber: o.customerPhone,
+          // Owner list 2026-10-02 #7: a customer's address and GSTIN never
+          // reached the bill - only the name and mobile were sent.
+          address: o.customerAddress,
+          gstin: o.customerGstin,
           items,
           totalQty,
           subtotal: t.subtotal,
@@ -3643,6 +3647,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         token: o.token ?? 0,
         customerName: o.customerName,
         customerNumber: o.customerPhone,
+        address: o.customerAddress,
+        gstin: o.customerGstin,
         items,
         totalQty,
         subtotal: t.subtotal,
