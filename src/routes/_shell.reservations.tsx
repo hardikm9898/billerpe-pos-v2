@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useStore } from "@/mock/store";
 import type { Reservation } from "@/mock/types";
 import { cs, numLocale } from "@/lib/currency";
@@ -60,8 +61,35 @@ type Draft = {
   gstNo: string;
 };
 
+// The outlet's own calendar day. toISOString() is UTC, which in India is
+// still yesterday until 05:30 am.
 function todayIso() {
-  return new Date().toISOString().slice(0, 10);
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// A booking time as an absolute moment, read the way the exe reads it
+// (billerpe-local-exe services/reservationTableSync.js#bookingMoment):
+// "yyyy-mm-ddTHH:mm[:ss]" in local time, or an older row's bare "HH:mm" on
+// its booking date.
+function bookingMoment(date: string, value: string): number | null {
+  const text = String(value ?? "").trim();
+  const dated = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})/.exec(text);
+  if (dated) {
+    return new Date(+dated[1]!, +dated[2]! - 1, +dated[3]!, +dated[4]!, +dated[5]!).getTime();
+  }
+  const t = /^(\d{1,2}):(\d{2})/.exec(text);
+  const day = new Date(date);
+  if (!t || Number.isNaN(day.getTime())) return null;
+  return new Date(day.getFullYear(), day.getMonth(), day.getDate(), +t[1]!, +t[2]!).getTime();
+}
+
+// Start and end of a booking; 23:00 -> 01:00 runs past midnight.
+function bookingWindow(r: Reservation): { start: number; end: number } {
+  const start = bookingMoment(r.date, r.startTime) ?? 0;
+  let end = bookingMoment(r.date, r.endTime) ?? start;
+  if (end <= start) end += 24 * 60 * 60 * 1000;
+  return { start, end };
 }
 
 function newDraft(): Draft {
@@ -132,22 +160,44 @@ function ReservationsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const stats = useMemo(() => {
-    const today = todayIso();
-    return {
-      today: store.reservations.filter((r) => r.date.slice(0, 10) === today).length,
-      total: store.reservations.length,
-    };
-  }, [store.reservations]);
+  // Owner rule (list 2026-10-02 #2): a booking is Upcoming until its END
+  // time (one going on now included), soonest first; then Ended, latest
+  // first. The counts are upcoming only - they used to count every booking
+  // ever made. A clock tick moves a booking across when its time is up.
+  const [clock, setClock] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setClock(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  const [tab, setTab] = useState<"upcoming" | "ended">("upcoming");
 
-  const sorted = useMemo(
-    () =>
-      [...store.reservations].sort(
-        (a, b) => a.date.localeCompare(b.date) || a.startTime.localeCompare(b.startTime),
-      ),
-    [store.reservations],
-  );
-  const paged = usePagedRows(sorted, 10);
+  const { upcoming, ended } = useMemo(() => {
+    const withTimes = store.reservations.map((r) => ({ r, ...bookingWindow(r) }));
+    return {
+      upcoming: withTimes
+        .filter((x) => x.end > clock)
+        .sort((a, b) => a.start - b.start || a.end - b.end)
+        .map((x) => x.r),
+      ended: withTimes
+        .filter((x) => x.end <= clock)
+        .sort((a, b) => b.end - a.end || b.start - a.start)
+        .map((x) => x.r),
+    };
+  }, [store.reservations, clock]);
+
+  // Today = today's bookings that have not ended yet.
+  const stats = useMemo(() => {
+    const today = new Date(clock).toDateString();
+    return {
+      today: upcoming.filter((r) => new Date(bookingWindow(r).start).toDateString() === today).length,
+      total: upcoming.length,
+    };
+  }, [upcoming, clock]);
+
+  const shown = tab === "upcoming" ? upcoming : ended;
+  const paged = usePagedRows(shown, 10);
+  const { setPage } = paged;
+  useEffect(() => setPage(1), [tab, setPage]);
 
   // When editing, a table already on this reservation must stay selectable
   // even if its live status is neither Free nor Reserved (e.g. currently
@@ -292,12 +342,24 @@ function ReservationsPage() {
         <StatCard label="Total upcoming" value={stats.total} tone="info" />
       </div>
 
-      <SectionCard title="All reservations" bodyClassName="p-3 sm:p-4">
+      <SectionCard title="Reservations" bodyClassName="p-3 sm:p-4">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as "upcoming" | "ended")} className="mb-3">
+          <TabsList>
+            <TabsTrigger value="upcoming">Upcoming ({upcoming.length})</TabsTrigger>
+            <TabsTrigger value="ended">Ended ({ended.length})</TabsTrigger>
+          </TabsList>
+        </Tabs>
         <DataTable
           rows={paged.pageRows}
           keyFn={(r) => r.id}
           onRowClick={(r) => setDraft(draftFromReservation(r))}
-          empty={<EmptyState icon={CalendarDays} title="No reservations yet" compact />}
+          empty={
+            <EmptyState
+              icon={CalendarDays}
+              title={tab === "upcoming" ? "No upcoming reservations" : "No ended reservations"}
+              compact
+            />
+          }
           columns={[
             {
               key: "guest",
