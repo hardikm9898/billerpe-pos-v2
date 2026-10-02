@@ -3588,7 +3588,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // printer configured yet, or the EXE can't be reached).
       try {
         if (opts.pdfOnly) throw new Error("pdf requested");
-        const { printer, extras } = await localPrintApi.printInvoice({
+        const { printer, results, extras } = await localPrintApi.printInvoice({
           orderId: String(backendId),
           // The actual bill number to print - see Order.billNo's own
           // comment. orderId above is the internal order id, kept only for
@@ -3622,6 +3622,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           ...(opts.extras ? { billExtras: opts.extras } : {}),
         });
         toast.success(`Bill sent to ${printer}`);
+        // Two invoice printers for this table: one can fail while the other
+        // prints (billerpe-local-exe controller/print.js#printInvoiceDirect).
+        const failedOn = (results ?? []).filter((r) => !r.ok);
+        if (failedOn.length) {
+          toast.error(`The bill did not print on ${failedOn.map((r) => r.printer).join(", ")}`, {
+            description: failedOn.map((r) => r.error).filter(Boolean).join(" · "),
+          });
+        }
         void recordBillPrint(backendId);
         const failedExtras = (extras ?? []).filter((x) => !x.ok);
         if (failedExtras.length) {

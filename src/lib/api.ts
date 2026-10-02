@@ -3270,7 +3270,10 @@ export const localPrintApi = {
   }) =>
     apiPost<{
       orderId: string;
+      /** Every printer that printed it, comma separated. */
       printer: string;
+      /** One per invoice printer this bill was routed to. */
+      results?: { printer: string; ok: boolean; error?: string }[];
       token?: number;
       extras?: { what: "token" | "kot"; ok: boolean; error?: string }[];
     }>("/printInvoiceDirect", params),
