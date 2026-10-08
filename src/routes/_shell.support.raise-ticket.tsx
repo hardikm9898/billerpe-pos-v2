@@ -1,6 +1,6 @@
 import { FieldError, useFormCheck } from "@/lib/formCheck";
 import { createFileRoute } from "@tanstack/react-router";
-import { LifeBuoy, Send } from "lucide-react";
+import { LifeBuoy, MessageCircle, Send } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
@@ -14,6 +14,7 @@ import {
   usePagedRows,
 } from "@/components/kit";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -44,11 +45,18 @@ export const Route = createFileRoute("/_shell/support/raise-ticket")({
 
 interface Ticket {
   id: string;
+  /** The cloud's ticket id (for replies). */
+  ticketId: number;
   subject: string;
   category: string;
   priority: string;
   raisedAt: string;
-  status: "Pending" | "Accepted" | "Completed";
+  status: "Pending" | "Accepted" | "Waiting for you" | "Completed";
+  /** BillerPe support's replies and yours (since the support queue). */
+  messages: NonNullable<RawSupportTicket["messages"]>;
+  replies: number;
+  canReply: boolean;
+  resolution: string;
 }
 
 const categories = ["Billing", "Printer", "Sync / Offline", "Stock", "Reports", "Other"];
@@ -59,6 +67,12 @@ const STATUS: Record<RawSupportTicket["status"], Ticket["status"]> = {
   open: "Accepted",
   close: "Completed",
 };
+const STATE: Record<NonNullable<RawSupportTicket["state"]>, Ticket["status"]> = {
+  new: "Pending",
+  open: "Accepted",
+  waiting: "Waiting for you",
+  closed: "Completed",
+};
 const PRIORITY: Record<RawSupportTicket["priority"], string> = {
   low: "Low",
   medium: "Normal",
@@ -68,9 +82,14 @@ const PRIORITY: Record<RawSupportTicket["priority"], string> = {
 function toTicket(t: RawSupportTicket): Ticket {
   const d = new Date(t.createdAt);
   return {
-    id: `TKT-${t.id}`,
-    subject: (t.issue ?? "").split("\n")[0] || "—",
-    category: t.ticket_type || "Other",
+    id: t.number ?? `TKT-${t.id}`,
+    ticketId: t.id,
+    subject: t.subject || (t.issue ?? "").split("\n")[0] || "—",
+    category: t.category || t.ticket_type || "Other",
+    messages: t.messages ?? [],
+    replies: t.replies ?? 0,
+    canReply: t.canReply ?? false,
+    resolution: t.resolution ?? "",
     priority: PRIORITY[t.priority] ?? "Low",
     raisedAt: Number.isNaN(d.getTime())
       ? ""
@@ -81,7 +100,7 @@ function toTicket(t: RawSupportTicket): Ticket {
           hour: "2-digit",
           minute: "2-digit",
         }),
-    status: STATUS[t.status] ?? "Pending",
+    status: (t.state ? STATE[t.state] : STATUS[t.status]) ?? "Pending",
   };
 }
 
@@ -114,6 +133,8 @@ function RaiseTicketPage() {
   }, [load]);
 
   const paged = usePagedRows(tickets, 10);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const opened = tickets.find((t) => t.id === openId) ?? null;
 
   const submit = async () => {
     const valid = form.check([
@@ -137,7 +158,7 @@ function RaiseTicketPage() {
       setSubject("");
       setDetails("");
       toast.success("Ticket raised", {
-        description: `${res.ticket ? `TKT-${res.ticket.id}` : "Your ticket"} · the BillerPe team will call you back.`,
+        description: `${res.ticket ? res.ticket.number ?? `TKT-${res.ticket.id}` : "Your ticket"} · BillerPe support replies here and on WhatsApp.`,
       });
       void load();
     } catch (err) {
@@ -238,6 +259,7 @@ function RaiseTicketPage() {
         <DataTable
           rows={paged.pageRows}
           keyFn={(t) => t.id}
+          onRowClick={(t) => setOpenId(t.id)}
           empty={
             <p className="py-6 text-center text-sm text-muted-foreground">
               {loading
@@ -253,7 +275,20 @@ function RaiseTicketPage() {
               header: "Ticket",
               cell: (t) => <span className="num font-medium">{t.id}</span>,
             },
-            { key: "subject", header: "Subject", cell: (t) => t.subject },
+            {
+              key: "subject",
+              header: "Subject",
+              cell: (t) => (
+                <span className="flex items-center gap-2">
+                  {t.subject}
+                  {t.replies > 0 ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-info-soft px-2 py-0.5 text-[11px] font-medium text-info">
+                      <MessageCircle className="size-3" /> BillerPe replied
+                    </span>
+                  ) : null}
+                </span>
+              ),
+            },
             { key: "cat", header: "Category", cell: (t) => t.category },
             { key: "pri", header: "Priority", cell: (t) => t.priority },
             { key: "at", header: "Raised", cell: (t) => <span className="num">{t.raisedAt}</span> },
@@ -263,6 +298,7 @@ function RaiseTicketPage() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="font-medium">{t.subject}</p>
+                {t.replies > 0 ? <p className="text-xs font-medium text-info">BillerPe replied · tap to read</p> : null}
                 <p className="text-xs text-muted-foreground num">
                   {t.id} · {t.raisedAt}
                 </p>
@@ -273,6 +309,70 @@ function RaiseTicketPage() {
         />
         <TablePager {...paged} onPageChange={paged.setPage} />
       </SectionCard>
+      <TicketDialog ticket={opened} onClose={() => setOpenId(null)} onReplied={() => void load()} />
     </Page>
+  );
+}
+
+/** One ticket's conversation with BillerPe support, and a reply box while it is open. */
+function TicketDialog({ ticket, onClose, onReplied }: { ticket: Ticket | null; onClose: () => void; onReplied: () => void }) {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  useEffect(() => setText(""), [ticket?.id]);
+  const send = async () => {
+    if (!ticket || !text.trim()) return;
+    setSending(true);
+    try {
+      await supportApi.reply(ticket.ticketId, text.trim());
+      setText("");
+      toast.success("Reply sent to BillerPe support");
+      onReplied();
+    } catch (err) {
+      toast.error("Reply not sent", { description: err instanceof ApiError ? err.message : "Check the internet connection and try again." });
+    } finally {
+      setSending(false);
+    }
+  };
+  return (
+    <Dialog open={!!ticket} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+        {ticket ? (
+          <>
+            <DialogHeader>
+              <DialogTitle>{ticket.subject}</DialogTitle>
+              <DialogDescription>
+                {ticket.id} · {ticket.category} · {ticket.raisedAt}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex items-center gap-2">
+              <StatusBadge status={ticket.status} />
+            </div>
+            <ol className="flex flex-col gap-2.5" aria-label="Conversation">
+              {ticket.messages.map((m) => (
+                <li key={m.id} className={m.from === "billerpe" ? "flex flex-col items-start" : "flex flex-col items-end"}>
+                  <div className={m.from === "billerpe" ? "max-w-[88%] rounded-2xl bg-info-soft px-3 py-2" : "max-w-[88%] rounded-2xl bg-muted px-3 py-2"}>
+                    <p className="text-[11px] font-semibold text-muted-foreground">{m.from === "billerpe" ? "BillerPe support" : "You"}</p>
+                    <p className="whitespace-pre-wrap break-words text-sm">{m.body}</p>
+                  </div>
+                  <span className="num mt-0.5 px-1 text-[11px] text-muted-foreground">
+                    {new Date(m.at).toLocaleString("en-IN", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </li>
+              ))}
+            </ol>
+            {ticket.canReply ? (
+              <div className="flex flex-col gap-2">
+                <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} maxLength={4000} placeholder="Reply to BillerPe support" aria-label="Your reply" />
+                <Button onClick={() => void send()} disabled={sending || !text.trim()} className="self-end">
+                  <Send className="size-4" /> {sending ? "Sending…" : "Send reply"}
+                </Button>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">This ticket is closed. Raise a new ticket if the problem comes back.</p>
+            )}
+          </>
+        ) : null}
+      </DialogContent>
+    </Dialog>
   );
 }

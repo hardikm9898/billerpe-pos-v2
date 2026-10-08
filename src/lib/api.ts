@@ -326,6 +326,7 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // Support tickets - the exe forwards them to the cloud itself.
     { method: "POST", test: (p) => p === "/support/ticket" },
     { method: "GET", test: (p) => p.startsWith("/support/tickets") },
+    { method: "POST", test: (p) => /^\/support\/ticket\/\d+\/reply$/.test(p) },
     { method: "GET", test: (p) => p.startsWith("/customer/lastOrder") },
     { method: "GET", test: (p) => p === "/offlinePrinterSetting" },
     { method: "POST", test: (p) => p === "/setPrinter" },
@@ -2950,6 +2951,17 @@ export interface RawSupportTicket {
   priority: "low" | "medium" | "high";
   status: "new" | "open" | "close";
   createdAt: string;
+  // Since the BillerPe support queue (cloud adminv1/sup/outlet.js): the
+  // conversation with support's replies. Older clouds leave these out.
+  number?: string;
+  subject?: string;
+  category?: string;
+  state?: "new" | "open" | "waiting" | "closed";
+  stateLabel?: string;
+  canReply?: boolean;
+  resolution?: string;
+  messages?: { id: number; from: "you" | "billerpe"; body: string; at: string }[];
+  replies?: number;
 }
 export const supportApi = {
   list: (page = 1) =>
@@ -2958,6 +2970,8 @@ export const supportApi = {
     ),
   raise: (params: { subject: string; details: string; category: string; priority: string }) =>
     apiPost<{ message?: string; ticket?: RawSupportTicket }>("/support/ticket", params),
+  /** Answer support from the ticket list (exe 1.1.7+ forwards it). */
+  reply: (id: number, text: string) => apiPost<{ message?: string }>(`/support/ticket/${id}/reply`, { text }),
 };
 
 export const customerApi = {

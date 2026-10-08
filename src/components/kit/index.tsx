@@ -253,6 +253,7 @@ const statusTone: Record<string, string> = {
   Pending: "bg-status-held text-status-held-foreground",
   Printed: "bg-info-soft text-info",
   Accepted: "bg-info-soft text-info",
+  "Waiting for you": "bg-warning-soft text-warning",
   Preparing: "bg-warning-soft text-warning",
   Ready: "bg-success-soft text-success",
   Served: "bg-muted text-muted-foreground",
