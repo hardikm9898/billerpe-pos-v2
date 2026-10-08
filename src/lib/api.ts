@@ -99,6 +99,43 @@ function authHeader(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/**
+ * The outlet's BillerPe plan as the exe knows it (billerpe-local-exe
+ * helpers/planLock.js). Owner 2026-10-08: when the plan ends the whole
+ * software locks; "Extend 1 day" once; paying unlocks it.
+ */
+export interface PlanState {
+  locked: boolean;
+  outlet: string;
+  endsAt: string | null;
+  paidUntil: string | null;
+  inGrace: boolean;
+  graceUsed: boolean;
+  canExtend: boolean;
+  offlineExtension?: boolean;
+  message: string | null;
+}
+let planListener: ((plan: PlanState) => void) | null = null;
+/** The lock screen (components/app/PlanLock.tsx) listens here. */
+export function onPlanLocked(fn: ((plan: PlanState) => void) | null) {
+  planListener = fn;
+}
+/** Every answer passes here: a 402 "plan-expired" opens the lock screen. */
+function notePlan(res: Response): Response {
+  if (res.status === 402) {
+    void res
+      .clone()
+      .json()
+      .then((j: { code?: string; results?: { plan?: PlanState } } | null) => {
+        if (j?.code === "plan-expired" && j.results?.plan) planListener?.(j.results.plan);
+      })
+      .catch(() => undefined);
+  }
+  return res;
+}
+/** Signed in on this browser (the plan is asked for only then). */
+export const hasSession = () => Boolean(getStoredAuthToken());
+
 async function pingHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
   try {
     const controller = new AbortController();
@@ -124,6 +161,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // Bootstrap-only, no cloud equivalent exists at all - see
     // controller/deviceRegistration.js in billerpe-local-exe.
     { method: "POST", test: (p) => p === "/registerDevice" },
+    // The plan lock screen (billerpe-local-exe routes/plan.js).
+    { method: "GET", test: (p) => p === "/plan/status" },
+    { method: "POST", test: (p) => p === "/plan/check" || p === "/plan/extend" || p === "/plan/pay" },
     { method: "GET", test: (p) => p === "/table" },
     { method: "POST", test: (p) => p === "/table" },
     { method: "GET", test: (p) => p === "/getTableCatagories" },
@@ -823,7 +863,7 @@ export function markServerUnreachable() {
 // pages only) still reject normally.
 async function guardedFetch(base: string, url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    return notePlan(await fetch(url, init));
   } catch (err) {
     if (base === API_BASE_URL) throw err;
     // A failed request alone doesn't mean the server is down - confirm first.
@@ -832,7 +872,7 @@ async function guardedFetch(base: string, url: string, init: RequestInit): Promi
       const method = (init.method ?? "GET").toUpperCase();
       if (method === "GET") {
         try {
-          return await fetch(url, init);
+          return notePlan(await fetch(url, init));
         } catch {
           // fall through to the message below
         }
@@ -855,7 +895,7 @@ async function guardedFetch(base: string, url: string, init: RequestInit): Promi
         );
       }
       try {
-        return await fetch(url, init);
+        return notePlan(await fetch(url, init));
       } catch {
         await refreshServerState();
       }
@@ -3094,6 +3134,13 @@ export type RawExeUpdateStatus = {
   lastResult: { ok: boolean; version: string; from: string; reason: string } | null;
   /** "02:00-06:00" */
   night: string;
+};
+
+export const planApi = {
+  status: () => apiGet<PlanState>("/plan/status"),
+  check: () => apiPost<PlanState>("/plan/check", {}),
+  extend: () => apiPost<PlanState>("/plan/extend", {}),
+  pay: () => apiPost<{ url: string; amount: number; invoice: string }>("/plan/pay", {}),
 };
 
 export const exeUpdateApi = {
