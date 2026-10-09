@@ -1828,9 +1828,10 @@ const STAGE_FOR_STATUS: Partial<Record<KotStatus, Exclude<KdsStage, "new">>> = {
   Served: "served",
 };
 /** A ticket's lane follows its items (owner decision, 2026-09-28): all
- * served -> Served (off the board), all ready -> Ready, any cooking ->
- * Preparing, any accepted -> Accepted, else New. Items the exe hasn't
- * described yet (a round this screen just fired) keep `fallback`. */
+ * served -> Served (off the board), all ready -> Ready, accepted or cooking
+ * -> Preparing (Accept goes straight to Preparing - owner request
+ * 2026-10-03, no Accepted lane), else New. Items the exe hasn't described
+ * yet (a round this screen just fired) keep `fallback`. */
 function kotStatusFromItems(items: Kot["items"], fallback: KotStatus): KotStatus {
   // Rejected items are off the board; a ticket with nothing else left is done.
   const live = items.filter((i) => i.stage !== "rejected");
@@ -1839,8 +1840,7 @@ function kotStatusFromItems(items: Kot["items"], fallback: KotStatus): KotStatus
   const ranks = live.map((i) => stageRank(i.stage));
   if (ranks.every((r) => r >= 4)) return "Served";
   if (ranks.every((r) => r >= 3)) return "Ready";
-  if (ranks.some((r) => r >= 2)) return "Preparing";
-  if (ranks.some((r) => r >= 1)) return "Accepted";
+  if (ranks.some((r) => r >= 1)) return "Preparing";
   return "Pending";
 }
 
@@ -4616,7 +4616,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!o?.backendId) return true;
       const run = async () => {
         try {
-          await orderApi.remove(o.backendId!, { free: true });
+          await orderApi.remove(o.backendId!, { free: true, ...(reason ? { reason } : {}) });
         } catch (err) {
           toast.error(
             err instanceof ApiError
@@ -6076,7 +6076,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return { ...k, items, status: kotStatusFromItems(items, status) };
         }),
       }));
-      toast.success(`KOT marked ${status}`);
+      toast.success(kot.status === "Pending" || kot.status === "Printed" ? "KOT accepted - preparing" : `KOT marked ${status}`);
       if (kot.backendOrderId && kot.kotNumber) {
         const detailIds = kot.items
           .filter((i) => i.stage !== "rejected")

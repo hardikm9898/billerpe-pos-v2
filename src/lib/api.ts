@@ -227,6 +227,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // Open tickets per kitchen (dashboard "Kitchen load") - billerpe-local-exe controller/kds.js.
     { method: "GET", test: (p) => p === "/kds/openTickets" },
     { method: "POST", test: (p) => p === "/kdsReject" },
+    // KDS History + undo a step taken by mistake (billerpe-local-exe controller/kds.js).
+    { method: "GET", test: (p) => p === "/kds/history" },
+    { method: "POST", test: (p) => p === "/kdsMoveBack" },
     // Token display + manual reset (billerpe-local-exe/controller/tokenBoard.js).
     { method: "GET", test: (p) => p === "/tokenBoard" },
     { method: "POST", test: (p) => p === "/tokenBoard/status" },
@@ -2098,6 +2101,20 @@ export const orderApi = {
       "/kds/openTickets",
     ),
 
+  /** Served tickets of orders not settled yet, each with every recorded
+   * kitchen step (billerpe-local-exe controller/kds.js#getKdsHistory). */
+  kdsHistory: () => apiGet<{ tickets: KdsHistoryTicket[] }>("/kds/history"),
+
+  /** Undo a step taken by mistake: Served -> Ready, or back to Preparing
+   * (controller/kds.js#moveKdsBack). The ticket returns to every board. */
+  kdsMoveBack: (params: { orderId: number; kotNumber: number; to: "ready" | "preparing"; detailIds?: number[] }) =>
+    apiPost<{ items: { detailId: number; status: KdsItemStage }[]; moved: number }>("/kdsMoveBack", {
+      order_id: params.orderId,
+      kotNumber: params.kotNumber,
+      to: params.to,
+      ...(params.detailIds?.length ? { detailIds: params.detailIds } : {}),
+    }),
+
   kdsStatus: (params: {
     orderId: number;
     kotNumber: number;
@@ -2241,10 +2258,12 @@ export const orderApi = {
   // afterward: cancelOrderReport itself defines a "cancelled" order as
   // nothing but a soft-deleted, previously-settled row - this backend has
   // no real concept of cancel distinct from delete.
-  remove: (id: number, opts?: { free?: boolean }) =>
+  remove: (id: number, opts?: { free?: boolean; reason?: string }) =>
     apiPost<{ message?: string }>("/orderRemove", {
       id,
       ...(opts?.free ? { free: "free" } : {}),
+      // Kept on the order timeline (billerpe-local-exe helpers/timeline.js).
+      ...(opts?.reason ? { reason: opts.reason } : {}),
     }),
   // Same endpoint, bulk form (`allId` instead of `id`) - confirmed by
   // reading deleteOrder that the bulk path never frees tables even if
@@ -2396,8 +2415,56 @@ export const orderApi = {
   remakeSequence: () => apiGet<{ message?: string; updated_count: number }>("/makeSequenceBillNo"),
 };
 
+/** A line in a version-2 timeline snapshot (billerpe-local-exe helpers/timeline.js). */
+export type TimelineLine = {
+  id: number;
+  menuId: number | null;
+  name: string;
+  variant: string;
+  addons: string;
+  note: string;
+  qty: number;
+  price: number;
+  amount: number;
+  kot: number | null;
+  status: string;
+  kds: string;
+};
+
+/** The whole bill at one timeline step (version 2). */
+export type TimelineBill = {
+  subtotal: number;
+  discount: number;
+  discountReason: string;
+  taxes: { name: string; rate: number; type: string; amount: number }[];
+  tax: number;
+  service: number;
+  packaging: number;
+  delivery: number;
+  roundOff: number;
+  grand: number;
+  tip: number;
+  payment: { cash: number; upi: number; card: number; due: number; other: { name: string; amount: number }[] };
+  status: string;
+  paid: string;
+  cancelled: boolean;
+  table: string;
+  customer: { name: string; number: string } | null;
+  token: number;
+};
+
 export type RawTimelineEntry = {
   id: number;
+  /** 2: items are TimelineLine[], bill and detail are set. 1: older rows. */
+  version?: number | null;
+  items?: unknown;
+  bill?: TimelineBill | string | null;
+  /** What the event was about: reason, fromTable/toTable, kotNumber, stage, items, amount, mode... */
+  detail?: Record<string, unknown> | string | null;
+  gst?: number;
+  service_charge?: number;
+  discount?: number;
+  sub_total?: number;
   order_type: string;
   bill_no: string;
   order_status: string;
@@ -3151,6 +3218,35 @@ export const appDownloadsApi = {
 };
 
 export type KdsItemStage = "new" | "accepted" | "preparing" | "ready" | "served" | "rejected";
+
+/** One kitchen step (billerpe-local-exe model/kdsEvent.js). kind "back" = moved back. */
+export type KdsHistoryStep = {
+  at: string;
+  from: KdsItemStage | null;
+  to: KdsItemStage;
+  kind: "back" | null;
+  reason: string | null;
+  user: string;
+  items: string[];
+};
+
+export type KdsHistoryTicket = {
+  orderId: number;
+  kotNumber: number;
+  kitchenId: number | null;
+  kitchenName: string;
+  billNo: string | null;
+  orderType: string;
+  token: number;
+  /** Dine-in bill already generated: shown, but can no longer be moved back. */
+  billGenerated: boolean;
+  table: string;
+  firedAt: string | null;
+  firedBy: string;
+  servedAt: string | null;
+  items: { detailId: number | null; name: string; qty: number | null; comment: string; status: KdsItemStage }[];
+  steps: KdsHistoryStep[];
+};
 
 export type RawSyncProblem = {
   entity: string;

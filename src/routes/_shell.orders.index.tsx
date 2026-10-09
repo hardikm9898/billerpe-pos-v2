@@ -54,61 +54,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { ApiError, orderApi, type RawTimelineEntry } from "@/lib/api";
+import { ApiError, orderApi } from "@/lib/api";
+import { OrderTimelineDialog } from "@/components/orders/OrderTimeline";
 import { cn } from "@/lib/utils";
 import { displayBillNo, orderTotals, useStore } from "@/mock/store";
 import type { AuditLog, Order, OrderStatus } from "@/mock/types";
 import { cs, numLocale } from "@/lib/currency";
-
-// constant/const.js's ACTION enum (controller/kto.js) - real values this
-// backend actually writes to hms_timeline_mst.action. "remove_kot" is a
-// member of the enum but its one call site in kto.js is commented out,
-// so it never fires in practice - not included here since it would never
-// match.
-const ACTION_LABELS: Record<string, string> = {
-  place_order: "Order created",
-  kot: "KOT fired",
-  hold: "Order held",
-  settle: "Bill settled",
-  update_order: "Order updated",
-  update_order_item: "Item updated",
-  decrease_kot_qty: "Item quantity decreased",
-  free_table: "Table freed",
-  delete_order: "Order deleted",
-};
-
-// Icon + tone per raw action key, for the timeline's visual markers -
-// intentionally keyed off the same domain as ACTION_LABELS above, not the
-// display label, so it stays correct if a label's wording ever changes.
-const ACTION_VISUALS: Record<string, { icon: LucideIcon; tone: string }> = {
-  place_order: { icon: Receipt, tone: "bg-info-soft text-info" },
-  kot: { icon: ChefHat, tone: "bg-warning-soft text-warning" },
-  hold: { icon: PauseCircle, tone: "bg-surface-muted text-muted-foreground" },
-  settle: { icon: CheckCircle2, tone: "bg-success-soft text-success" },
-  update_order: { icon: Pencil, tone: "bg-info-soft text-info" },
-  update_order_item: { icon: Pencil, tone: "bg-info-soft text-info" },
-  decrease_kot_qty: { icon: MinusCircle, tone: "bg-warning-soft text-warning" },
-  free_table: { icon: LayoutGrid, tone: "bg-surface-muted text-muted-foreground" },
-  delete_order: { icon: Trash2, tone: "bg-primary-soft text-primary" },
-};
-const DEFAULT_ACTION_VISUAL = { icon: Circle, tone: "bg-surface-muted text-muted-foreground" };
-
-function mapRawTimelineEntry(t: RawTimelineEntry): AuditLog & { rawAction: string } {
-  const at = new Date(t.created_Date);
-  return {
-    id: `tl-${t.id}`,
-    userId: String(t.hotelUserId ?? ""),
-    userName: t.hms_hotelUser_master?.name || t.creator || "Staff",
-    action: ACTION_LABELS[t.action] ?? t.action,
-    rawAction: t.action,
-    entity: `Order #${t.bill_no}`,
-    before: "",
-    after: `${t.order_status} · ${cs()}${t.grandAmount}`,
-    device: t.device_name || t.from || "",
-    ip: "",
-    at: Number.isNaN(at.getTime()) ? t.created_Date : at.toLocaleString("en-IN"),
-  };
-}
 
 // Historical orders (synced via loadOrderHistoryFromServer, id prefixed
 // "oh-") carry real backendTotals - preferring those over a fresh
@@ -280,42 +231,6 @@ function OrdersPage() {
     );
   const toggleOne = (id: string) =>
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-
-  const [timelineEntries, setTimelineEntries] = useState<(AuditLog & { rawAction: string })[]>([]);
-  const [timelineLoading, setTimelineLoading] = useState(false);
-
-  useEffect(() => {
-    if (!timelineOrder) {
-      setTimelineEntries([]);
-      return;
-    }
-    if (!timelineOrder.backendId) {
-      setTimelineEntries([]);
-      return;
-    }
-    let cancelled = false;
-    setTimelineLoading(true);
-    const run = async () => {
-      try {
-        const { timesLines } = await orderApi.getTimeline(timelineOrder.backendId!);
-        const sorted = [...timesLines].sort(
-          (a, b) => new Date(b.created_Date).getTime() - new Date(a.created_Date).getTime(),
-        );
-        if (!cancelled) setTimelineEntries(sorted.map(mapRawTimelineEntry));
-      } catch (err) {
-        if (!cancelled) {
-          toast.error(err instanceof ApiError ? err.message : "Could not load the order timeline");
-          setTimelineEntries([]);
-        }
-      } finally {
-        if (!cancelled) setTimelineLoading(false);
-      }
-    };
-    void run();
-    return () => {
-      cancelled = true;
-    };
-  }, [timelineOrder]);
 
   return (
     <Page>
@@ -589,69 +504,7 @@ function OrdersPage() {
         />
       </SectionCard>
 
-      <Dialog open={!!timelineOrder} onOpenChange={(o) => !o && setTimelineOrder(null)}>
-        <DialogContent className="max-h-[85vh] max-w-xl overflow-y-auto">
-          <DialogHeader>
-            <div className="flex flex-wrap items-center gap-2">
-              <DialogTitle>Timeline · Order #{timelineOrder?.orderNo}</DialogTitle>
-              {timelineOrder ? <StatusBadge status={timelineOrder.status} /> : null}
-            </div>
-            <DialogDescription>
-              {timelineEntries.length
-                ? `${timelineEntries.length} recorded change${timelineEntries.length === 1 ? "" : "s"}, newest first.`
-                : "Every recorded change to this order, newest first."}
-            </DialogDescription>
-          </DialogHeader>
-          {timelineLoading ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">Loading timeline…</p>
-          ) : timelineEntries.length ? (
-            <div className="mt-1">
-              {timelineEntries.map((a, i) => {
-                const visual = ACTION_VISUALS[a.rawAction] ?? DEFAULT_ACTION_VISUAL;
-                const Icon = visual.icon;
-                const isLast = i === timelineEntries.length - 1;
-                return (
-                  <div key={a.id} className="relative flex gap-3 pb-5 last:pb-0">
-                    {!isLast ? (
-                      <span className="absolute left-4 top-9 bottom-0 w-px bg-border" aria-hidden />
-                    ) : null}
-                    <span
-                      className={cn(
-                        "relative z-10 grid size-8 shrink-0 place-items-center rounded-full",
-                        visual.tone,
-                      )}
-                    >
-                      <Icon className="size-4" />
-                    </span>
-                    <div className="min-w-0 flex-1 rounded-xl border border-border bg-surface p-3 shadow-card">
-                      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-                        <span className="text-sm font-semibold">{a.action}</span>
-                        <span className="num text-xs text-muted-foreground">{a.at}</span>
-                      </div>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {a.before ? `${a.before} → ` : ""}
-                        {a.after}
-                      </p>
-                      <p className="mt-1.5 flex items-center gap-1 text-xs text-muted-foreground">
-                        <UserRound className="size-3" /> {a.userName}
-                      </p>
-                      {a.reason ? (
-                        <p className="mt-1.5 rounded-lg bg-surface-muted px-2 py-1 text-xs italic text-muted-foreground">
-                          "{a.reason}"
-                        </p>
-                      ) : null}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : timelineOrder && !timelineOrder.backendId ? (
-            <EmptyState compact icon={Clock} title="Not synced with the server yet" />
-          ) : (
-            <EmptyState compact icon={Clock} title="No recorded changes yet" />
-          )}
-        </DialogContent>
-      </Dialog>
+      <OrderTimelineDialog order={timelineOrder} onClose={() => setTimelineOrder(null)} />
 
       <Dialog open={sequenceOpen} onOpenChange={setSequenceOpen}>
         <DialogContent>

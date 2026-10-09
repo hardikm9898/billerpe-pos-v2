@@ -1,7 +1,7 @@
 import { useAccess } from "@/lib/access";
 import { createFileRoute } from "@tanstack/react-router";
 import { motion } from "motion/react";
-import { Ban, ChefHat, Clock, Timer } from "lucide-react";
+import { Ban, ChefHat, Clock, History, LayoutGrid, Timer } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { EmptyState, Page, PageHeader, StatusBadge } from "@/components/kit";
@@ -18,6 +18,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/operations/shared";
+import { KdsHistory } from "@/components/kds/KdsHistory";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { connectKdsSocket } from "@/lib/kdsSocket";
 import { cn } from "@/lib/utils";
 import { elapsedFrom, elapsedMinutes } from "@/mock/format";
@@ -30,7 +32,7 @@ export const Route = createFileRoute("/_shell/kds")({
       { title: "Kitchen Display · BillerPe" },
       {
         name: "description",
-        content: "Station-wise KOT queue with accept, preparing, ready and served transitions.",
+        content: "Station-wise KOT queue: accept into preparing, ready, served - with the history of served tickets.",
       },
       { property: "og:title", content: "Kitchen Display · BillerPe" },
       {
@@ -48,17 +50,29 @@ const REJECT_REASONS = ["Out of stock", "Not available right now", "Kitchen clos
 /** A ticket's items still with the kitchen - rejected ones leave the board. */
 const liveItems = (k: Kot) => k.items.filter((i) => i.stage !== "rejected");
 
+// Accept takes a ticket straight to Preparing (owner request 2026-10-03:
+// no separate Accepted lane). "Accepted" is only seen on a ticket accepted
+// before that; it sits in Preparing.
 const flow: Record<string, KotStatus> = {
-  Pending: "Accepted",
-  Printed: "Accepted",
-  Accepted: "Preparing",
+  Pending: "Preparing",
+  Printed: "Preparing",
+  Accepted: "Ready",
   Preparing: "Ready",
   Ready: "Served",
+};
+const flowLabel: Record<string, string> = {
+  Pending: "Accept",
+  Printed: "Accept",
+  Accepted: "Mark Ready",
+  Preparing: "Mark Ready",
+  Ready: "Mark Served",
 };
 
 function KdsPage() {
   const store = useStore();
   const [station, setStation] = useState<string>("All");
+  // Board: the live lanes. History: served tickets not settled yet.
+  const [view, setView] = useState<"board" | "history">("board");
   const stations = ["All", ...store.kitchens.map((k) => k.name)];
   const [rejectTarget, setRejectTarget] = useState<Kot | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -103,11 +117,10 @@ function KdsPage() {
     .filter((k) => !k.kdsHidden)
     .filter((k) => station === "All" || k.station === station);
 
-  const lanes: { title: string; match: KotStatus[] }[] = [
-    { title: "New", match: ["Pending", "Printed"] },
-    { title: "Accepted", match: ["Accepted"] },
-    { title: "Preparing", match: ["Preparing"] },
-    { title: "Ready", match: ["Ready"] },
+  const lanes: { title: string; match: KotStatus[]; tone: string }[] = [
+    { title: "New", match: ["Pending", "Printed"], tone: "bg-info" },
+    { title: "Preparing", match: ["Accepted", "Preparing"], tone: "bg-warning" },
+    { title: "Ready", match: ["Ready"], tone: "bg-success" },
   ];
 
   return (
@@ -122,6 +135,17 @@ function KdsPage() {
           </span>
         }
       />
+
+      <Tabs value={view} onValueChange={(v) => setView(v as "board" | "history")} className="mb-3">
+        <TabsList>
+          <TabsTrigger value="board">
+            <LayoutGrid className="size-3.5" /> Board
+          </TabsTrigger>
+          <TabsTrigger value="history">
+            <History className="size-3.5" /> History
+          </TabsTrigger>
+        </TabsList>
+      </Tabs>
 
       <div className="mb-4 flex flex-wrap gap-2">
         {stations.map((s) => (
@@ -149,13 +173,18 @@ function KdsPage() {
         </div>
       ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {view === "history" ? <KdsHistory station={station} /> : null}
+
+      <div className={cn("grid gap-4 md:grid-cols-3", view !== "board" && "hidden")}>
         {lanes.map((lane) => {
           const items = kots.filter((k) => lane.match.includes(k.status));
           return (
             <section key={lane.title} className="rounded-2xl bg-surface-muted/70 p-3">
               <header className="mb-3 flex items-center justify-between px-1">
-                <h2 className="text-sm font-semibold">{lane.title}</h2>
+                <h2 className="flex items-center gap-2 text-sm font-semibold">
+                  <span className={cn("size-2 rounded-full", lane.tone)} aria-hidden />
+                  {lane.title}
+                </h2>
                 <span className="num rounded-full bg-surface px-2 py-0.5 text-xs">
                   {items.length}
                 </span>
@@ -366,7 +395,7 @@ function KotCard({
             <Ban className="size-3.5" /> Reject
           </Button>
           <Button hidden={!access.edit} size="sm" onClick={onAdvance}>
-            Mark {flow[kot.status]}
+            {flowLabel[kot.status] ?? `Mark ${flow[kot.status]}`}
           </Button>
         </div>
       </div>

@@ -12,6 +12,7 @@ import {
   ArrowLeftRight,
   BadgePercent,
   ChefHat,
+  ChevronDown,
   History,
   Minus,
   Pause,
@@ -308,6 +309,7 @@ function OrderCartPage() {
   // lineIds option. Empty selection keeps the original "Send KOT fires
   // everything pending" behaviour.
   const [selectedLineIds, setSelectedLineIds] = useState<Set<string>>(new Set());
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
   const [customItemOpen, setCustomItemOpen] = useState(false);
   const customStations = useCustomItemStations();
   const [customRoute, setCustomRoute] = useState<CustomItemRoute>({});
@@ -397,7 +399,8 @@ function OrderCartPage() {
     const onMenu = store.menuItems
       .filter(
         (i) =>
-          isSellable(i, categoriesById) && categoriesById.get(i.categoryId)?.menuId === activeMenuId,
+          isSellable(i, categoriesById) &&
+          categoriesById.get(i.categoryId)?.menuId === activeMenuId,
       )
       .map((i) => sellableItem(i, store.addonGroups));
     // A search looks across the whole menu (a SKU from another category must
@@ -461,6 +464,23 @@ function OrderCartPage() {
   // afterward - same rule the table-grid page's own Merge/Transfer icons
   // and store.transferTable/mergeTables/moveKot enforce.
   const billed = order.status === "Bill Generated";
+
+  // Send KOT prints on the KOT printer(s) and shows on the KDS; Only KOT just
+  // records the round on the bill - no printer, no KDS (same as keyboard
+  // billing's Only KOT, billerpe-local-exe/services/kotAutoPrint.js).
+  const fireKot = (onlyKot: boolean) => {
+    const ids = [...selectedLineIds];
+    store.generateKot(order.id, {
+      ...(onlyKot ? { onlyKot: true } : {}),
+      ...(ids.length ? { lineIds: ids } : {}),
+    });
+    setSelectedLineIds(new Set());
+    // A full send (nothing individually checked) keeps the original "fire
+    // everything, move on" flow. Sending just the checked items stays on
+    // this order instead - the whole point of checking only some was to keep
+    // adding to or sending the rest of this same order afterward.
+    if (!ids.length) goToTables();
+  };
 
   const addToCart = (item: MenuItem) => {
     if (item.variants?.length || item.addonGroupIds?.length) {
@@ -611,55 +631,60 @@ function OrderCartPage() {
 
       {/* cart side */}
       <aside className="flex min-h-0 flex-col bg-surface">
-        <div className="border-b border-border px-4 py-3">
+        {/* Kept to two short rows so a small screen still shows several
+            cart items (customer chip sits beside the order details). */}
+        <div className="border-b border-border px-3 py-2">
           <div className="flex items-center justify-between gap-2">
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold">
-                {order.tableLabel} · {order.orderNo ? `#${order.orderNo}` : "New"}
-              </p>
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span>{order.type}</span>
-                <span>·</span>
-                <span className="flex items-center gap-1">
-                  <IconButton
-                    label="Decrease guest count"
-                    className="size-5"
-                    disabled={settled}
-                    onClick={() => store.setGuestCount(order.id, order.guests - 1)}
-                  >
-                    <Minus className="size-3" />
-                  </IconButton>
-                  <span className="num">{order.guests} guests</span>
-                  <IconButton
-                    label="Increase guest count"
-                    className="size-5"
-                    disabled={settled}
-                    onClick={() => store.setGuestCount(order.id, order.guests + 1)}
-                  >
-                    <Plus className="size-3" />
-                  </IconButton>
-                </span>
-                <span>· KOT rounds {order.kotRounds}</span>
-              </div>
-            </div>
+            <p className="min-w-0 truncate text-sm font-semibold">
+              {order.tableLabel} · {order.orderNo ? `#${order.orderNo}` : "New"}
+            </p>
             <StatusBadge status={order.status} />
           </div>
-          <button
-            onClick={() => setCustomerOpen(true)}
-            className="mt-2 flex w-full items-center gap-2 rounded-lg bg-surface-muted px-3 py-2 text-left text-xs"
-          >
-            <User className="size-3.5 text-muted-foreground" />
-            {order.customerName ? (
-              <span>
-                {order.customerName} · <span className="num">{order.customerPhone}</span>
+          <div className="mt-1 flex items-center justify-between gap-2">
+            <div className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+              <span>{order.type}</span>
+              <span>·</span>
+              <span className="flex items-center gap-1">
+                <IconButton
+                  label="Decrease guest count"
+                  className="size-5"
+                  disabled={settled}
+                  onClick={() => store.setGuestCount(order.id, order.guests - 1)}
+                >
+                  <Minus className="size-3" />
+                </IconButton>
+                <span className="num">{order.guests} guests</span>
+                <IconButton
+                  label="Increase guest count"
+                  className="size-5"
+                  disabled={settled}
+                  onClick={() => store.setGuestCount(order.id, order.guests + 1)}
+                >
+                  <Plus className="size-3" />
+                </IconButton>
               </span>
-            ) : (
-              <span className="text-muted-foreground">Attach customer (optional)</span>
-            )}
-          </button>
+              <span>· KOT {order.kotRounds}</span>
+            </div>
+            <button
+              onClick={() => setCustomerOpen(true)}
+              title={
+                order.customerName || order.customerPhone
+                  ? `${order.customerName ?? ""} ${order.customerPhone ?? ""}`.trim()
+                  : "Attach customer (optional)"
+              }
+              className="flex min-w-0 items-center gap-1.5 rounded-md bg-surface-muted px-2 py-1 text-left text-xs"
+            >
+              <User className="size-3.5 shrink-0 text-muted-foreground" />
+              {order.customerName || order.customerPhone ? (
+                <span className="truncate">{order.customerName || order.customerPhone}</span>
+              ) : (
+                <span className="truncate text-muted-foreground">Add customer</span>
+              )}
+            </button>
+          </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto p-3 scrollbar-slim">
+        <div className="min-h-0 flex-1 overflow-y-auto p-2 scrollbar-slim">
           {order.lines.length === 0 ? (
             <EmptyState
               compact
@@ -668,7 +693,7 @@ function OrderCartPage() {
               description="Tap menu items on the left to punch them into this order."
             />
           ) : (
-            <div className="space-y-4">
+            <div className="space-y-3">
               {kotGroups.map(([round, lines]) => {
                 // Only a line that hasn't been sent to KOT yet is safe to
                 // reprice or drop a kitchen note onto here - once sent,
@@ -702,156 +727,165 @@ function OrderCartPage() {
                         </>
                       ) : null}
                     </div>
-                    <ul className="space-y-2">
+                    {/* Two short rows per item (name + amount, then price +
+                        controls) so a small screen shows more of the cart. */}
+                    <ul className="space-y-1.5">
                       {lines.map((l) => (
-                        <li key={l.id} className="rounded-xl border border-border p-3">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="flex min-w-0 items-start gap-2">
+                        <li key={l.id} className="rounded-lg border border-border px-2.5 py-2">
+                          <div className="flex items-center gap-2">
+                            {editable ? (
+                              <Checkbox
+                                className="shrink-0"
+                                checked={selectedLineIds.has(l.id)}
+                                onCheckedChange={(checked) =>
+                                  setSelectedLineIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (checked) next.add(l.id);
+                                    else next.delete(l.id);
+                                    return next;
+                                  })
+                                }
+                                aria-label={`Send ${l.name} to the kitchen now`}
+                              />
+                            ) : null}
+                            <p
+                              className="min-w-0 flex-1 truncate text-sm font-medium"
+                              title={l.name}
+                            >
+                              {l.name}
+                            </p>
+                            <Money
+                              value={lineTotal(l)}
+                              className="shrink-0 text-sm font-semibold"
+                            />
+                          </div>
+                          {/* The kitchen refused it (KDS) - staff remove it from the
+                              bill (owner list 2026-09-30 #18). */}
+                          {l.kitchenRejected ? (
+                            <span
+                              data-kitchen-rejected
+                              className="mt-0.5 inline-flex rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold text-destructive"
+                            >
+                              Rejected by kitchen · {l.kitchenRejected}
+                            </span>
+                          ) : null}
+                          <div className="mt-1 flex items-center justify-between gap-2">
+                            <p className="flex min-w-0 flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                              {l.variant ? `${l.variant} · ` : ""}
                               {editable ? (
-                                <Checkbox
-                                  className="mt-0.5 shrink-0"
-                                  checked={selectedLineIds.has(l.id)}
-                                  onCheckedChange={(checked) =>
-                                    setSelectedLineIds((prev) => {
-                                      const next = new Set(prev);
-                                      if (checked) next.add(l.id);
-                                      else next.delete(l.id);
-                                      return next;
-                                    })
-                                  }
-                                  aria-label={`Send ${l.name} to the kitchen now`}
-                                />
+                                <span className="num inline-flex items-center gap-0.5">
+                                  {cs()}
+                                  <input
+                                    defaultValue={l.price}
+                                    key={`${l.id}-price-${l.price}`}
+                                    inputMode="decimal"
+                                    aria-label={`Price for ${l.name}`}
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    onBlur={(e) => {
+                                      const v = Number(e.currentTarget.value);
+                                      if (Number.isFinite(v) && v !== l.price)
+                                        store.setLinePrice(order.id, l.id, v);
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") e.currentTarget.blur();
+                                    }}
+                                    className="num h-5 w-14 rounded border border-border bg-surface px-1 text-xs"
+                                  />
+                                </span>
+                              ) : (
+                                <span className="num">
+                                  {cs()}
+                                  {l.price}
+                                </span>
+                              )}
+                              {l.originTable ? ` · from ${l.originTable}` : ""}
+                            </p>
+                            <div className="flex shrink-0 items-center gap-1">
+                              <IconButton
+                                label="Decrease quantity"
+                                variant="outline"
+                                className="size-7"
+                                disabled={settled}
+                                onClick={() => changeQtyAndMaybeLeave(l, -1)}
+                              >
+                                <Minus className="size-3.5" />
+                              </IconButton>
+                              <QtyInput
+                                value={l.qty}
+                                disabled={settled}
+                                label={`Quantity for ${l.name}`}
+                                // Typed: 10 instead of ten taps, or 1.5. Same path
+                                // as the buttons - 0 removes, with the same delete
+                                // permission for an item already sent.
+                                // Set as an absolute quantity - a difference from a
+                                // stale on-screen qty could apply twice.
+                                onCommit={(q) =>
+                                  q <= 0
+                                    ? changeQtyAndMaybeLeave(l, -l.qty)
+                                    : store.setLineQty(order.id, l.id, q, "biller")
+                                }
+                              />
+                              <IconButton
+                                label="Increase quantity"
+                                variant="outline"
+                                className="size-7"
+                                disabled={settled}
+                                onClick={() => store.changeQty(order.id, l.id, 1, "biller")}
+                              >
+                                <Plus className="size-3.5" />
+                              </IconButton>
+                              {editable &&
+                              (() => {
+                                const mi = store.menuItems.find((m) => m.id === l.itemId);
+                                return mi ? sellableItem(mi, store.addonGroups) : undefined;
+                              })()?.addonGroupIds?.length ? (
+                                <IconButton
+                                  label="Edit addons"
+                                  className="size-7"
+                                  onClick={() => setAddonLineFor(l)}
+                                >
+                                  <Tags className="size-3.5" />
+                                </IconButton>
                               ) : null}
-                              <div className="min-w-0">
-                                <p className="truncate text-sm font-medium">{l.name}</p>
-                                {/* The kitchen refused it (KDS) - staff remove it from the
-                                    bill (owner list 2026-09-30 #18). */}
-                                {l.kitchenRejected ? (
-                                  <span
-                                    data-kitchen-rejected
-                                    className="mt-0.5 inline-flex rounded bg-destructive/10 px-1.5 py-0.5 text-[10px] font-semibold text-destructive"
-                                  >
-                                    Rejected by kitchen · {l.kitchenRejected}
-                                  </span>
-                                ) : null}
-                                <p className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                                  {l.variant ? `${l.variant} · ` : ""}
-                                  {editable ? (
-                                    <span className="num inline-flex items-center gap-0.5">
-                                      {cs()}
-                                      <input
-                                        defaultValue={l.price}
-                                        key={`${l.id}-price-${l.price}`}
-                                        inputMode="decimal"
-                                        aria-label={`Price for ${l.name}`}
-                                        onFocus={(e) => e.currentTarget.select()}
-                                        onBlur={(e) => {
-                                          const v = Number(e.currentTarget.value);
-                                          if (Number.isFinite(v) && v !== l.price)
-                                            store.setLinePrice(order.id, l.id, v);
-                                        }}
-                                        onKeyDown={(e) => {
-                                          if (e.key === "Enter") e.currentTarget.blur();
-                                        }}
-                                        className="num h-5 w-14 rounded border border-border bg-surface px-1 text-xs"
-                                      />
-                                    </span>
-                                  ) : (
-                                    <span className="num">{cs()}{l.price}</span>
-                                  )}
-                                  {l.originTable ? ` · from ${l.originTable}` : ""}
-                                </p>
-                                {l.addons?.length ? (
-                                  <p className="text-[11px] text-muted-foreground">
-                                    + {l.addons.map(addonLabel).join(", ")}
-                                  </p>
-                                ) : null}
-                                {l.note ? (
-                                  <p className="mt-1 whitespace-pre-wrap break-words text-[11px] italic text-warning">
-                                    “{l.note}”
-                                  </p>
-                                ) : null}
-                              </div>
-                            </div>
-                            <div className="flex flex-col items-end gap-2">
-                              <Money value={lineTotal(l)} className="text-sm font-semibold" />
-                              <div className="flex items-center gap-1">
+                              {editable ? (
                                 <IconButton
-                                  label="Decrease quantity"
-                                  variant="outline"
+                                  label="Add note"
                                   className="size-7"
-                                  disabled={settled}
-                                  onClick={() => changeQtyAndMaybeLeave(l, -1)}
+                                  onClick={() => setNoteLineFor(l)}
                                 >
-                                  <Minus className="size-3.5" />
+                                  <StickyNote className="size-3.5" />
                                 </IconButton>
-                                <QtyInput
-                                  value={l.qty}
-                                  disabled={settled}
-                                  label={`Quantity for ${l.name}`}
-                                  // Typed: 10 instead of ten taps, or 1.5. Same path
-                                  // as the buttons - 0 removes, with the same delete
-                                  // permission for an item already sent.
-                                  // Set as an absolute quantity - a difference from a
-                                  // stale on-screen qty could apply twice.
-                                  onCommit={(q) =>
-                                    q <= 0
-                                      ? changeQtyAndMaybeLeave(l, -l.qty)
-                                      : store.setLineQty(order.id, l.id, q, "biller")
+                              ) : null}
+                              <IconButton
+                                label="Remove line"
+                                className="size-7 text-primary"
+                                disabled={settled}
+                                onClick={() => {
+                                  // Already sent to the kitchen - confirm
+                                  // first (task 37), rather than silently
+                                  // pulling an item the kitchen may
+                                  // already be preparing or has printed.
+                                  if (l.kotRound <= order.kotRounds) {
+                                    setRemoveTarget(l);
+                                    return;
                                   }
-                                />
-                                <IconButton
-                                  label="Increase quantity"
-                                  variant="outline"
-                                  className="size-7"
-                                  disabled={settled}
-                                  onClick={() => store.changeQty(order.id, l.id, 1, "biller")}
-                                >
-                                  <Plus className="size-3.5" />
-                                </IconButton>
-                                {editable &&
-                                (() => {
-                                  const mi = store.menuItems.find((m) => m.id === l.itemId);
-                                  return mi ? sellableItem(mi, store.addonGroups) : undefined;
-                                })()?.addonGroupIds?.length ? (
-                                  <IconButton
-                                    label="Edit addons"
-                                    className="size-7"
-                                    onClick={() => setAddonLineFor(l)}
-                                  >
-                                    <Tags className="size-3.5" />
-                                  </IconButton>
-                                ) : null}
-                                {editable ? (
-                                  <IconButton
-                                    label="Add note"
-                                    className="size-7"
-                                    onClick={() => setNoteLineFor(l)}
-                                  >
-                                    <StickyNote className="size-3.5" />
-                                  </IconButton>
-                                ) : null}
-                                <IconButton
-                                  label="Remove line"
-                                  className="size-7 text-primary"
-                                  disabled={settled}
-                                  onClick={() => {
-                                    // Already sent to the kitchen - confirm
-                                    // first (task 37), rather than silently
-                                    // pulling an item the kitchen may
-                                    // already be preparing or has printed.
-                                    if (l.kotRound <= order.kotRounds) {
-                                      setRemoveTarget(l);
-                                      return;
-                                    }
-                                    removeLastLineAndMaybeLeave(l.id);
-                                  }}
-                                >
-                                  <Trash2 className="size-3.5" />
-                                </IconButton>
-                              </div>
+                                  removeLastLineAndMaybeLeave(l.id);
+                                }}
+                              >
+                                <Trash2 className="size-3.5" />
+                              </IconButton>
                             </div>
                           </div>
+                          {l.addons?.length ? (
+                            <p className="mt-0.5 text-[11px] text-muted-foreground">
+                              + {l.addons.map(addonLabel).join(", ")}
+                            </p>
+                          ) : null}
+                          {l.note ? (
+                            <p className="mt-0.5 whitespace-pre-wrap break-words text-[11px] italic text-warning">
+                              “{l.note}”
+                            </p>
+                          ) : null}
                         </li>
                       ))}
                     </ul>
@@ -862,8 +896,17 @@ function OrderCartPage() {
           )}
         </div>
 
-        <div className="border-t border-border p-4">
-          <dl className="space-y-1.5 text-sm">
+        <div className="border-t border-border p-3">
+          {/* On a short screen (small PC) the breakdown folds behind
+              "Details" so the cart keeps room for items; a tall screen
+              always shows it. */}
+          <dl
+            id="bill-breakdown"
+            className={cn(
+              "mb-2 space-y-1 border-b border-border pb-2 text-sm",
+              !breakdownOpen && "hidden [@media(min-height:900px)]:block",
+            )}
+          >
             <Row label="Subtotal" value={totals.subtotal} />
             {totals.discount ? (
               <Row label={`Discount (${order.discount?.label})`} value={-totals.discount} />
@@ -914,12 +957,26 @@ function OrderCartPage() {
             {totals.taxLines.map((tx) => (
               <Row key={tx.id} label={tx.name} value={tx.amount} />
             ))}
-            <div className="flex items-center justify-between border-t border-border pt-2 text-base font-semibold">
-              <dt>Total</dt>
-              <dd>
-                <Money value={totals.grand} />
-              </dd>
-            </div>
+          </dl>
+          <dl className="flex items-center justify-between text-base font-semibold">
+            <dt className="flex items-center gap-2">
+              Total
+              <button
+                type="button"
+                aria-expanded={breakdownOpen}
+                aria-controls="bill-breakdown"
+                onClick={() => setBreakdownOpen((v) => !v)}
+                className="inline-flex items-center gap-0.5 rounded px-1 text-xs font-medium text-muted-foreground hover:text-primary [@media(min-height:900px)]:hidden"
+              >
+                {breakdownOpen ? "Hide details" : "Details"}
+                <ChevronDown
+                  className={cn("size-3.5 transition-transform", breakdownOpen && "rotate-180")}
+                />
+              </button>
+            </dt>
+            <dd>
+              <Money value={totals.grand} />
+            </dd>
           </dl>
 
           {order.editingSettledOrderId ? (
@@ -956,69 +1013,84 @@ function OrderCartPage() {
               </Button>
             </div>
           ) : (
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            // Compact tiles, 4 to a row, so the actions take two rows and
+            // leave room for cart items on a small screen.
+            <div className="mt-2 grid grid-cols-4 gap-1.5">
               <Button
                 variant="outline"
+                className={actionTile}
                 disabled={settled}
                 onClick={() => {
                   store.holdOrder(order.id);
                   goToTables();
                 }}
               >
-                <Pause className="size-4" /> Hold
+                <Pause /> Hold
               </Button>
               <Button
                 variant="outline"
+                className={actionTile}
                 disabled={settled || !order.lines.length}
                 onClick={() => {
                   void store.generateBill(order.id).then(() => goToTables());
                 }}
               >
-                <Save className="size-4" /> Save
-              </Button>
-              <Button variant="outline" disabled={settled} onClick={() => setDiscountOpen(true)}>
-                <BadgePercent className="size-4" /> Discount
+                <Save /> Save
               </Button>
               <Button
                 variant="outline"
+                className={actionTile}
                 disabled={settled}
-                onClick={() => {
-                  const ids = [...selectedLineIds];
-                  store.generateKot(order.id, ids.length ? { lineIds: ids } : undefined);
-                  setSelectedLineIds(new Set());
-                  // A full send (nothing individually checked) keeps the
-                  // original "fire everything, move on" flow. Sending just
-                  // the checked items stays on this order instead - the
-                  // whole point of checking only some was to keep adding to
-                  // or sending the rest of this same order afterward.
-                  if (!ids.length) goToTables();
-                }}
-                className={cn(pendingRound && "border-primary text-primary")}
+                onClick={() => setDiscountOpen(true)}
               >
-                <ChefHat className="size-4" />{" "}
-                {selectedLineIds.size ? `Send KOT (${selectedLineIds.size})` : "Send KOT"}
+                <BadgePercent /> Discount
               </Button>
               <Button
                 variant="outline"
+                className={actionTile}
                 disabled={!order.customerPhone || !order.lines.length}
                 onClick={() => {
                   void store.sendEBill(order.id);
                   goToTables();
                 }}
               >
-                <Send className="size-4" /> E-Bill
+                <Send /> E-Bill
+              </Button>
+              <Button
+                variant="outline"
+                disabled={settled}
+                onClick={() => fireKot(false)}
+                title="Print on the KOT printer and show on the kitchen display"
+                className={cn(actionTile, pendingRound && "border-primary text-primary")}
+              >
+                <ChefHat />
+                {selectedLineIds.size ? `Send KOT (${selectedLineIds.size})` : "Send KOT"}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={settled}
+                onClick={() => fireKot(true)}
+                title="Add to the order only - no KOT print, not sent to the kitchen display"
+                className={cn(
+                  actionTile,
+                  "border-primary/30 bg-primary-soft text-primary-soft-foreground hover:bg-primary-soft/80",
+                )}
+              >
+                <ChefHat />
+                {selectedLineIds.size ? `Only KOT (${selectedLineIds.size})` : "Only KOT"}
               </Button>
               <Button
                 variant="secondary"
+                className={actionTile}
                 disabled={settled || !order.lines.length}
                 onClick={() => {
                   void store.generateBill(order.id, { print: true }).then(() => goToTables());
                 }}
               >
-                <Printer className="size-4" /> Bill Print
+                <Printer /> Bill Print
               </Button>
               <Button
-                className="col-span-2"
+                className={actionTile}
                 disabled={settled || !order.lines.length}
                 onClick={() => {
                   // Same "this button seeds row zero itself, bypassing
@@ -1037,16 +1109,8 @@ function OrderCartPage() {
                   setSettleOpen(true);
                 }}
               >
-                <Wallet className="size-4" />{" "}
-                {isRefund ? (
-                  <>
-                    Refund · <Money value={Math.abs(balance)} />
-                  </>
-                ) : (
-                  <>
-                    Settle · <Money value={balance} />
-                  </>
-                )}
+                <span className="font-semibold">{isRefund ? "Refund" : "Settle"}</span>
+                <Money value={isRefund ? Math.abs(balance) : balance} className="num text-[11px]" />
               </Button>
             </div>
           )}
@@ -1132,7 +1196,13 @@ function OrderCartPage() {
                 const routeProblem = customRouteProblem(customStations, customRoute);
                 setCustomRouteError(routeProblem);
                 if (!valid || routeProblem) return;
-                store.addCustomLine(order.id, customName.trim(), customPrice, customQty, customRoute);
+                store.addCustomLine(
+                  order.id,
+                  customName.trim(),
+                  customPrice,
+                  customQty,
+                  customRoute,
+                );
                 setCustomItemOpen(false);
               }}
             >
@@ -1193,8 +1263,8 @@ function OrderCartPage() {
           <DialogHeader>
             <DialogTitle>Service charge</DialogTitle>
             <DialogDescription>
-              Service charge is not automatic for this order type - enter it for this order. 0
-              means no service charge.
+              Service charge is not automatic for this order type - enter it for this order. 0 means
+              no service charge.
             </DialogDescription>
           </DialogHeader>
           <div>
@@ -1267,7 +1337,11 @@ function OrderCartPage() {
                         variant === v.name ? "border-primary bg-primary-soft" : "border-border",
                       )}
                     >
-                      {v.name} · <span className="num">{cs()}{v.price}</span>
+                      {v.name} ·{" "}
+                      <span className="num">
+                        {cs()}
+                        {v.price}
+                      </span>
                     </button>
                   ))}
               </div>
@@ -1594,7 +1668,9 @@ function OrderCartPage() {
               onClick={() => {
                 if (settleCheck.problem) {
                   toast.error(
-                    isRefund ? "Refund does not match the total" : "Payment does not match the bill",
+                    isRefund
+                      ? "Refund does not match the total"
+                      : "Payment does not match the bill",
                     { description: settleCheck.problem },
                   );
                   return;
@@ -1673,6 +1749,10 @@ function OrderCartPage() {
     </div>
   );
 }
+
+/** Small icon-over-label action button for the cart footer. */
+const actionTile =
+  "h-auto min-h-12 flex-col gap-1 whitespace-normal px-1 py-1.5 text-xs leading-tight";
 
 function Row({ label, value }: { label: string; value: number }) {
   return (
