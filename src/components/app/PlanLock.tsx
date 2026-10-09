@@ -71,12 +71,12 @@ export function PlanLock() {
   return (
     <div role="alertdialog" aria-modal="true" aria-label="BillerPe plan ended" className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-6 backdrop-blur">
       <div className="w-full max-w-md rounded-2xl border bg-card p-8 text-center shadow-xl">
-        <h1 className="text-2xl font-bold">Your BillerPe plan has ended</h1>
+        <h1 className="text-2xl font-bold">{plan.reason === "unpaid" ? "Your payment to BillerPe is pending" : "Your BillerPe plan has ended"}</h1>
         <p className="mt-2 text-sm text-muted-foreground">{plan.message || "The software is locked until the plan is renewed."}</p>
         {plan.outlet ? <p className="mt-1 text-sm font-semibold">{plan.outlet}</p> : null}
         <div className="mt-6 flex flex-col gap-3">
           <Button size="lg" disabled={!!busy} onClick={() => void pay()}>
-            {busy === "pay" ? <Loader2 className="size-5 animate-spin" /> : <CreditCard className="size-5" />} Renew now (pay online)
+            {busy === "pay" ? <Loader2 className="size-5 animate-spin" /> : <CreditCard className="size-5" />} {plan.reason === "unpaid" ? "Pay now (online)" : "Renew now (pay online)"}
           </Button>
           {plan.canExtend ? (
             <Button

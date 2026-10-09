@@ -22,6 +22,7 @@ export const EXE_BASE_URL: string = import.meta.env["VITE_EXE_BASE_URL"] ?? "htt
 // address like http://192.168.1.12:8080, which this POS is routinely
 // accessed at on a restaurant's own local network. Falls back to a manual
 // RFC4122 v4 generator there instead of failing every login on that origin.
+
 function randomUUID(): string {
   if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -38,6 +39,7 @@ function randomUUID(): string {
 // physical server PC instead. Shared here (rather than duplicated in
 // login.tsx and the System page's re-authenticate action) since both now
 // need to call registerDevice with the same value.
+
 export function getBrowserDeviceId(): string {
   if (typeof window === "undefined") return "server";
   const key = "billerpe.deviceId";
@@ -112,6 +114,8 @@ export interface PlanState {
   inGrace: boolean;
   graceUsed: boolean;
   canExtend: boolean;
+  /** "unpaid" = locked because the first invoice is not paid (owner 2026-10-09). */
+  reason?: string | null;
   offlineExtension?: boolean;
   message: string | null;
 }
