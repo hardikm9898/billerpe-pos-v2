@@ -48,7 +48,8 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { menuApi, type RawProductImage } from "@/lib/api";
+import { MatchPhotosDialog, PhotoSearchDialog } from "@/components/billing/menu-photos";
+import { photoSrc } from "@/lib/photos";
 import { downloadTextFile, parseCsv, toCsv } from "@/lib/csv";
 import { cn } from "@/lib/utils";
 import { toShortCode, useStore } from "@/mock/store";
@@ -173,6 +174,7 @@ function MenuItemsPage() {
   );
   const importing = importProgress !== null;
   const [imagePickerOpen, setImagePickerOpen] = useState(false);
+  const [matchOpen, setMatchOpen] = useState(false);
 
   const defaultMenuId = store.menus.find((m) => m.isDefault)?.id ?? store.menus[0]?.id ?? "";
   const [viewMenuId, setViewMenuId] = useState(defaultMenuId);
@@ -273,6 +275,9 @@ function MenuItemsPage() {
         description="Price, variants and availability for every dish on the biller grid. Kitchen routing is set by category in Operations."
         actions={
           <>
+            <Button hidden={!access.edit} variant="outline" onClick={() => setMatchOpen(true)}>
+              <ImageIcon className="size-4" /> Match photos
+            </Button>
             <Button variant="outline" onClick={exportMenuCsv}>
               <Download className="size-4" /> Export CSV
             </Button>
@@ -436,7 +441,7 @@ function MenuItemsPage() {
                   <div className="flex items-center gap-2">
                     {i.imageUrl ? (
                       <img
-                        src={i.imageUrl}
+                        src={photoSrc(i.imageUrl, true)}
                         alt=""
                         className="size-7 shrink-0 rounded-md object-cover"
                         onError={(e) => {
@@ -633,15 +638,15 @@ function MenuItemsPage() {
               </div>
 
               <div className="space-y-1.5">
-                <Label>Image (optional)</Label>
+                <Label>Photo (optional, from BillerPe's library)</Label>
                 <div className="flex items-center gap-3">
                   <Button type="button" variant="outline" onClick={() => setImagePickerOpen(true)}>
-                    <ImageIcon className="size-4" /> Select image
+                    <ImageIcon className="size-4" /> {draft.imageUrl ? "Change photo" : "Choose photo"}
                   </Button>
                   {draft.imageUrl ? (
                     <div className="relative">
                       <img
-                        src={draft.imageUrl}
+                        src={photoSrc(draft.imageUrl, true)}
                         alt=""
                         className="size-11 shrink-0 rounded-lg border border-border object-cover"
                         onError={(e) => {
@@ -1051,114 +1056,21 @@ function MenuItemsPage() {
         </DialogContent>
       </Dialog>
 
-      <ImagePickerDialog
+      <PhotoSearchDialog
         open={imagePickerOpen}
         onOpenChange={setImagePickerOpen}
+        itemName={draft?.name || ""}
         onSelect={(url) => {
           if (!draft) return;
           setDraft({ ...draft, imageUrl: url });
         }}
       />
+      <MatchPhotosDialog
+        open={matchOpen}
+        onOpenChange={setMatchOpen}
+        items={store.menuItems}
+        save={(item, url) => store.upsertMenuItem({ ...item, imageUrl: url })}
+      />
     </Page>
-  );
-}
-
-// Same "search a shared photo library" facility the legacy system's own
-// Menu Item form had (uat-frontend's Menu.js) - GET /getProductImages/
-// reads a shared, cloud-curated stock-image catalogue (hms_image_mst, no
-// hotel_id), not a per-item file upload. There's no upload endpoint or
-// large-enough column anywhere in this backend for real device photo
-// upload (foodImage is a VARCHAR(255)) - this replicates the working
-// legacy facility rather than building a new upload feature.
-function ImagePickerDialog({
-  open,
-  onOpenChange,
-  onSelect,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSelect: (url: string) => void;
-}) {
-  const [search, setSearch] = useState("");
-  const [debounced, setDebounced] = useState("");
-  const [images, setImages] = useState<RawProductImage[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(search), 300);
-    return () => clearTimeout(t);
-  }, [search]);
-
-  useEffect(() => {
-    if (!open) {
-      setSearch("");
-      setDebounced("");
-      setImages([]);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    menuApi
-      .getProductImages(debounced)
-      .then(({ data }) => {
-        if (!cancelled) setImages(data);
-      })
-      .catch(() => {
-        if (!cancelled) setImages([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, debounced]);
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Select image</DialogTitle>
-          <DialogDescription>Search a shared photo library by dish name.</DialogDescription>
-        </DialogHeader>
-        <Input
-          autoFocus
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="e.g. Pizza, Burger, Sushi"
-        />
-        <div className="grid max-h-80 grid-cols-4 gap-2 overflow-y-auto sm:grid-cols-5">
-          {loading ? (
-            <p className="col-span-full py-8 text-center text-sm text-muted-foreground">
-              Searching…
-            </p>
-          ) : images.length ? (
-            images.map((img) => (
-              <button
-                key={img.id}
-                type="button"
-                onClick={() => {
-                  onSelect(img.url);
-                  onOpenChange(false);
-                }}
-                title={img.name}
-                className="aspect-square overflow-hidden rounded-lg border border-border transition hover:border-primary"
-              >
-                <img
-                  src={img.url}
-                  alt={img.name}
-                  loading="lazy"
-                  className="size-full object-cover"
-                />
-              </button>
-            ))
-          ) : (
-            <p className="col-span-full py-8 text-center text-sm text-muted-foreground">
-              {search ? "No matching images found." : "Type a food name to see image suggestions."}
-            </p>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }

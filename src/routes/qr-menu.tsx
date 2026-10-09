@@ -45,8 +45,11 @@ import {
 // a menu item's foodImage was hand-typed as one (MenuItemPayload.imageUrl
 // is free text, not guaranteed to be an uploaded filename the way
 // hotel_logo always is).
-function resolveImageUrl(value: string | null | undefined): string | null {
+function resolveImageUrl(value: string | null | undefined, small = false): string | null {
   if (!value) return null;
+  // BillerPe's menu photo library (owner 2026-10-09): the list uses the small copy.
+  const lib = value.match(/^(.*\/menu-photos\/[a-z0-9-]+?)(-t)?\.webp$/);
+  if (lib) return `${/^https?:/.test(lib[1]!) ? "" : API_BASE_URL}${lib[1]}${small ? "-t" : ""}.webp`;
   if (/^https?:\/\//.test(value)) return value;
   return `${API_BASE_URL}/images/${value}`;
 }
@@ -797,7 +800,7 @@ function QrMenuPage() {
                         >
                           {resolveImageUrl(item.foodImage) ? (
                             <img
-                              src={resolveImageUrl(item.foodImage)!}
+                              src={resolveImageUrl(item.foodImage, true)!}
                               alt={item.item_name}
                               className="size-14 shrink-0 rounded-lg object-cover"
                             />

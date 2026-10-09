@@ -168,6 +168,9 @@ const EXE_ROUTES: { method: "GET" | "POST" | "PUT" | "DELETE"; test: (path: stri
     // The plan lock screen (billerpe-local-exe routes/plan.js).
     { method: "GET", test: (p) => p === "/plan/status" },
     { method: "POST", test: (p) => p === "/plan/check" || p === "/plan/extend" || p === "/plan/pay" },
+    // Menu photos (billerpe-local-exe routes/photos.js): the billing-photos choice, "Match photos", asking for a photo.
+    { method: "GET", test: (p) => p === "/photos/prefs" },
+    { method: "POST", test: (p) => p === "/photos/prefs" || p === "/photos/suggest" || p === "/photos/request" },
     { method: "GET", test: (p) => p === "/table" },
     { method: "POST", test: (p) => p === "/table" },
     { method: "GET", test: (p) => p === "/getTableCatagories" },
@@ -1650,7 +1653,7 @@ export type RawMenuCatalog = {
 // server, this now routes to the EXE (EXE_ROUTES) purely as a relay
 // (services/cloudRelay.js) - the real endpoint and its data stay
 // cloud-side, only the browser<->cloud auth gap moved server-to-server.
-export type RawProductImage = { id: number; name: string; url: string };
+export type RawProductImage = { id: number; name: string; url: string; thumb?: string; match?: boolean };
 
 export type RawMenuItem = {
   id: number;
@@ -3152,6 +3155,15 @@ export type RawExeUpdateStatus = {
   lastResult: { ok: boolean; version: string; from: string; reason: string } | null;
   /** "02:00-06:00" */
   night: string;
+};
+
+/** BillerPe's menu photo library (owner 2026-10-09): outlets search and pick, never upload. */
+export type PhotoSuggestion = { key: string; name: string; sure: boolean; best: { id: number; name: string; url: string; thumb: string; score?: number } | null; options: { id: number; name: string; url: string; thumb: string; score?: number }[] };
+export const photoApi = {
+  prefs: () => apiGet<{ billingPhotos: boolean }>("/photos/prefs"),
+  setPrefs: (billingPhotos: boolean) => apiPost<{ billingPhotos: boolean }>("/photos/prefs", { billingPhotos }),
+  suggest: (items: { key: string; name: string; veg?: string }[]) => apiPost<{ items: PhotoSuggestion[] }>("/photos/suggest", { items }),
+  request: (itemName: string) => apiPost<{ requested: boolean; already: boolean }>("/photos/request", { itemName }),
 };
 
 export const planApi = {

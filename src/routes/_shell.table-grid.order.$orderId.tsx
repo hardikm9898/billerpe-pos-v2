@@ -85,6 +85,8 @@ import { cn } from "@/lib/utils";
 import { lineTotal, orderTotals, parseOrderAddons, serviceIsManual, useStore } from "@/mock/store";
 import type { MenuItem, OrderLine, PaymentSplit } from "@/mock/types";
 import { cs, numLocale } from "@/lib/currency";
+import { ItemPhoto } from "@/components/billing/menu-photos";
+import { useBillingPhotos } from "@/lib/photos";
 
 export const Route = createFileRoute("/_shell/table-grid/order/$orderId")({
   head: () => ({
@@ -137,6 +139,8 @@ function prefillEditSplits(
 }
 
 function OrderCartPage() {
+  // Menu photos on the tiles (the outlet's choice, on by default; owner 2026-10-09).
+  const billingPhotos = useBillingPhotos();
   const { orderId } = Route.useParams();
   const store = useStore();
   const navigate = useNavigate();
@@ -572,6 +576,9 @@ function OrderCartPage() {
                   onClick={() => addToCart(item)}
                   className="flex flex-col justify-between rounded-xl border border-border bg-surface p-3 text-left shadow-card transition-colors hover:border-primary/40 disabled:opacity-50"
                 >
+                  {billingPhotos ? (
+                    <ItemPhoto item={item} className="-mx-1 -mt-1 mb-2 h-24 w-[calc(100%+0.5rem)] rounded-lg text-2xl" />
+                  ) : null}
                   <div className="flex items-start justify-between gap-2">
                     <span
                       className={cn(
